@@ -29,18 +29,23 @@ public struct RenderSettings: Sendable {
     /// Previous frame camera used for motion vector output.
     public var previousCamera: Camera?
 
+    /// Whether primary camera rays that miss the scene should export with zero alpha.
+    public var transparentBackground: Bool
+
     /// Creates render settings.
     public init(
         width: Int = 512,
         height: Int = 512,
         maxBounces: Int = 4,
         quality: RenderQuality = .preview,
-        previousCamera: Camera? = nil
+        previousCamera: Camera? = nil,
+        transparentBackground: Bool = false
     ) {
         self.width = width
         self.height = height
         self.maxBounces = maxBounces
         self.quality = quality
         self.previousCamera = previousCamera
+        self.transparentBackground = transparentBackground
     }
 }

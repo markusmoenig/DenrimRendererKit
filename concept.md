@@ -135,6 +135,8 @@ Scene/
 * Light.swift
 * Material.swift
 * Texture.swift
+* ProceduralMaterial.swift
+* MaterialGraph.swift
 
 Geometry/
 
@@ -151,6 +153,7 @@ Acceleration/
 * BVHBuilder.swift
 * MetalAccelerationBuilder.swift
 * AccelerationBackend.swift
+* MetalRayTracingAccelerationBackend.swift
 
 Metal/
 
@@ -183,6 +186,7 @@ Documentation/
 * Geometry.md
 * Outputs.md
 * Testing.md
+* Performance.md
 * WebsiteExport.md
 
 Tests/
@@ -284,6 +288,7 @@ Test categories:
 * Reference image tests for known scenes
 * Visual evaluation renders for material, lighting, and global illumination behavior
 * Performance benchmarks for sample throughput and acceleration builds
+* Persistent benchmark JSON outputs for device-specific historical comparison
 
 Render tests should produce images.
 
@@ -319,6 +324,7 @@ Reference images should not be treated as perfect truth for all time. Path trace
 * Manual visual approval for major renderer improvements
 * Stored before/after images for important quality changes
 * Optional benchmark baselines per device class
+* Explicit timing splits for scene loading, acceleration/session build, and sample rendering
 
 Visual evaluation should become part of development culture.
 
@@ -557,7 +563,7 @@ High quality rendering requires strong acceleration structures.
 
 Acceleration should be represented internally by a backend abstraction.
 
-The first implementation can use a CPU-built flat BVH with GPU traversal. Later implementations can use Apple Metal ray tracing acceleration structures and Metal 4 APIs where available.
+The first implementation can use a CPU-built flat BVH with GPU traversal. The current architecture already has a guarded Metal ray tracing acceleration-structure path behind the acceleration backend: it maps local mesh records to Metal triangle geometry descriptors, builds BLAS resources, builds a TLAS over scene instances, includes a small hardware traversal probe that can be compared against CPU intersection, and uses a production hardware traversal kernel when the device supports it. The flat BVH render path remains the compatibility fallback. Later implementations should harden hardware-path parity, add more scene coverage, and adopt Metal 4 APIs where available.
 
 Conceptually:
 
@@ -577,11 +583,21 @@ Phase 1:
 
 Phase 2:
 
-* Metal ray tracing integration
 * TLAS / BLAS style hierarchy
 * Instance acceleration
+* Metal ray tracing descriptor and sizing experiments
+* Guarded Metal BLAS/TLAS resource builds
+* Minimal hardware traversal probe with CPU reference comparison
+
+Phase 3:
+
+* Metal ray tracing integration in the production path tracing shader
 * Hardware acceleration where available
 * Software fallback where required
+* Render session backend selection between hardware TLAS traversal and flat BVH traversal
+* Initial hardware-vs-flat-BVH primary AOV parity test
+* Built-in Cornell/material reference scene primary AOV parity tests
+* Hardware-vs-flat-BVH beauty/direct-lighting parity metrics for reference scenes
 
 Future:
 
@@ -618,7 +634,7 @@ Render settings may allow users to request quality and behavior, but not require
 
 Materials
 
-Start simple.
+Start simple, but design the public API and scripting system so procedural material inputs can grow without a breaking rewrite.
 
 Material properties:
 
@@ -629,14 +645,71 @@ Material properties:
 * Emission
 * Opacity
 
-Future:
+Version 1 material inputs:
 
 * Textures
 * Normal maps
-* Material layering
-* Principled shading
+* Simple generated textures
+* Script-authored procedural masks
 
-Avoid node-based materials in the first versions.
+Future:
+
+* Procedural noise, ramps, curvature, object-space, world-space, and triplanar inputs
+* Material layering
+* Principled shading / Denrim Standard Surface
+* Material graph compilation and diagnostics
+
+Procedural material support should be exposed through both:
+
+* Swift API builders for Denrim apps
+* SceneScript commands for tests, examples, automation, and Denrim Render
+
+The scripting system should not merely assign fixed scalar material fields. It should be able to define reusable procedural values and bind them into material parameters.
+
+Example SceneScript direction:
+
+```text
+proc noise marbleNoise noise3d scale 18 octaves 5 seed 7 space object
+proc ramp marbleRamp marbleNoise 0.0 0.18 0.12 0.08 1.0 0.9 0.82 0.68
+proc noise scratchMask noise2d scale 90 octaves 3 seed 12 space uv
+
+material marble 1 1 1 roughness 0.38 specular 0.5 baseColorProc marbleRamp
+material brushedMetal 0.8 0.76 0.68 metallic 1 roughnessProc scratchMask
+```
+
+Example Swift API direction:
+
+```swift
+let noise = ProceduralValue.noise3D(scale: 18, octaves: 5, seed: 7, space: .object)
+let marble = ProceduralColor.ramp(noise, stops: [
+    .init(0.0, SIMD3<Float>(0.18, 0.12, 0.08)),
+    .init(1.0, SIMD3<Float>(0.9, 0.82, 0.68))
+])
+
+let material = Material.standardSurface(
+    baseColor: .procedural(marble),
+    roughness: .constant(0.38),
+    specular: .constant(0.5)
+)
+```
+
+The initial procedural model should be deliberately bounded:
+
+* Constant values
+* Solid colors
+* Checker patterns
+* 2D / 3D noise
+* Fractal noise
+* Ramps / color gradients
+* Mix, multiply, add, clamp, remap
+* UV, object-space, world-space, and triplanar coordinates
+* Bump / normal perturbation from procedural height
+
+These should compile into a compact GPU representation used by the same Metal material evaluation code as image textures. SceneScript and Swift should create the same intermediate representation so examples and app-authored scenes behave identically.
+
+Procedural graphs should be deterministic, serializable, and suitable for visual regression scenes. Seeds, coordinate spaces, scale, and filtering behavior must be explicit.
+
+Avoid an open-ended node editor or arbitrary user shader language in the first versions. Start with a small, typed procedural material graph that is scriptable, testable, and GPU-friendly.
 
 Lights
 
@@ -840,7 +913,8 @@ Phase 3
 
 Metal ray tracing backend.
 
-* Metal acceleration structures
+* Metal acceleration structure descriptor planning
+* Real Metal acceleration structure builds
 * TLAS / BLAS style instances
 * Hardware acceleration where available
 * CPU BVH fallback where required
@@ -854,6 +928,8 @@ Lighting and materials.
 * Principled material
 * Area lights
 * Emissive materials
+* Procedural material inputs through both Swift API and SceneScript
+* Procedural masks/noise/ramps for base color, roughness, metallic, specular, opacity, clearcoat, emission, and bump/normal inputs
 * Multiple bounces
 * Importance sampling
 * HDR environment foundation
@@ -969,28 +1045,72 @@ Implemented:
 * Public renderer, render session, render settings, scene, camera, transform, mesh, material, ray, and surface hit APIs
 * Public render output API for beauty, depth, normal, albedo, material ID, object ID, and motion vector
 * Public floating-point output pixel readback
+* Wavefront OBJ and PLY mesh import through `Mesh(contentsOf:)`
 * Built-in Cornell Box scene
 * Small line-based scene scripting language for test scenes and automation
 * Reusable scene script includes/fragments with caller-provided resolution
+* Scene script solid/checker texture definitions and material texture bindings
+* Scene script image texture definitions with caller-provided base URL resolution
+* Scene script OBJ/PLY mesh asset definitions and imported mesh instances with caller-provided base URL resolution
+* Scene script file parsing with script-relative include, texture, and mesh asset resolution
+* Scene script named/grouped geometry arguments with comma separators for camera, quad, box, and instance commands
+* Scene script explicit sRGB/linear image decoding and nearest/linear sampler selection
+* Scene script material specular color and IOR parameters
+* Scene script clearcoat weight, roughness, and IOR parameters
 * Metal compute path tracing kernel
 * Progressive accumulation
 * Diffuse triangle surfaces
+* Mesh UV coordinates and per-triangle tangent frames for material evaluation
 * GGX-style rough metallic path sampling using material roughness and metallic parameters
 * Schlick Fresnel weighting for direct light evaluation and specular bounce sampling
+* Material-controlled dielectric specular weight, specular color, and index of refraction for GGX Fresnel F0
+* Material-controlled clearcoat weight, roughness, and index of refraction as a secondary GGX coating lobe
+* In-memory `Texture2D` inputs for base color textures and tangent-space normal maps
+* ImageIO texture asset loading into `Texture2D`
+* Explicit sRGB-to-linear and linear texture import paths for color textures and data textures
+* Metal nearest and bilinear texture sampling path shared by the flat BVH and hardware TLAS kernels
+* Scene script nearest/linear sampler selection for generated textures
 * Emissive triangle lights
 * Direct area-light sampling
-* Built-in material reference scene for diffuse, GGX-style rough metallic, and emissive baseline checks
+* Compiled emissive triangle light list shared by the flat BVH and hardware TLAS direct-light kernels
+* Built-in material reference scene for diffuse, GGX-style rough metallic, specular tint / IOR, clearcoat control, and emissive baseline checks
+* Material-variant reference scene for rendering one caller-supplied mesh with matte, plastic, metallic, polished, and clearcoat material variants
+* Bundled SceneScript material-variant template with reusable material include, self-contained PLY fixture, and checked-in rendered output for visual validation
+* Persistent example SceneScript and render-output folder for future examples and references
+* Stanford Dragon example scene and fetch script for local benchmark rendering
+* Built-in transparent material reference scene for opacity, cutout, and future transmission/refraction planning
+* MoonRay-inspired material roadmap in `Documentation/Materials.md`
 * Box mesh primitive for reference scenes
 * PNG export
+* Transparent beauty export with alpha-preserving PNG output
+* Material opacity preserved in albedo AOV alpha and albedo PNG export
+* Fully transparent alpha-cutout camera-ray pass-through for rear-surface visibility
 * Command line preview renderer
+* Command line preview rendering for SceneScript files with relative asset resolution
 * Unit tests for API defaults and scene construction
+* Unit tests for OBJ mesh import, ASCII PLY import, binary little-endian PLY import, quad triangulation, relative indices, and unsupported format reporting
+* Unit tests for material specular color / IOR / clearcoat GPU parameter packing
+* Texture asset loading tests for image dimensions, alpha, missing files, and sRGB/linear import behavior
 * CPU triangle intersection reference tests
 * Render smoke test with image decoding and orientation regression check
 * Material reference render smoke test with image decoding and color variation checks
 * Stored metric baselines for Cornell Box and material reference render tests
 * Tolerant reference metric comparison for visual regression testing
+* Stored scripted UV/normal-map AOV metric baselines for texture visual regression testing
+* Stored transparent export alpha metric baseline
 * Internal AOV textures for depth, normal, albedo, material ID, object ID, and motion vector
 * AOV readback tests for primary surface data
+* Material opacity AOV tests for albedo readback and PNG alpha preservation
+* Alpha-cutout transport tests proving fully transparent primary surfaces reveal rear albedo and emission
+* Transparent export tests for raw beauty alpha, default opaque sky behavior, PNG alpha preservation, and reference alpha metrics
+* Transparent material reference render test proving semi-transparent albedo alpha and cutout rear-surface visibility
+* Render-driven texture tests proving checker base color and normal-map data reach AOVs
+* Render-driven texture filtering test proving bilinear sampling produces blended albedo
+* Scripted UV/normal-map render test proving the DSL can author textured visual evaluation scenes
+* Scripted image-texture render test proving external decoded assets can feed material albedo
+* Scripted imported-mesh render test proving external OBJ/PLY assets can feed visual evaluation scenes
+* Bundled material-variant script render test proving reusable scripted visual-validation scenes load and render
+* Scene script file parsing tests for script-relative includes and assets
 * PNG export for selected render outputs
 * Output-specific PNG visualization encoding for depth, ID, and motion-vector buffers
 * Primary-hit camera motion vector AOV using previous-camera projection
@@ -999,23 +1119,39 @@ Implemented:
 * CPU BVH builder with bounds, centroid splitting, leaf nodes, and tests
 * Flattened GPU-friendly BVH node and primitive-index buffers
 * GPU BVH traversal in the Metal path tracing kernel
+* Emissive triangle light-list scene compilation with tests for emissive and non-emissive scenes
 * Materialized mesh instance transforms for the current flat-triangle Metal compute path
+* Experimental Metal ray tracing acceleration backend scaffold that detects `supportsRaytracing`, creates per-mesh BLAS resources, creates a TLAS resource over scene instances, records acceleration-structure and scratch-buffer sizes, and preserves the current BVH render path
+* Minimal Metal ray tracing traversal probe kernel that traces a ray against the TLAS and is tested against the CPU triangle intersector
+* Production Metal ray tracing path tracing kernel that traverses the TLAS for bounce and shadow intersections on supported devices, with flat BVH fallback still available
+* Internal render acceleration mode selection for parity testing and fallback validation
+* First hardware-vs-flat-BVH parity render test comparing depth, normal, and albedo AOVs
+* Built-in Cornell Box and material reference hardware-vs-flat-BVH parity tests comparing depth, normal, albedo, material ID, and object ID outputs
+* Hardware-vs-flat-BVH beauty/direct-lighting parity metrics comparing average and maximum RGB difference for reference scenes
+* Command line render benchmark executable for timing scene load, renderer creation, session creation, and render throughput
+* Command line benchmark JSON output for persistent comparison in `Examples/Benchmarks`
+* Opt-in XCTest performance benchmarks gated by `DENRIM_RUN_PERFORMANCE_TESTS=1`
+* `Documentation/Performance.md` with benchmark commands, JSON fields, and first optimization targets
 * Local documentation seeds in Documentation/
 
 Not yet implemented:
 
-* Metal ray tracing acceleration structures
-* Hardware TLAS/BLAS-backed Metal ray tracing traversal
-* Texture and normal-map inputs
-* Transmission, opacity, and layered material behavior
+* Texture mipmapping, GPU texture objects, anisotropy, and richer sampler-state control
+* Procedural material graph API and matching SceneScript procedural commands
+* Procedural noise, ramps, coordinate nodes, color/value math, triplanar mapping, and procedural bump/normal inputs
+* Stored performance baselines by Apple device class and backend
+* Broader Denrim Standard Surface material API with staged anisotropy, transmission, clearcoat thickness / attenuation / independent normals, sheen/fuzz, subsurface, layering, and material diagnostics
+* Semi-transparent blending, shadow transparency, transmission, refraction, and layered material behavior
 * Denoising
-* OBJ / GLB import
+* GLB import
 * Heightmaps, voxels, SDFs, and participating media
 
 Immediate next milestones:
 
-1. Start Metal ray tracing acceleration structure experiments behind the acceleration backend.
-2. Add texture and normal-map inputs to the material path.
-3. Add transmission, opacity, and layered material behavior.
-4. Extend motion vectors to include object/instance deformation on top of instance records.
-5. Add light-list scene compilation for emissive geometry.
+1. Add texture mipmapping, GPU texture objects, anisotropy, and richer sampler-state control.
+2. Add a small procedural material graph shared by the Swift API and SceneScript, starting with noise, ramps, math, coordinate nodes, and bindings to base color, roughness, metallic, opacity, clearcoat, and bump/normal inputs.
+3. Add performance baselines for Cornell, material reference, material variants, and Stanford Dragon scenes by Apple device class and backend.
+4. Continue staging the Denrim Standard Surface API, then add semi-transparent blending, shadow transparency, transmission, refraction, and layered material behavior.
+5. Extend motion vectors to include object/instance deformation on top of instance records.
+6. Add importance sampling over the compiled emissive light list for scenes with many or unevenly sized lights.
+7. Add stored metrics or image baselines for the transparent material reference scene once semi-transparent transport stabilizes.

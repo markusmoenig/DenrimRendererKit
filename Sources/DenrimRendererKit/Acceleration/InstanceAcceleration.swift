@@ -45,6 +45,8 @@ struct InstanceAcceleration {
         let n0 = transform.transformNormal(triangle.n0.xyz)
         let n1 = transform.transformNormal(triangle.n1.xyz)
         let n2 = transform.transformNormal(triangle.n2.xyz)
+        let tangent = transform.transformNormal(triangle.tangent.xyz)
+        let bitangent = transform.transformNormal(triangle.bitangent.xyz)
 
         return GPUTriangle(
             v0: SIMD4<Float>(v0, 0),
@@ -53,6 +55,11 @@ struct InstanceAcceleration {
             n0: SIMD4<Float>(n0, 0),
             n1: SIMD4<Float>(n1, 0),
             n2: SIMD4<Float>(n2, 0),
+            uv0: triangle.uv0,
+            uv1: triangle.uv1,
+            uv2: triangle.uv2,
+            tangent: SIMD4<Float>(tangent, 0),
+            bitangent: SIMD4<Float>(bitangent, 0),
             materialID: material.rawValue,
             objectID: objectID,
             primitiveID: triangle.primitiveID,

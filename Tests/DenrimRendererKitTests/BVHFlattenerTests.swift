@@ -1,5 +1,6 @@
-import XCTest
 import simd
+import Metal
+import XCTest
 @testable import DenrimRendererKit
 
 final class BVHFlattenerTests: XCTestCase {
@@ -56,6 +57,54 @@ final class BVHFlattenerTests: XCTestCase {
         XCTAssertEqual(build.bvh.nodes[0].boundsMax.y, 2, accuracy: 0.0001)
     }
 
+    func testAccelerationBackendBuildsEmissiveTriangleLightList() throws {
+        var scene = RenderScene()
+        let matte = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.8, 0.8, 0.8)))
+        let light = scene.addMaterial(Material(
+            baseColor: SIMD3<Float>(1, 1, 1),
+            emission: SIMD3<Float>(1, 0.8, 0.6),
+            emissionStrength: 4
+        ))
+
+        scene.add(mesh: Mesh.quad(
+            SIMD3<Float>(-1, 0, 1),
+            SIMD3<Float>(1, 0, 1),
+            SIMD3<Float>(1, 0, -1),
+            SIMD3<Float>(-1, 0, -1)
+        ), material: matte)
+        scene.add(mesh: Mesh.quad(
+            SIMD3<Float>(-0.5, 1, -0.5),
+            SIMD3<Float>(0.5, 1, -0.5),
+            SIMD3<Float>(0.5, 1, 0.5),
+            SIMD3<Float>(-0.5, 1, 0.5)
+        ), material: light)
+
+        let build = try LinearTriangleAccelerationBackend().build(scene: scene)
+
+        XCTAssertEqual(build.triangles.count, 4)
+        XCTAssertEqual(build.lightTriangleIndices, [2, 3])
+        XCTAssertTrue(build.lightTriangleIndices.allSatisfy { index in
+            build.materials[Int(build.triangles[Int(index)].materialID)].emission.x > 0
+        })
+    }
+
+    func testAccelerationBackendLeavesLightListEmptyWithoutEmission() throws {
+        var scene = RenderScene()
+        let matte = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.8, 0.8, 0.8)))
+
+        scene.add(mesh: Mesh.quad(
+            SIMD3<Float>(-1, -1, 0),
+            SIMD3<Float>(1, -1, 0),
+            SIMD3<Float>(1, 1, 0),
+            SIMD3<Float>(-1, 1, 0)
+        ), material: matte)
+
+        let build = try LinearTriangleAccelerationBackend().build(scene: scene)
+
+        XCTAssertEqual(build.triangles.count, 2)
+        XCTAssertTrue(build.lightTriangleIndices.isEmpty)
+    }
+
     func testInstanceAccelerationBuildsTopLevelInstanceBounds() throws {
         var scene = RenderScene()
         let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(1, 1, 1)))
@@ -74,5 +123,39 @@ final class BVHFlattenerTests: XCTestCase {
         XCTAssertEqual(acceleration.topLevelBVH.nodes[0].boundsMin.x, -2.5, accuracy: 0.0001)
         XCTAssertEqual(acceleration.topLevelBVH.nodes[0].boundsMax.x, 2.5, accuracy: 0.0001)
         XCTAssertEqual(Set(triangles.map(\.objectID)), [0, 1])
+    }
+
+    func testMetalRayTracingBackendReportsAccelerationStructurePlans() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let build = try MetalRayTracingAccelerationBackend(device: device).build(scene: .cornellBox())
+        let experiment = try XCTUnwrap(build.metalRayTracingExperiment)
+
+        XCTAssertEqual(build.triangles.count, build.bvh.primitiveIndices.count)
+        XCTAssertEqual(experiment.supportsRayTracing, device.supportsRaytracing)
+
+        if device.supportsRaytracing {
+            XCTAssertEqual(experiment.blasPlans.count, build.instanceAcceleration.meshes.count)
+            XCTAssertEqual(experiment.blasResources.count, build.instanceAcceleration.meshes.count)
+            XCTAssertEqual(experiment.tlasPlan?.instanceCount, build.instanceAcceleration.instances.count)
+            XCTAssertNotNil(experiment.tlasResource)
+            XCTAssertEqual(experiment.sceneBuffers?.instanceCount, build.instanceAcceleration.instances.count)
+            XCTAssertEqual(experiment.sceneBuffers?.localTriangleCount, build.instanceAcceleration.meshes.reduce(0) {
+                $0 + $1.localTriangles.count
+            })
+            XCTAssertGreaterThan(experiment.totalAccelerationStructureSize, 0)
+            XCTAssertGreaterThan(experiment.totalBuildScratchBufferSize, 0)
+            XCTAssertTrue(experiment.blasPlans.allSatisfy { $0.triangleCount > 0 })
+            XCTAssertTrue(experiment.blasResources.allSatisfy { $0.accelerationStructure.size > 0 })
+            XCTAssertGreaterThan(experiment.tlasResource?.accelerationStructure.size ?? 0, 0)
+        } else {
+            XCTAssertTrue(experiment.blasPlans.isEmpty)
+            XCTAssertTrue(experiment.blasResources.isEmpty)
+            XCTAssertNil(experiment.tlasPlan)
+            XCTAssertNil(experiment.tlasResource)
+            XCTAssertNil(experiment.sceneBuffers)
+        }
     }
 }

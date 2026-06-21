@@ -35,11 +35,13 @@ enum PNGWriter {
     static func visualizedRGBA8Pixels(from pixels: [RenderOutputPixel], output: RenderOutput) -> [UInt8] {
         switch output {
         case .beauty:
-            return encodePixels(pixels, channelEncoder: tonemap)
+            return encodePixels(pixels, channelEncoder: tonemap, preservesAlpha: true)
         case .depth:
             return encodeDepthPixels(pixels)
-        case .normal, .albedo:
+        case .normal:
             return encodePixels(pixels, channelEncoder: encodeDisplayLinear)
+        case .albedo:
+            return encodePixels(pixels, channelEncoder: encodeDisplayLinear, preservesAlpha: true)
         case .materialID, .objectID:
             return encodeIDPixels(pixels)
         case .motionVector:
@@ -65,7 +67,8 @@ enum PNGWriter {
 
     private static func encodePixels(
         _ pixels: [RenderOutputPixel],
-        channelEncoder: (Float) -> UInt8
+        channelEncoder: (Float) -> UInt8,
+        preservesAlpha: Bool = false
     ) -> [UInt8] {
         var output = [UInt8](repeating: 0, count: pixels.count * 4)
         for (pixelIndex, pixel) in pixels.enumerated() {
@@ -73,7 +76,7 @@ enum PNGWriter {
             output[dst] = channelEncoder(pixel.r)
             output[dst + 1] = channelEncoder(pixel.g)
             output[dst + 2] = channelEncoder(pixel.b)
-            output[dst + 3] = 255
+            output[dst + 3] = preservesAlpha ? encodeAlpha(pixel.a) : 255
         }
         return output
     }
@@ -163,6 +166,10 @@ enum PNGWriter {
     private static func encodeDisplayLinear(_ linear: Float) -> UInt8 {
         let gamma = pow(max(0, min(1, linear)), 1 / 2.2)
         return UInt8(max(0, min(255, gamma * 255)))
+    }
+
+    private static func encodeAlpha(_ alpha: Float) -> UInt8 {
+        UInt8(max(0, min(255, alpha * 255)))
     }
 
     private static func colorForID(_ id: Int) -> (r: UInt8, g: UInt8, b: UInt8) {

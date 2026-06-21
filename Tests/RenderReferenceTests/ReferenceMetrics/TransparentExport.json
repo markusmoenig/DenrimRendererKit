@@ -1,0 +1,17 @@
+{
+  "scene": "transparent-export",
+  "samples": 1,
+  "maxBounces": 1,
+  "metrics": {
+    "width": 32,
+    "height": 32,
+    "minAlpha": 0,
+    "maxAlpha": 255,
+    "transparentPixels": 778,
+    "opaquePixels": 246
+  },
+  "tolerance": {
+    "transparentPixels": 4,
+    "opaquePixels": 4
+  }
+}

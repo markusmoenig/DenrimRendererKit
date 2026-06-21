@@ -1,0 +1,20 @@
+{
+  "scene": "scripted-texture-albedo",
+  "samples": 1,
+  "maxBounces": 1,
+  "metrics": {
+    "width": 48,
+    "height": 48,
+    "averageBrightness": 85.0,
+    "maxBrightness": 85.0,
+    "uniqueColorEstimate": 2,
+    "topCenterMaxBrightness": 85.0,
+    "bottomCenterMaxBrightness": 85.0
+  },
+  "tolerance": {
+    "averageBrightness": 3.0,
+    "maxBrightness": 3.0,
+    "uniqueColorEstimate": 1,
+    "regionalBrightness": 3.0
+  }
+}

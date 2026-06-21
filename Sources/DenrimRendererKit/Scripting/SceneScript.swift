@@ -7,6 +7,10 @@ public enum SceneScriptError: Error, LocalizedError, Equatable {
     case invalidArgumentCount(String, line: Int)
     case invalidNumber(String, line: Int)
     case unknownMaterial(String, line: Int)
+    case unknownTexture(String, line: Int)
+    case unknownMesh(String, line: Int)
+    case textureLoadFailed(String, line: Int)
+    case meshLoadFailed(String, line: Int)
     case includeResolverMissing(String, line: Int)
     case includeCycle(String, line: Int)
 
@@ -20,6 +24,14 @@ public enum SceneScriptError: Error, LocalizedError, Equatable {
             "Invalid numeric value '\(value)' on line \(line)."
         case .unknownMaterial(let name, let line):
             "Unknown material '\(name)' on line \(line)."
+        case .unknownTexture(let name, let line):
+            "Unknown texture '\(name)' on line \(line)."
+        case .unknownMesh(let name, let line):
+            "Unknown mesh '\(name)' on line \(line)."
+        case .textureLoadFailed(let path, let line):
+            "Could not load texture image '\(path)' on line \(line)."
+        case .meshLoadFailed(let path, let line):
+            "Could not load mesh '\(path)' on line \(line)."
         case .includeResolverMissing(let name, let line):
             "Scene script include '\(name)' on line \(line) requires an include resolver."
         case .includeCycle(let name, let line):
@@ -34,18 +46,26 @@ public enum SceneScript {
     public typealias IncludeResolver = (String) throws -> String
 
     /// Parses a line-based scene script into a render scene.
+    ///
+    /// Pass `baseURL` to resolve relative image texture paths used by `texture image` commands.
     public static func parse(
         _ source: String,
+        baseURL: URL? = nil,
         includeResolver: IncludeResolver? = nil
     ) throws -> RenderScene {
         var scene = RenderScene()
         var materials: [String: MaterialID] = [:]
+        var textures: [String: Texture2D] = [:]
+        var meshes: [String: Mesh] = [:]
         var includeStack: [String] = []
 
         try parseLines(
             source,
             into: &scene,
             materials: &materials,
+            textures: &textures,
+            meshes: &meshes,
+            baseURL: baseURL,
             includeResolver: includeResolver,
             includeStack: &includeStack
         )
@@ -53,10 +73,29 @@ public enum SceneScript {
         return scene
     }
 
+    /// Parses a scene script file, resolving relative assets and includes beside that file.
+    public static func parse(contentsOf url: URL) throws -> RenderScene {
+        let source = try String(contentsOf: url, encoding: .utf8)
+        let baseURL = url.deletingLastPathComponent()
+        return try parse(
+            source,
+            baseURL: baseURL,
+            includeResolver: { includeName in
+                try String(
+                    contentsOf: assetURL(path: includeName, baseURL: baseURL),
+                    encoding: .utf8
+                )
+            }
+        )
+    }
+
     private static func parseLines(
         _ source: String,
         into scene: inout RenderScene,
         materials: inout [String: MaterialID],
+        textures: inout [String: Texture2D],
+        meshes: inout [String: Mesh],
+        baseURL: URL?,
         includeResolver: IncludeResolver?,
         includeStack: inout [String]
     ) throws {
@@ -67,7 +106,7 @@ public enum SceneScript {
                 continue
             }
 
-            let tokens = line.split(whereSeparator: \.isWhitespace).map(String.init)
+            let tokens = tokenize(line)
             guard let command = tokens.first?.lowercased() else {
                 continue
             }
@@ -88,20 +127,32 @@ public enum SceneScript {
                     includedSource,
                     into: &scene,
                     materials: &materials,
+                    textures: &textures,
+                    meshes: &meshes,
+                    baseURL: baseURL,
                     includeResolver: includeResolver,
                     includeStack: &includeStack
                 )
                 includeStack.removeLast()
             case "camera":
                 scene.camera = try parseCamera(tokens, line: lineNumber)
+            case "texture":
+                let parsed = try parseTexture(tokens, line: lineNumber, baseURL: baseURL)
+                textures[parsed.name] = parsed.texture
+            case "mesh":
+                let parsed = try parseMeshAsset(tokens, line: lineNumber, baseURL: baseURL)
+                meshes[parsed.name] = parsed.mesh
             case "material":
-                let parsed = try parseMaterial(tokens, line: lineNumber)
+                let parsed = try parseMaterial(tokens, line: lineNumber, textures: textures)
                 materials[parsed.name] = scene.addMaterial(parsed.material)
             case "quad":
                 let parsed = try parseQuad(tokens, line: lineNumber, materials: materials)
                 scene.add(mesh: parsed.mesh, material: parsed.material)
             case "box":
                 let parsed = try parseBox(tokens, line: lineNumber, materials: materials)
+                scene.add(mesh: parsed.mesh, material: parsed.material, transform: parsed.transform)
+            case "instance":
+                let parsed = try parseInstance(tokens, line: lineNumber, materials: materials, meshes: meshes)
                 scene.add(mesh: parsed.mesh, material: parsed.material, transform: parsed.transform)
             default:
                 throw SceneScriptError.unknownCommand(command, line: lineNumber)
@@ -116,6 +167,15 @@ public enum SceneScript {
         return String(line[..<commentStart])
     }
 
+    private static func tokenize(_ line: String) -> [String] {
+        line
+            .replacingOccurrences(of: "(", with: " ( ")
+            .replacingOccurrences(of: ")", with: " ) ")
+            .replacingOccurrences(of: ",", with: " ")
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+    }
+
     private static func parseInclude(_ tokens: [String], line: Int) throws -> String {
         guard tokens.count == 2 else {
             throw SceneScriptError.invalidArgumentCount("include", line: line)
@@ -124,19 +184,121 @@ public enum SceneScript {
     }
 
     private static func parseCamera(_ tokens: [String], line: Int) throws -> Camera {
-        guard tokens.count == 8 else {
+        if tokens.count == 8 {
+            let values = try floats(tokens.dropFirst(), line: line)
+            return Camera(
+                origin: SIMD3<Float>(values[0], values[1], values[2]),
+                target: SIMD3<Float>(values[3], values[4], values[5]),
+                verticalFieldOfViewDegrees: values[6]
+            )
+        }
+
+        var origin: SIMD3<Float>?
+        var target: SIMD3<Float>?
+        var fov: Float?
+        var index = 1
+
+        while index < tokens.count {
+            let keyword = tokens[index].lowercased()
+            switch keyword {
+            case "origin", "position", "eye":
+                let parsed = try parseNamedVector3(tokens, index: index, line: line)
+                origin = parsed.value
+                index = parsed.nextIndex
+            case "target", "lookat", "look":
+                let parsed = try parseNamedVector3(tokens, index: index, line: line)
+                target = parsed.value
+                index = parsed.nextIndex
+            case "fov", "fieldofview":
+                let parsed = try parseNamedFloat(tokens, index: index, line: line)
+                fov = parsed.value
+                index = parsed.nextIndex
+            default:
+                throw SceneScriptError.invalidArgumentCount("camera", line: line)
+            }
+        }
+
+        guard let origin, let target, let fov else {
             throw SceneScriptError.invalidArgumentCount("camera", line: line)
         }
 
-        let values = try floats(tokens.dropFirst(), line: line)
         return Camera(
-            origin: SIMD3<Float>(values[0], values[1], values[2]),
-            target: SIMD3<Float>(values[3], values[4], values[5]),
-            verticalFieldOfViewDegrees: values[6]
+            origin: origin,
+            target: target,
+            verticalFieldOfViewDegrees: fov
         )
     }
 
-    private static func parseMaterial(_ tokens: [String], line: Int) throws -> (name: String, material: Material) {
+    private static func parseTexture(
+        _ tokens: [String],
+        line: Int,
+        baseURL: URL?
+    ) throws -> (name: String, texture: Texture2D) {
+        guard tokens.count >= 4 else {
+            throw SceneScriptError.invalidArgumentCount("texture", line: line)
+        }
+
+        let name = tokens[1]
+        let kind = tokens[2].lowercased()
+        switch kind {
+        case "solid":
+            guard tokens.count == 7 || tokens.count == 8 else {
+                throw SceneScriptError.invalidArgumentCount("texture", line: line)
+            }
+            let color = try rgba(tokens[3..<7], line: line)
+            let samplingMode = try textureSamplingMode(tokens.dropFirst(7), line: line)
+            return (name, .solid(color, samplingMode: samplingMode))
+        case "checker":
+            guard tokens.count == 11 || tokens.count == 12 else {
+                throw SceneScriptError.invalidArgumentCount("texture", line: line)
+            }
+            let a = try rgba(tokens[3..<7], line: line)
+            let b = try rgba(tokens[7..<11], line: line)
+            let samplingMode = try textureSamplingMode(tokens.dropFirst(11), line: line)
+            return (name, .checker(a, b, samplingMode: samplingMode))
+        case "image":
+            guard tokens.count >= 4 else {
+                throw SceneScriptError.invalidArgumentCount("texture", line: line)
+            }
+            let options = try imageTextureOptions(tokens.dropFirst(4), line: line)
+            do {
+                return (
+                    name,
+                    try Texture2D(
+                        contentsOf: assetURL(path: tokens[3], baseURL: baseURL),
+                        colorEncoding: options.colorEncoding,
+                        samplingMode: options.samplingMode
+                    )
+                )
+            } catch {
+                throw SceneScriptError.textureLoadFailed(tokens[3], line: line)
+            }
+        default:
+            throw SceneScriptError.invalidArgumentCount("texture", line: line)
+        }
+    }
+
+    private static func parseMeshAsset(
+        _ tokens: [String],
+        line: Int,
+        baseURL: URL?
+    ) throws -> (name: String, mesh: Mesh) {
+        guard tokens.count == 3 else {
+            throw SceneScriptError.invalidArgumentCount("mesh", line: line)
+        }
+
+        do {
+            return (tokens[1], try Mesh(contentsOf: assetURL(path: tokens[2], baseURL: baseURL)))
+        } catch {
+            throw SceneScriptError.meshLoadFailed(tokens[2], line: line)
+        }
+    }
+
+    private static func parseMaterial(
+        _ tokens: [String],
+        line: Int,
+        textures: [String: Texture2D]
+    ) throws -> (name: String, material: Material) {
         guard tokens.count >= 5 else {
             throw SceneScriptError.invalidArgumentCount("material", line: line)
         }
@@ -182,11 +344,60 @@ public enum SceneScript {
                 }
                 material.metallic = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
                 index += 2
+            case "specular":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.specular = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "specularcolor":
+                guard index + 3 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                let values = try floats(tokens[(index + 1)...(index + 3)], line: line)
+                material.specularColor = SIMD3<Float>(values[0], values[1], values[2])
+                index += 4
+            case "ior", "indexofrefraction":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.indexOfRefraction = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "clearcoat":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.clearcoat = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "clearcoatroughness":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.clearcoatRoughness = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "clearcoatior", "clearcoatindexofrefraction":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.clearcoatIndexOfRefraction = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
             case "opacity":
                 guard index + 1 < tokens.count else {
                     throw SceneScriptError.invalidArgumentCount("material", line: line)
                 }
                 material.opacity = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "basecolortexture":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.baseColorTexture = try texture(named: tokens[index + 1], line: line, textures: textures)
+                index += 2
+            case "normalmap":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.normalMap = try texture(named: tokens[index + 1], line: line, textures: textures)
                 index += 2
             default:
                 throw SceneScriptError.invalidArgumentCount("material", line: line)
@@ -204,19 +415,51 @@ public enum SceneScript {
         line: Int,
         materials: [String: MaterialID]
     ) throws -> (mesh: Mesh, material: MaterialID) {
-        guard tokens.count == 14 else {
+        if tokens.count == 14 {
+            let material = try material(named: tokens[1], line: line, materials: materials)
+            let values = try floats(tokens[2..<14], line: line)
+
+            return (
+                Mesh.quad(
+                    SIMD3<Float>(values[0], values[1], values[2]),
+                    SIMD3<Float>(values[3], values[4], values[5]),
+                    SIMD3<Float>(values[6], values[7], values[8]),
+                    SIMD3<Float>(values[9], values[10], values[11])
+                ),
+                material
+            )
+        }
+
+        guard tokens.count >= 2 else {
             throw SceneScriptError.invalidArgumentCount("quad", line: line)
         }
-        let material = try material(named: tokens[1], line: line, materials: materials)
-        let values = try floats(tokens[2..<14], line: line)
+
+        let materialParse = try parseOptionalNamedString(
+            tokens,
+            index: 1,
+            keyword: "material",
+            defaultConsumesBareValue: true,
+            line: line
+        )
+        let material = try material(named: materialParse.value, line: line, materials: materials)
+        var corners: [String: SIMD3<Float>] = [:]
+        var index = materialParse.nextIndex
+
+        while index < tokens.count {
+            let parsed = try parseNamedVector3(tokens, index: index, line: line)
+            corners[parsed.name.lowercased()] = parsed.value
+            index = parsed.nextIndex
+        }
+
+        guard let a = corners["a"],
+              let b = corners["b"],
+              let c = corners["c"],
+              let d = corners["d"] else {
+            throw SceneScriptError.invalidArgumentCount("quad", line: line)
+        }
 
         return (
-            Mesh.quad(
-                SIMD3<Float>(values[0], values[1], values[2]),
-                SIMD3<Float>(values[3], values[4], values[5]),
-                SIMD3<Float>(values[6], values[7], values[8]),
-                SIMD3<Float>(values[9], values[10], values[11])
-            ),
+            Mesh.quad(a, b, c, d),
             material
         )
     }
@@ -226,16 +469,134 @@ public enum SceneScript {
         line: Int,
         materials: [String: MaterialID]
     ) throws -> (mesh: Mesh, material: MaterialID, transform: Transform) {
-        guard tokens.count == 8 || tokens.count == 9 else {
+        if tokens.count == 8 || tokens.count == 9 {
+            let material = try material(named: tokens[1], line: line, materials: materials)
+            let values = try floats(tokens[2..<tokens.count], line: line)
+            let mesh = Mesh.box(size: SIMD3<Float>(values[3], values[4], values[5]))
+            var transform = Transform.translation(SIMD3<Float>(values[0], values[1], values[2]))
+            if values.count == 7 {
+                transform = transform * Transform.rotationY(radians: values[6])
+            }
+
+            return (mesh, material, transform)
+        }
+
+        let materialParse = try parseOptionalNamedString(
+            tokens,
+            index: 1,
+            keyword: "material",
+            defaultConsumesBareValue: true,
+            line: line
+        )
+        let material = try material(named: materialParse.value, line: line, materials: materials)
+        var position = SIMD3<Float>(repeating: 0)
+        var size: SIMD3<Float>?
+        var rotationY: Float?
+        var index = materialParse.nextIndex
+
+        while index < tokens.count {
+            let keyword = tokens[index].lowercased()
+            switch keyword {
+            case "position", "translation", "translate":
+                let parsed = try parseNamedVector3(tokens, index: index, line: line)
+                position = parsed.value
+                index = parsed.nextIndex
+            case "size", "scale":
+                let parsed = try parseNamedVector3(tokens, index: index, line: line)
+                size = parsed.value
+                index = parsed.nextIndex
+            case "rotationy", "rotatey":
+                let parsed = try parseNamedFloat(tokens, index: index, line: line)
+                rotationY = parsed.value
+                index = parsed.nextIndex
+            default:
+                throw SceneScriptError.invalidArgumentCount("box", line: line)
+            }
+        }
+
+        guard let size else {
             throw SceneScriptError.invalidArgumentCount("box", line: line)
         }
-        let material = try material(named: tokens[1], line: line, materials: materials)
-        let values = try floats(tokens[2..<tokens.count], line: line)
-        let mesh = Mesh.box(size: SIMD3<Float>(values[3], values[4], values[5]))
-        var transform = Transform.translation(SIMD3<Float>(values[0], values[1], values[2]))
-        if values.count == 7 {
-            transform = transform * Transform.rotationY(radians: values[6])
+
+        let mesh = Mesh.box(size: size)
+        var transform = Transform.translation(position)
+        if let rotationY {
+            transform = transform * Transform.rotationY(radians: rotationY)
         }
+
+        return (mesh, material, transform)
+    }
+
+    private static func parseInstance(
+        _ tokens: [String],
+        line: Int,
+        materials: [String: MaterialID],
+        meshes: [String: Mesh]
+    ) throws -> (mesh: Mesh, material: MaterialID, transform: Transform) {
+        if tokens.count == 9 || tokens.count == 10 {
+            let mesh = try meshAsset(named: tokens[1], line: line, meshes: meshes)
+            let material = try material(named: tokens[2], line: line, materials: materials)
+            let values = try floats(tokens[3..<tokens.count], line: line)
+            var transform = Transform.translation(SIMD3<Float>(values[0], values[1], values[2]))
+                * Transform.scale(SIMD3<Float>(values[3], values[4], values[5]))
+            if values.count == 7 {
+                transform = Transform.translation(SIMD3<Float>(values[0], values[1], values[2]))
+                    * Transform.rotationY(radians: values[6])
+                    * Transform.scale(SIMD3<Float>(values[3], values[4], values[5]))
+            }
+
+            return (mesh, material, transform)
+        }
+
+        var index = 1
+        let meshNameParse = try parseOptionalNamedString(
+            tokens,
+            index: index,
+            keyword: "mesh",
+            defaultConsumesBareValue: true,
+            line: line
+        )
+        index = meshNameParse.nextIndex
+        let materialNameParse = try parseOptionalNamedString(
+            tokens,
+            index: index,
+            keyword: "material",
+            defaultConsumesBareValue: true,
+            line: line
+        )
+        index = materialNameParse.nextIndex
+
+        let mesh = try meshAsset(named: meshNameParse.value, line: line, meshes: meshes)
+        let material = try material(named: materialNameParse.value, line: line, materials: materials)
+        var position = SIMD3<Float>(repeating: 0)
+        var scale = SIMD3<Float>(repeating: 1)
+        var rotationY: Float?
+
+        while index < tokens.count {
+            let keyword = tokens[index].lowercased()
+            switch keyword {
+            case "position", "translation", "translate":
+                let parsed = try parseNamedVector3(tokens, index: index, line: line)
+                position = parsed.value
+                index = parsed.nextIndex
+            case "scale":
+                let parsed = try parseNamedVector3(tokens, index: index, line: line)
+                scale = parsed.value
+                index = parsed.nextIndex
+            case "rotationy", "rotatey":
+                let parsed = try parseNamedFloat(tokens, index: index, line: line)
+                rotationY = parsed.value
+                index = parsed.nextIndex
+            default:
+                throw SceneScriptError.invalidArgumentCount("instance", line: line)
+            }
+        }
+
+        var transform = Transform.translation(position)
+        if let rotationY {
+            transform = transform * Transform.rotationY(radians: rotationY)
+        }
+        transform = transform * Transform.scale(scale)
 
         return (mesh, material, transform)
     }
@@ -249,6 +610,210 @@ public enum SceneScript {
             throw SceneScriptError.unknownMaterial(name, line: line)
         }
         return material
+    }
+
+    private static func texture(
+        named name: String,
+        line: Int,
+        textures: [String: Texture2D]
+    ) throws -> Texture2D {
+        guard let texture = textures[name] else {
+            throw SceneScriptError.unknownTexture(name, line: line)
+        }
+        return texture
+    }
+
+    private static func meshAsset(
+        named name: String,
+        line: Int,
+        meshes: [String: Mesh]
+    ) throws -> Mesh {
+        guard let mesh = meshes[name] else {
+            throw SceneScriptError.unknownMesh(name, line: line)
+        }
+        return mesh
+    }
+
+    private static func parseOptionalNamedString(
+        _ tokens: [String],
+        index: Int,
+        keyword: String,
+        defaultConsumesBareValue: Bool,
+        line: Int
+    ) throws -> (value: String, nextIndex: Int) {
+        guard index < tokens.count else {
+            throw SceneScriptError.invalidArgumentCount(keyword, line: line)
+        }
+
+        if tokens[index].lowercased() == keyword.lowercased() {
+            if tokens.indices.contains(index + 1),
+               tokens[index + 1] == "(" {
+                guard tokens.indices.contains(index + 3),
+                      tokens[index + 3] == ")" else {
+                    throw SceneScriptError.invalidArgumentCount(keyword, line: line)
+                }
+                return (tokens[index + 2], index + 4)
+            }
+
+            guard tokens.indices.contains(index + 1) else {
+                throw SceneScriptError.invalidArgumentCount(keyword, line: line)
+            }
+            return (tokens[index + 1], index + 2)
+        }
+
+        guard defaultConsumesBareValue else {
+            throw SceneScriptError.invalidArgumentCount(keyword, line: line)
+        }
+        return (tokens[index], index + 1)
+    }
+
+    private static func parseNamedVector3(
+        _ tokens: [String],
+        index: Int,
+        line: Int
+    ) throws -> (name: String, value: SIMD3<Float>, nextIndex: Int) {
+        guard index < tokens.count else {
+            throw SceneScriptError.invalidArgumentCount("vector", line: line)
+        }
+
+        let name = tokens[index]
+        if tokens.indices.contains(index + 1),
+           tokens[index + 1] == "(" {
+            guard tokens.indices.contains(index + 5),
+                  tokens[index + 5] == ")" else {
+                throw SceneScriptError.invalidArgumentCount(name, line: line)
+            }
+            let values = try floats(tokens[(index + 2)...(index + 4)], line: line)
+            return (
+                name,
+                SIMD3<Float>(values[0], values[1], values[2]),
+                index + 6
+            )
+        }
+
+        guard tokens.indices.contains(index + 3) else {
+            throw SceneScriptError.invalidArgumentCount(name, line: line)
+        }
+        let values = try floats(tokens[(index + 1)...(index + 3)], line: line)
+        return (
+            name,
+            SIMD3<Float>(values[0], values[1], values[2]),
+            index + 4
+        )
+    }
+
+    private static func parseNamedFloat(
+        _ tokens: [String],
+        index: Int,
+        line: Int
+    ) throws -> (name: String, value: Float, nextIndex: Int) {
+        guard index < tokens.count else {
+            throw SceneScriptError.invalidArgumentCount("float", line: line)
+        }
+
+        let name = tokens[index]
+        if tokens.indices.contains(index + 1),
+           tokens[index + 1] == "(" {
+            guard tokens.indices.contains(index + 3),
+                  tokens[index + 3] == ")" else {
+                throw SceneScriptError.invalidArgumentCount(name, line: line)
+            }
+            return (
+                name,
+                try floats(tokens[(index + 2)...(index + 2)], line: line)[0],
+                index + 4
+            )
+        }
+
+        guard tokens.indices.contains(index + 1) else {
+            throw SceneScriptError.invalidArgumentCount(name, line: line)
+        }
+        return (
+            name,
+            try floats(tokens[(index + 1)...(index + 1)], line: line)[0],
+            index + 2
+        )
+    }
+
+    private static func rgba<S: Sequence>(_ tokens: S, line: Int) throws -> SIMD4<Float> where S.Element == String {
+        let values = try floats(tokens, line: line)
+        guard values.count == 4 else {
+            throw SceneScriptError.invalidArgumentCount("texture", line: line)
+        }
+        return SIMD4<Float>(values[0], values[1], values[2], values[3])
+    }
+
+    private static func textureSamplingMode<S: Sequence>(
+        _ tokens: S,
+        line: Int
+    ) throws -> TextureSamplingMode where S.Element == String {
+        let values = Array(tokens)
+        guard let mode = values.first else {
+            return .nearest
+        }
+        guard values.count == 1 else {
+            throw SceneScriptError.invalidArgumentCount("texture", line: line)
+        }
+
+        switch mode.lowercased() {
+        case "nearest":
+            return .nearest
+        case "linear":
+            return .linear
+        default:
+            throw SceneScriptError.invalidArgumentCount("texture", line: line)
+        }
+    }
+
+    private static func imageTextureOptions<S: Sequence>(
+        _ tokens: S,
+        line: Int
+    ) throws -> (colorEncoding: TextureColorEncoding, samplingMode: TextureSamplingMode) where S.Element == String {
+        let values = Array(tokens)
+        var colorEncoding = TextureColorEncoding.sRGB
+        var samplingMode = TextureSamplingMode.linear
+        var index = 0
+
+        while index < values.count {
+            switch values[index].lowercased() {
+            case "color":
+                guard index + 1 < values.count else {
+                    throw SceneScriptError.invalidArgumentCount("texture", line: line)
+                }
+                switch values[index + 1].lowercased() {
+                case "srgb":
+                    colorEncoding = .sRGB
+                case "linear":
+                    colorEncoding = .linear
+                default:
+                    throw SceneScriptError.invalidArgumentCount("texture", line: line)
+                }
+                index += 2
+            case "sampler":
+                guard index + 1 < values.count else {
+                    throw SceneScriptError.invalidArgumentCount("texture", line: line)
+                }
+                samplingMode = try textureSamplingMode([values[index + 1]], line: line)
+                index += 2
+            default:
+                throw SceneScriptError.invalidArgumentCount("texture", line: line)
+            }
+        }
+
+        return (colorEncoding, samplingMode)
+    }
+
+    private static func assetURL(path: String, baseURL: URL?) -> URL {
+        if path.hasPrefix("/") {
+            return URL(fileURLWithPath: path)
+        }
+
+        if let baseURL {
+            return baseURL.appendingPathComponent(path)
+        }
+
+        return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(path)
     }
 
     private static func floats<S: Sequence>(_ tokens: S, line: Int) throws -> [Float] where S.Element == String {

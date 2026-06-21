@@ -32,6 +32,7 @@ public final class DenrimRenderer {
 
     private let commandQueue: MTLCommandQueue
     private let pipeline: MTLComputePipelineState
+    private let hardwareRayTracingPipeline: MTLComputePipelineState?
 
     /// Creates a renderer using the supplied Metal device or the system default device.
     public init(device: MTLDevice? = MTLCreateSystemDefaultDevice()) throws {
@@ -50,6 +51,12 @@ public final class DenrimRenderer {
         self.device = device
         self.commandQueue = commandQueue
         self.pipeline = try device.makeComputePipelineState(function: function)
+        if device.supportsRaytracing,
+           let hardwareFunction = library.makeFunction(name: "pathTraceHardwareKernel") {
+            self.hardwareRayTracingPipeline = try? device.makeComputePipelineState(function: hardwareFunction)
+        } else {
+            self.hardwareRayTracingPipeline = nil
+        }
     }
 
     private static func makeLibrary(device: MTLDevice) throws -> MTLLibrary {
@@ -76,12 +83,26 @@ public final class DenrimRenderer {
         scene: RenderScene,
         settings: RenderSettings = RenderSettings()
     ) throws -> RenderSession {
+        try makeSession(
+            scene: scene,
+            settings: settings,
+            accelerationMode: .automatic
+        )
+    }
+
+    func makeSession(
+        scene: RenderScene,
+        settings: RenderSettings = RenderSettings(),
+        accelerationMode: RenderAccelerationMode
+    ) throws -> RenderSession {
         try RenderSession(
             device: device,
             commandQueue: commandQueue,
             pipeline: pipeline,
+            hardwareRayTracingPipeline: hardwareRayTracingPipeline,
             scene: scene,
-            settings: settings
+            settings: settings,
+            accelerationMode: accelerationMode
         )
     }
 }

@@ -1,0 +1,16 @@
+{
+  "createdAt" : "2026-06-21T08:18:05Z",
+  "deviceName" : "Apple M1 Max",
+  "height" : 64,
+  "maxBounces" : 4,
+  "pixelSamplesPerSecond" : 5251373.738040654,
+  "renderSeconds" : 0.0007799863815307617,
+  "rendererCreateSeconds" : 0.05657303333282471,
+  "samples" : 1,
+  "samplesPerSecond" : 1282.0736665138315,
+  "sceneLoadSeconds" : 4.494190216064453e-05,
+  "sceneName" : "cornell",
+  "sessionCreateSeconds" : 0.03198695182800293,
+  "totalSeconds" : 0.08938491344451904,
+  "width" : 64
+}

@@ -16,12 +16,26 @@ let samples = arguments.count > 2 ? Int(arguments[2]) ?? 32 : 32
 let size = arguments.count > 3 ? Int(arguments[3]) ?? 512 : 512
 let sceneName = arguments.count > 4 ? arguments[4].lowercased() : "cornell"
 let outputName = arguments.count > 5 ? arguments[5].lowercased() : "beauty"
+let assetPath = arguments.count > 6 ? arguments[6] : nil
 var scene: RenderScene
 let output: RenderOutput
 
 switch sceneName {
 case "materials", "material-reference", "material":
     scene = .materialReference()
+case "material-variants", "material-variant-reference", "variants":
+    if let assetPath {
+        scene = try .materialVariantReference(mesh: Mesh(contentsOf: URL(fileURLWithPath: assetPath)))
+    } else {
+        scene = .materialVariantReference()
+    }
+case "script", "scene-script", "scenescript":
+    guard let assetPath else {
+        throw DenrimRendererError.invalidScene("Script preview requires a scene script path argument.")
+    }
+    scene = try SceneScript.parse(contentsOf: URL(fileURLWithPath: assetPath))
+case "transparent-materials", "transparent-material-reference", "transparency":
+    scene = .transparentMaterialReference()
 case "cornell", "cornell-box":
     scene = .cornellBox()
 default:

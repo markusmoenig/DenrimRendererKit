@@ -2,6 +2,12 @@ import Foundation
 import Metal
 import simd
 
+enum RenderAccelerationMode {
+    case automatic
+    case flatBVH
+    case metalRayTracing
+}
+
 /// A progressive render session for one scene and settings snapshot.
 public final class RenderSession {
     /// Settings used by this session.
@@ -13,10 +19,14 @@ public final class RenderSession {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let pipeline: MTLComputePipelineState
+    private let hardwareRayTracingPipeline: MTLComputePipelineState?
     private let camera: GPUCamera
     private let previousCamera: GPUCamera
     private let triangleBuffer: MTLBuffer
     private let materialBuffer: MTLBuffer
+    private let textureDescriptorBuffer: MTLBuffer?
+    private let texturePixelBuffer: MTLBuffer?
+    private let lightIndexBuffer: MTLBuffer?
     private let accelerationNodeBuffer: MTLBuffer?
     private let primitiveIndexBuffer: MTLBuffer?
     private let accumulationTexture: MTLTexture
@@ -28,7 +38,12 @@ public final class RenderSession {
     private let motionVectorTexture: MTLTexture
     private let triangleCount: Int
     private let materialCount: Int
+    private let textureDescriptorCount: Int
+    private let texturePixelCount: Int
+    private let lightCount: Int
     private let accelerationNodeCount: Int
+    private let metalRayTracingExperiment: MetalRayTracingExperiment?
+    private let accelerationMode: RenderAccelerationMode
 
     var accelerationDebugInfo: (nodeCount: Int, hasNodeBuffer: Bool, hasPrimitiveIndexBuffer: Bool) {
         (
@@ -36,6 +51,31 @@ public final class RenderSession {
             hasNodeBuffer: accelerationNodeBuffer != nil,
             hasPrimitiveIndexBuffer: primitiveIndexBuffer != nil
         )
+    }
+
+    var metalRayTracingDebugInfo: (
+        supportsRayTracing: Bool,
+        hasTLAS: Bool,
+        hasSceneBuffers: Bool,
+        usesProductionHardwareTraversal: Bool
+    ) {
+        (
+            supportsRayTracing: metalRayTracingExperiment?.supportsRayTracing ?? false,
+            hasTLAS: metalRayTracingExperiment?.tlasResource != nil,
+            hasSceneBuffers: metalRayTracingExperiment?.sceneBuffers != nil,
+            usesProductionHardwareTraversal: canUseHardwareRayTracing
+        )
+    }
+
+    private var canUseHardwareRayTracing: Bool {
+        switch accelerationMode {
+        case .automatic, .metalRayTracing:
+            hardwareRayTracingPipeline != nil
+                && metalRayTracingExperiment?.tlasResource != nil
+                && metalRayTracingExperiment?.sceneBuffers != nil
+        case .flatBVH:
+            false
+        }
     }
 
     var aovDebugInfo: (
@@ -60,14 +100,19 @@ public final class RenderSession {
         device: MTLDevice,
         commandQueue: MTLCommandQueue,
         pipeline: MTLComputePipelineState,
+        hardwareRayTracingPipeline: MTLComputePipelineState?,
         scene: RenderScene,
-        settings: RenderSettings
+        settings: RenderSettings,
+        accelerationMode: RenderAccelerationMode = .automatic
     ) throws {
         guard settings.width > 0, settings.height > 0 else {
             throw DenrimRendererError.invalidScene("Render dimensions must be positive.")
         }
 
-        let accelerationBackend = LinearTriangleAccelerationBackend()
+        let accelerationBackend = MetalRayTracingAccelerationBackend(
+            device: device,
+            commandQueue: commandQueue
+        )
         let compiled = try accelerationBackend.build(scene: scene)
         guard !compiled.triangles.isEmpty else {
             throw DenrimRendererError.invalidScene("Scene contains no triangles.")
@@ -79,7 +124,9 @@ public final class RenderSession {
         self.device = device
         self.commandQueue = commandQueue
         self.pipeline = pipeline
+        self.hardwareRayTracingPipeline = hardwareRayTracingPipeline
         self.settings = settings
+        self.accelerationMode = accelerationMode
         self.camera = scene.camera.gpuCamera(width: settings.width, height: settings.height)
         self.previousCamera = (settings.previousCamera ?? scene.camera).gpuCamera(
             width: settings.width,
@@ -87,7 +134,11 @@ public final class RenderSession {
         )
         self.triangleCount = compiled.triangles.count
         self.materialCount = compiled.materials.count
+        self.textureDescriptorCount = compiled.textureDescriptors.count
+        self.texturePixelCount = compiled.texturePixels.count
+        self.lightCount = compiled.lightTriangleIndices.count
         self.accelerationNodeCount = compiled.bvh.nodes.count
+        self.metalRayTracingExperiment = compiled.metalRayTracingExperiment
 
         self.triangleBuffer = device.makeBuffer(
             bytes: compiled.triangles,
@@ -99,6 +150,18 @@ public final class RenderSession {
             length: MemoryLayout<GPUMaterial>.stride * compiled.materials.count,
             options: .storageModeShared
         )!
+        self.textureDescriptorBuffer = Self.makeBuffer(
+            device: device,
+            values: compiled.textureDescriptors
+        )
+        self.texturePixelBuffer = Self.makeBuffer(
+            device: device,
+            values: compiled.texturePixels
+        )
+        self.lightIndexBuffer = Self.makeBuffer(
+            device: device,
+            values: compiled.lightTriangleIndices
+        )
         self.accelerationNodeBuffer = Self.makeBuffer(
             device: device,
             values: compiled.bvh.nodes
@@ -150,12 +213,17 @@ public final class RenderSession {
             sampleIndex: UInt32(sampleCount),
             maxBounces: UInt32(max(1, settings.maxBounces)),
             frameSeed: UInt32(0x1234ABCD),
-            accelerationNodeCount: UInt32(accelerationNodeCount)
+            accelerationNodeCount: UInt32(accelerationNodeCount),
+            transparentBackground: settings.transparentBackground ? 1 : 0,
+            lightCount: UInt32(lightCount),
+            padding1: 0,
+            padding2: 0
         )
         var camera = camera
         var previousCamera = previousCamera
 
-        encoder.setComputePipelineState(pipeline)
+        let useHardwareRayTracing = canUseHardwareRayTracing
+        encoder.setComputePipelineState(useHardwareRayTracing ? hardwareRayTracingPipeline! : pipeline)
         encoder.setTexture(accumulationTexture, index: 0)
         encoder.setTexture(depthTexture, index: 1)
         encoder.setTexture(normalTexture, index: 2)
@@ -170,6 +238,16 @@ public final class RenderSession {
         encoder.setBuffer(accelerationNodeBuffer, offset: 0, index: 4)
         encoder.setBuffer(primitiveIndexBuffer, offset: 0, index: 5)
         encoder.setBytes(&previousCamera, length: MemoryLayout<GPUCamera>.stride, index: 6)
+        encoder.setBuffer(textureDescriptorBuffer, offset: 0, index: 10)
+        encoder.setBuffer(texturePixelBuffer, offset: 0, index: 11)
+        encoder.setBuffer(lightIndexBuffer, offset: 0, index: 12)
+        if useHardwareRayTracing,
+           let tlasResource = metalRayTracingExperiment?.tlasResource,
+           let sceneBuffers = metalRayTracingExperiment?.sceneBuffers {
+            encoder.setAccelerationStructure(tlasResource.accelerationStructure, bufferIndex: 7)
+            encoder.setBuffer(sceneBuffers.localTriangleBuffer, offset: 0, index: 8)
+            encoder.setBuffer(sceneBuffers.instanceBuffer, offset: 0, index: 9)
+        }
 
         let threadgroup = MTLSize(width: 8, height: 8, depth: 1)
         let grid = MTLSize(width: settings.width, height: settings.height, depth: 1)

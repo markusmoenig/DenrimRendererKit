@@ -1,0 +1,20 @@
+{
+  "scene": "scripted-texture-normal",
+  "samples": 1,
+  "maxBounces": 1,
+  "metrics": {
+    "width": 48,
+    "height": 48,
+    "averageBrightness": 166.5,
+    "maxBrightness": 209.0,
+    "uniqueColorEstimate": 2,
+    "topCenterMaxBrightness": 209.0,
+    "bottomCenterMaxBrightness": 209.0
+  },
+  "tolerance": {
+    "averageBrightness": 3.0,
+    "maxBrightness": 4.0,
+    "uniqueColorEstimate": 1,
+    "regionalBrightness": 4.0
+  }
+}

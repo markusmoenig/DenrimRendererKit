@@ -1,4 +1,7 @@
+import CoreGraphics
+import ImageIO
 import Metal
+import simd
 import XCTest
 @testable import DenrimRendererKit
 
@@ -113,6 +116,47 @@ final class AOVTests: XCTestCase {
         XCTAssertGreaterThan(byteCount, 0)
     }
 
+    func testAlbedoOutputPreservesMaterialOpacity() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer(device: device)
+        let session = try renderer.makeSession(
+            scene: opacityScene(opacity: 0.35),
+            settings: RenderSettings(width: 16, height: 16, maxBounces: 1),
+            accelerationMode: .flatBVH
+        )
+
+        try session.renderNextSample()
+        let albedo = try session.pixels(for: .albedo).filter { $0.a > 0 }
+
+        XCTAssertTrue(albedo.contains { abs($0.a - 0.35) < 0.02 })
+    }
+
+    func testAlbedoPNGPreservesMaterialOpacity() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer(device: device)
+        let session = try renderer.makeSession(
+            scene: opacityScene(opacity: 0.35),
+            settings: RenderSettings(width: 16, height: 16, maxBounces: 1),
+            accelerationMode: .flatBVH
+        )
+
+        try session.renderNextSample()
+        let outputURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("DenrimRendererKit-AlbedoOpacity.png")
+        try? FileManager.default.removeItem(at: outputURL)
+
+        try session.writePNG(output: .albedo, to: outputURL)
+        let alphas = try pngAlphas(at: outputURL)
+
+        XCTAssertTrue(alphas.contains { abs(Int($0) - 89) <= 3 })
+    }
+
     func testPNGVisualizationUsesOutputSpecificEncoding() {
         let depthPixels = [
             RenderOutputPixel(r: 0, g: 0, b: 0, a: 0),
@@ -159,5 +203,45 @@ final class AOVTests: XCTestCase {
             let value = Int(pixel.r.rounded())
             return value > 0 ? value : nil
         }).count
+    }
+
+    private func opacityScene(opacity: Float) -> RenderScene {
+        var scene = RenderScene(
+            camera: Camera(
+                origin: SIMD3<Float>(0, 0, 3),
+                target: SIMD3<Float>(0, 0, 0),
+                verticalFieldOfViewDegrees: 34
+            )
+        )
+        let material = scene.addMaterial(Material(
+            baseColor: SIMD3<Float>(0.7, 0.2, 0.1),
+            roughness: 0.8,
+            opacity: opacity
+        ))
+        scene.add(mesh: .quad(
+            SIMD3<Float>(-1, -1, 0),
+            SIMD3<Float>(1, -1, 0),
+            SIMD3<Float>(1, 1, 0),
+            SIMD3<Float>(-1, 1, 0)
+        ), material: material)
+        return scene
+    }
+
+    private func pngAlphas(at url: URL) throws -> [UInt8] {
+        let data = try Data(contentsOf: url)
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
+        let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
+        let context = try XCTUnwrap(CGContext(
+            data: &pixels,
+            width: image.width,
+            height: image.height,
+            bitsPerComponent: 8,
+            bytesPerRow: image.width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return stride(from: 3, to: pixels.count, by: 4).map { pixels[$0] }
     }
 }

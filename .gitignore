@@ -1,26 +1,62 @@
 # macOS
 .DS_Store
+.DS_Store?
 .AppleDouble
 .LSOverride
 Icon?
 ._*
+.localized
 .Spotlight-V100
 .Trashes
+.fseventsd
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.DocumentRevisions-V100
+.TemporaryItems
+.apdisk
 
-# Xcode user and build state
+# Xcode user state
 DerivedData/
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
 *.xcuserstate
 xcuserdata/
 *.xccheckout
 *.xcscmblueprint
 *.moved-aside
+
+# Xcode build, test, and archive products
 *.xcresult
 *.xcarchive
+*.hmap
+*.ipa
+*.dSYM/
+*.dSYM.zip
+*.bcsymbolmap
+*.resultbundle/
+*.testresult/
+*.profdata
+*.profraw
+*.gcda
+*.gcno
+*.xctestproducts
+
+# Xcode automatic backups and playground state
+*.playground/
+timeline.xctimeline
+playground.xcworkspace/
 
 # Swift Package Manager
 .build/
 .swiftpm/
 Package.resolved
+.package.resolved
 
 # Generated Xcode projects/workspaces
 *.xcodeproj/
@@ -28,9 +64,21 @@ Package.resolved
 
 # Build products and local artifacts
 build/
-*.dSYM/
-*.dSYM.zip
-*.ipa
+Build/
+.build-*/
+Products/
+TestResults/
+Reports/
+Logs/
+coverage/
+.coverage/
+*.lcov
+
+# Simulator and signing scratch
+CoreSimulator/
+*.mobileprovision
+*.provisionprofile
+*.p12
 
 # Local render previews and generated images
 CornellBox.png

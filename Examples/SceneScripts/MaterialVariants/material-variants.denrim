@@ -1,0 +1,17 @@
+# Self-contained material validation scene.
+# Replace Meshes/fixture.ply with a local dragon.ply for a classic benchmark view.
+camera origin(0, 1.45, 5.8) target(0, 0.62, 0) fov(34)
+
+include Materials/standard.denrim
+
+mesh subject Meshes/fixture.ply
+
+quad floor a(-3.4, 0, 2.25) b(3.4, 0, 2.25) c(3.4, 0, -2.25) d(-3.4, 0, -2.25)
+quad back a(-3.4, 0, -2.25) b(3.4, 0, -2.25) c(3.4, 2.7, -2.25) d(-3.4, 2.7, -2.25)
+quad light a(-0.95, 2.62, -0.7) b(0.95, 2.62, -0.7) c(0.95, 2.62, 0.45) d(-0.95, 2.62, 0.45)
+
+instance subject matteClay position(-2.0, 0, 0.1) scale(1, 1, 1) rotationY(-0.35)
+instance subject satinPlastic position(-1.0, 0, -0.05) scale(1, 1, 1) rotationY(-0.12)
+instance subject brushedMetal position(0, 0, 0.06) scale(1, 1, 1) rotationY(0.08)
+instance subject polishedMetal position(1.0, 0, -0.04) scale(1, 1, 1) rotationY(0.28)
+instance subject coatedGreen position(2.0, 0, 0.08) scale(1, 1, 1) rotationY(0.48)

@@ -15,6 +15,11 @@ struct GPUTriangle {
     var n0: SIMD4<Float>
     var n1: SIMD4<Float>
     var n2: SIMD4<Float>
+    var uv0: SIMD4<Float>
+    var uv1: SIMD4<Float>
+    var uv2: SIMD4<Float>
+    var tangent: SIMD4<Float>
+    var bitangent: SIMD4<Float>
     var materialID: UInt32
     var objectID: UInt32
     var primitiveID: UInt32
@@ -25,6 +30,12 @@ struct GPUMaterial {
     var baseColor: SIMD4<Float>
     var emission: SIMD4<Float>
     var parameters: SIMD4<Float>
+    var parameters2: SIMD4<Float>
+    var specularColor: SIMD4<Float>
+}
+
+struct GPUTextureDescriptor {
+    var metadata: SIMD4<UInt32>
 }
 
 struct GPUAccelerationNode: Equatable {
@@ -42,6 +53,18 @@ struct GPURenderConstants {
     var maxBounces: UInt32
     var frameSeed: UInt32
     var accelerationNodeCount: UInt32
+    var transparentBackground: UInt32
+    var lightCount: UInt32
+    var padding1: UInt32
+    var padding2: UInt32
+}
+
+struct GPURayTracingInstance {
+    var metadata: SIMD4<UInt32>
+    var normalTransform0: SIMD4<Float>
+    var normalTransform1: SIMD4<Float>
+    var normalTransform2: SIMD4<Float>
+    var normalTransform3: SIMD4<Float>
 }
 
 extension SIMD4<Float> {

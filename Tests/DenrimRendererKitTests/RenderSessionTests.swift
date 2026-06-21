@@ -17,5 +17,12 @@ final class RenderSessionTests: XCTestCase {
         XCTAssertGreaterThan(session.accelerationDebugInfo.nodeCount, 0)
         XCTAssertTrue(session.accelerationDebugInfo.hasNodeBuffer)
         XCTAssertTrue(session.accelerationDebugInfo.hasPrimitiveIndexBuffer)
+        XCTAssertEqual(session.metalRayTracingDebugInfo.supportsRayTracing, device.supportsRaytracing)
+
+        if device.supportsRaytracing {
+            XCTAssertTrue(session.metalRayTracingDebugInfo.hasTLAS)
+            XCTAssertTrue(session.metalRayTracingDebugInfo.hasSceneBuffers)
+            XCTAssertTrue(session.metalRayTracingDebugInfo.usesProductionHardwareTraversal)
+        }
     }
 }
