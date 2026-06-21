@@ -1,0 +1,42 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# Xcode user and build state
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.xcscmblueprint
+*.moved-aside
+*.xcresult
+*.xcarchive
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Generated Xcode projects/workspaces
+*.xcodeproj/
+*.xcworkspace/
+
+# Build products and local artifacts
+build/
+*.dSYM/
+*.dSYM.zip
+*.ipa
+
+# Local render previews and generated images
+CornellBox.png
+MaterialReference.png
+MaterialAlbedo.png
+MaterialDepth.png
+MaterialID.png
+ObjectID.png
+MaterialMotion.png

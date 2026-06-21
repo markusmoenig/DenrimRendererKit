@@ -1,0 +1,20 @@
+{
+  "scene": "cornell",
+  "samples": 4,
+  "maxBounces": 2,
+  "metrics": {
+    "width": 48,
+    "height": 48,
+    "averageBrightness": 94.0,
+    "maxBrightness": 255.0,
+    "uniqueColorEstimate": 68,
+    "topCenterMaxBrightness": 255.0,
+    "bottomCenterMaxBrightness": 160.0
+  },
+  "tolerance": {
+    "averageBrightness": 20.0,
+    "maxBrightness": 20.0,
+    "uniqueColorEstimate": 35,
+    "regionalBrightness": 80.0
+  }
+}
