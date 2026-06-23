@@ -17,6 +17,9 @@ The current public `Material` supports:
 * `clearcoatThickness`
 * `clearcoatRoughness`
 * `clearcoatIndexOfRefraction`
+* `thinFilm`
+* `thinFilmThicknessNanometers`
+* `thinFilmIndexOfRefraction`
 * `sheen`
 * `sheenColor`
 * `sheenRoughness`
@@ -33,7 +36,7 @@ The current public `Material` supports:
 * `baseColorTexture`
 * `normalMap`
 
-`specular`, `specularColor`, `indexOfRefraction`, and `specularAnisotropy` are active shader controls. They drive the dielectric Fresnel F0 and anisotropic GGX base-specular lobe; the default IOR of 1.5, white specular color, and zero anisotropy keep the earlier hard-coded 0.04 isotropic dielectric F0 behavior. The anisotropic lobe uses mesh tangent / bitangent frames, including normal-map-adjusted frames, for direct lighting, MIS PDFs, and sampled indirect specular bounces. Specular and clearcoat bounce sampling use visible-normal GGX sampling, lobe-probability compensation, and GGX `BRDF * cos / PDF` weighting rather than Fresnel-only throughput. Sampled diffuse and base-specular indirect bounces apply the same Fresnel and clearcoat base-layer attenuation used by direct BRDF evaluation. `clearcoat`, `clearcoatColor`, `clearcoatAttenuationColor`, `clearcoatThickness`, `clearcoatRoughness`, and `clearcoatIndexOfRefraction` are active shader controls for a secondary isotropic GGX coating lobe that attenuates the base layer. `clearcoatColor` tints the coating Fresnel response. `clearcoatAttenuationColor` controls Beer-style attenuation through the coating depth and inherits `clearcoatColor` when omitted; thickness zero keeps the previous dielectric clearcoat behavior.
+`specular`, `specularColor`, `indexOfRefraction`, and `specularAnisotropy` are active shader controls. They drive the dielectric Fresnel F0 and anisotropic GGX base-specular lobe; the default IOR of 1.5, white specular color, and zero anisotropy keep the earlier hard-coded 0.04 isotropic dielectric F0 behavior. The anisotropic lobe uses mesh tangent / bitangent frames, including normal-map-adjusted frames, for direct lighting, MIS PDFs, and sampled indirect specular bounces. Specular and clearcoat bounce sampling use visible-normal GGX sampling, lobe-probability compensation, and GGX `BRDF * cos / PDF` weighting rather than Fresnel-only throughput. Sampled diffuse and base-specular indirect bounces apply the same Fresnel and clearcoat base-layer attenuation used by direct BRDF evaluation. `clearcoat`, `clearcoatColor`, `clearcoatAttenuationColor`, `clearcoatThickness`, `clearcoatRoughness`, and `clearcoatIndexOfRefraction` are active shader controls for a secondary isotropic GGX coating lobe that attenuates the base layer. `clearcoatColor` tints the coating Fresnel response. `clearcoatAttenuationColor` controls Beer-style attenuation through the coating depth and inherits `clearcoatColor` when omitted; thickness zero keeps the previous dielectric clearcoat behavior. `thinFilm`, `thinFilmThicknessNanometers`, and `thinFilmIndexOfRefraction` apply an angle-dependent interference tint to reflective specular and clearcoat Fresnel terms, giving coated plastics, soap-film looks, and iridescent paints a first renderer-native path.
 
 `sheen`, `sheenColor`, and `sheenRoughness` are active shader controls for a MoonRay-inspired fuzz / fabric lobe. The implementation uses a grazing Charlie-style sheen response for direct lighting and folds sheen energy into the diffuse sampling path for indirect bounces. It is intended for cloth, velvet-like stylized surfaces, dusty clay, and soft edge highlights without introducing a separate production fabric material yet.
 
@@ -52,7 +55,7 @@ Relevant MoonRay material families and properties include:
 * Subsurface scattering with BSSRDF model, scattering color, and scattering radius.
 * Specular roughness, anisotropy, tangent direction, metallic color, edge color, specular model, and IOR.
 * Transmission and refraction with transmission color, transmission roughness, independent IOR, and dispersion.
-* Clearcoat with roughness, thickness, IOR, attenuation color, and independent clearcoat normals.
+* Clearcoat with roughness, thickness, IOR, attenuation color, thin-film interference, and independent clearcoat normals.
 * Presence / cutout visibility for masks and thin geometry.
 * Fuzz / sheen style lobes.
 * Iridescence controls.
@@ -73,7 +76,7 @@ Recommended staged properties:
 * Specular: implemented first with specular weight, specular color, IOR, and anisotropy; later expand to anisotropy rotation and model selection.
 * Transmission: implemented first with transmission weight, transmission color, transmission roughness, transmission IOR, and measured absorption; later expand to dispersion, nested dielectric priority, and caustic controls.
 * Thin surfaces: implemented first with thin-walled specular transmission; later expand to diffuse transmission and richer shadow transparency controls.
-* Clearcoat: implemented first with clearcoat weight, tint, independent attenuation color, thickness-based attenuation, roughness, and IOR; later expand to independent clearcoat normals.
+* Clearcoat: implemented first with clearcoat weight, tint, independent attenuation color, thickness-based attenuation, roughness, IOR, and thin-film interference; later expand to independent clearcoat normals.
 * Sheen / fuzz: implemented first with sheen weight, sheen color, and sheen roughness; later expand to independent normal input and richer fabric / velvet controls.
 * Subsurface: SSS weight, radius, color, scale, and model selection.
 * Emission: emission color, strength, and light-record integration.
@@ -107,7 +110,10 @@ Current built-in material reference scenes:
 * `RenderScene.materialVariantReference(mesh:)` renders one caller-supplied mesh through matte / sheen, plastic, anisotropic brushed metal, polished metal, and tinted-clearcoat variants for visual material validation. It is suitable for local benchmark assets such as a Stanford Dragon PLY or OBJ without requiring the package to redistribute that mesh.
 * `Examples/SceneScripts/MaterialVariants/material-variants.denrim` provides the same idea as a script template with reusable material includes, relative mesh paths, and checked-in rendered output.
 * `Examples/SceneScripts/MaterialVariants/glossy-metal-reference.denrim` is a self-contained glossy reflection target for polished, rough, and clearcoated silver. Bright, dark, and warm reflection cards make it useful for validating metal energy, Fresnel, and clearcoat behavior without tuning a large interior scene.
+* `Examples/SceneScripts/MaterialTestBall/material-testball.denrim` uses the public-domain Material Test Ball mesh with a Poly Haven studio HDRI, floor, soft fill, and reflection cards for single-material preview thumbnails. HDRI importance sampling keeps the studio environment useful as lighting, not just reflections.
 * `Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim` applies the same material set to the Stanford Dragon after `./Examples/Tools/fetch-stanford-dragon.sh` downloads the benchmark mesh.
 * `RenderScene.transparentMaterialReference()` covers opacity planning, semi-transparent albedo alpha, fully transparent camera-ray cutout pass-through, measured absorption setup, and a rear visible surface for transmission / refraction comparison.
+
+Reusable built-in material presets are exposed through `BuiltInMaterialLibrary` and SceneScript's `material name preset preset-id` form. The first catalog includes matte surfaces, plastics, fabrics, metals, coated paints, `coating.iridescent-amber`, glass, water, ceramics, and emissive panels. These are renderer-native presets rather than a full MoonRay clone, but their identifiers are stable enough for Denrim product UIs to query and display.
 
 The transparent scene is intentionally a planning reference. Today it proves that opacity data reaches AOVs, fully transparent cutouts reveal rear surfaces, and transmissive materials exercise rough dielectric refraction with measured absorption parameters. It should keep growing into the first visual target for semi-transparent blending, nested dielectric priority, caustics behavior, and layered material behavior.

@@ -58,6 +58,29 @@ final class TextureLoadingTests: XCTestCase {
         XCTAssertEqual(texture.pixels[0].w, 1, accuracy: 0.001)
     }
 
+    func testLoadsRadianceHDRPixelsAsLinearTexture() throws {
+        let url = try writeFixtureHDR(
+            name: "TextureLoading-radiance.hdr",
+            width: 2,
+            height: 1,
+            rgbe: [
+                128, 64, 32, 129,
+                0, 0, 0, 0
+            ]
+        )
+
+        let texture = try Texture2D(contentsOf: url, colorEncoding: .linear)
+
+        XCTAssertEqual(texture.width, 2)
+        XCTAssertEqual(texture.height, 1)
+        XCTAssertEqual(texture.samplingMode, .linear)
+        XCTAssertEqual(texture.pixels[0].x, 1, accuracy: 0.001)
+        XCTAssertEqual(texture.pixels[0].y, 0.5, accuracy: 0.001)
+        XCTAssertEqual(texture.pixels[0].z, 0.25, accuracy: 0.001)
+        XCTAssertEqual(texture.pixels[0].w, 1, accuracy: 0.001)
+        XCTAssertEqual(texture.pixels[1], SIMD4<Float>(0, 0, 0, 1))
+    }
+
     func testTextureSamplingModeDefaultsAndOverrides() throws {
         let url = try writeFixturePNG(
             name: "TextureLoading-sampling.png",
@@ -137,6 +160,23 @@ final class TextureLoadingTests: XCTestCase {
         ))
         CGImageDestinationAddImage(destination, image, nil)
         XCTAssertTrue(CGImageDestinationFinalize(destination))
+        return url
+    }
+
+    private func writeFixtureHDR(
+        name: String,
+        width: Int,
+        height: Int,
+        rgbe: [UInt8]
+    ) throws -> URL {
+        XCTAssertEqual(rgbe.count, width * height * 4)
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(name)
+        try? FileManager.default.removeItem(at: url)
+
+        var data = Data("#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y \(height) +X \(width)\n".utf8)
+        data.append(contentsOf: rgbe)
+        try data.write(to: url)
         return url
     }
 }

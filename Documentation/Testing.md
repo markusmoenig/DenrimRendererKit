@@ -52,12 +52,12 @@ This catches blank renders, major lighting shifts, orientation bugs, and severe 
 
 Current test foundation:
 
-* API tests validate the built-in Cornell Box scene, material GPU parameter packing, and render setting defaults.
-* Scene script tests validate parsing, file-based parsing, comments, includes, generated textures, image texture assets with base-URL resolution, mesh assets with base-URL resolution, include files with script-relative resolution, named/grouped geometry arguments with comma separators, specular color / IOR / anisotropy / clearcoat tint, attenuation color, and thickness / transmission absorption / thin-walled material parameters, textured materials, quads, boxes, imported mesh instances, transformed instances, include cycle handling, useful parser errors, scripted UV/normal-map rendering, scripted image-texture rendering, and scripted imported-mesh rendering.
+* API tests validate the built-in Cornell Box scene, material GPU parameter packing including thin-film controls, built-in material preview metadata / thumbnail coverage, and render setting defaults.
+* Scene script tests validate parsing, file-based parsing, comments, includes, generated textures, image texture assets with base-URL resolution, mesh assets with base-URL resolution, include files with script-relative resolution, named/grouped geometry arguments with comma separators, built-in material presets, specular color / IOR / anisotropy / clearcoat tint, attenuation color, thickness, and thin-film controls / transmission absorption / thin-walled material parameters, textured materials, quads, boxes, imported mesh instances, transformed instances, include cycle handling, useful parser errors, scripted UV/normal-map rendering, scripted image-texture rendering, and scripted imported-mesh rendering.
 * CPU intersector tests provide deterministic triangle-hit reference behavior.
 * Transform tests validate point transforms, normal transforms, materialized instance transforms, and top-level instance bounds during scene compilation.
 * BVH builder tests validate empty builds, leaf construction, primitive remapping, bounds, and leaf size limits.
-* BVH flattener tests validate GPU node metadata, primitive index buffers, emissive light-record compilation, instance acceleration records, top-level instance bounds, acceleration backend output, and guarded Metal ray tracing BLAS/TLAS resource builds.
+* BVH flattener tests validate GPU node metadata, primitive index buffers, emissive light-record compilation, HDRI environment importance distributions, instance acceleration records, top-level instance bounds, acceleration backend output, and guarded Metal ray tracing BLAS/TLAS resource builds.
 * Metal ray tracing traversal probe tests compare hardware TLAS traversal against the CPU triangle intersector on supported devices.
 * Render session tests validate that Metal sessions prepare acceleration buffers and select the production hardware traversal path on supported devices.
 * Hardware traversal parity tests force both hardware TLAS and flat BVH backends, then compare primary depth, normal, albedo, material ID, and object ID AOVs for simple, Cornell Box, and material reference scenes.
@@ -66,7 +66,7 @@ Current test foundation:
 * AOV tests validate that depth, normal, albedo, material ID, object ID, and motion vector textures exist, receive primary-surface data, preserve material opacity in albedo alpha, can be read through the public output API, can be exported as PNGs, and use output-specific PNG visualization encoding.
 * Denoising tests validate that the opt-in Apple MPS SVGF denoiser and experimental simple spatial denoiser allocate output textures, build their Metal support pipelines, produce finite beauty pixels, and change low-sample beauty output without altering the raw AOV contract.
 * Opacity transport tests validate that fully transparent primary surfaces reveal rear albedo and emission instead of behaving like opaque blockers.
-* Texture loading tests validate PNG dimensions, alpha, missing-file errors, and explicit sRGB versus linear import behavior.
+* Texture loading tests validate PNG dimensions, alpha, missing-file errors, explicit sRGB versus linear import behavior, and Radiance HDR/RGBE decoding.
 * Mesh import tests validate OBJ loading, ASCII PLY loading, binary little-endian PLY loading, quad triangulation, UV/normal packing, relative face indices, and unsupported-format errors.
 * Texture material tests render UV quads and verify that checker base color textures feed the albedo AOV, tangent-space normal maps feed the normal AOV, and linear texture filtering produces blended albedo.
 * Transparent export tests validate raw beauty alpha, default opaque sky behavior, PNG alpha preservation, and stored transparent-export alpha metrics.

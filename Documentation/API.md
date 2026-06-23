@@ -43,6 +43,7 @@ Initial public types:
 * `RenderOutput`
 * `RenderOutputPixel`
 * `RenderScene`
+* `Environment`
 * `Camera`
 * `Transform`
 * `SceneScript`
@@ -54,6 +55,9 @@ Initial public types:
 * `MeshLoadingError`
 * `Material`
 * `MaterialID`
+* `BuiltInMaterialLibrary`
+* `BuiltInMaterialPreset`
+* `BuiltInMaterialCategory`
 * `Texture2D`
 * `TextureColorEncoding`
 * `TextureSamplingMode`
@@ -91,7 +95,7 @@ Scene compilation now builds an internal instance acceleration model with local 
 
 ## Materials and Textures
 
-`Material` currently exposes scalar base color, emission, roughness, metallic, dielectric specular weight/color/anisotropy, index of refraction, clearcoat weight/tint/attenuation/thickness/roughness/IOR, sheen/fuzz weight/color/roughness, opacity, dielectric transmission weight/color/roughness/IOR/absorption/thin-wall mode, plus optional in-memory texture inputs:
+`Material` currently exposes scalar base color, emission, roughness, metallic, dielectric specular weight/color/anisotropy, index of refraction, clearcoat weight/tint/attenuation/thickness/roughness/IOR, thin-film interference strength/thickness/IOR, sheen/fuzz weight/color/roughness, opacity, dielectric transmission weight/color/roughness/IOR/absorption/thin-wall mode, plus optional in-memory texture inputs:
 
 ```swift
 let checker = Texture2D.checker(
@@ -120,6 +124,9 @@ let material = Material(
     clearcoatThickness: 0.35,
     clearcoatRoughness: 0.08,
     clearcoatIndexOfRefraction: 1.5,
+    thinFilm: 0.75,
+    thinFilmThicknessNanometers: 430,
+    thinFilmIndexOfRefraction: 1.38,
     sheen: 0.35,
     sheenColor: SIMD3<Float>(0.9, 0.8, 1.0),
     sheenRoughness: 0.75,
@@ -128,11 +135,34 @@ let material = Material(
 )
 ```
 
-`specular`, `specularColor`, `indexOfRefraction`, and `specularAnisotropy` drive dielectric Fresnel reflectance and anisotropic GGX shape for the current base specular lobe. `transmission`, `transmissionColor`, `transmissionRoughness`, `transmissionIndexOfRefraction`, `transmissionAbsorptionColor`, `transmissionAbsorptionDistance`, and `thinWalled` enable rough dielectric reflection/refraction with explicit tint, independent roughness/IOR, Beer-style exit absorption for solid visible paths and direct-light shadows, a straight-through thin-sheet mode, and transparent shadowing; omitted transmission controls inherit from base color, roughness, and surface IOR, while absorption is disabled when its distance is zero. `clearcoat`, `clearcoatColor`, `clearcoatAttenuationColor`, `clearcoatThickness`, `clearcoatRoughness`, and `clearcoatIndexOfRefraction` add a secondary tinted isotropic GGX coating lobe above the base material, with optional Beer-style base-layer attenuation through the coating depth. Omitted clearcoat attenuation color inherits the clearcoat tint. `sheen`, `sheenColor`, and `sheenRoughness` add an active grazing fuzz / fabric lobe for cloth, velvet-like stylized surfaces, and soft edge highlights. The default IOR of 1.5, white specular and clearcoat colors, zero clearcoat thickness, and zero anisotropy preserve the earlier 0.04 isotropic dielectric F0 baseline.
+`specular`, `specularColor`, `indexOfRefraction`, and `specularAnisotropy` drive dielectric Fresnel reflectance and anisotropic GGX shape for the current base specular lobe. `transmission`, `transmissionColor`, `transmissionRoughness`, `transmissionIndexOfRefraction`, `transmissionAbsorptionColor`, `transmissionAbsorptionDistance`, and `thinWalled` enable rough dielectric reflection/refraction with explicit tint, independent roughness/IOR, Beer-style exit absorption for solid visible paths and direct-light shadows, a straight-through thin-sheet mode, and transparent shadowing; omitted transmission controls inherit from base color, roughness, and surface IOR, while absorption is disabled when its distance is zero. `clearcoat`, `clearcoatColor`, `clearcoatAttenuationColor`, `clearcoatThickness`, `clearcoatRoughness`, and `clearcoatIndexOfRefraction` add a secondary tinted isotropic GGX coating lobe above the base material, with optional Beer-style base-layer attenuation through the coating depth. Omitted clearcoat attenuation color inherits the clearcoat tint. `thinFilm`, `thinFilmThicknessNanometers`, and `thinFilmIndexOfRefraction` add angle-dependent interference tint to reflective specular and clearcoat Fresnel terms; strength zero disables it. `sheen`, `sheenColor`, and `sheenRoughness` add an active grazing fuzz / fabric lobe for cloth, velvet-like stylized surfaces, and soft edge highlights. The default IOR of 1.5, white specular and clearcoat colors, zero clearcoat thickness, zero thin-film strength, and zero anisotropy preserve the earlier 0.04 isotropic dielectric F0 baseline.
 
-Textures are stored as linear RGBA `Float` pixels in row-major order. Image assets can be decoded through ImageIO with explicit `.sRGB` or `.linear` RGB handling; use `.sRGB` for ordinary color textures and `.linear` for data textures such as normal maps. The first GPU implementation samples them by mesh UVs inside both the flat BVH and hardware TLAS kernels, with nearest and bilinear sampling modes. Mipmapping and native Metal texture objects are future API work.
+Textures are stored as linear RGBA `Float` pixels in row-major order. Image assets can be decoded through ImageIO with explicit `.sRGB` or `.linear` RGB handling; use `.sRGB` for ordinary color textures and `.linear` for data textures such as normal maps. Radiance `.hdr` files decode through the same `Texture2D` API as linear RGBE data. The first GPU implementation samples textures by mesh UVs inside both the flat BVH and hardware TLAS kernels, with nearest and bilinear sampling modes. Mipmapping and native Metal texture objects are future API work.
+
+Scenes expose `RenderScene.environment`, an `Environment` with optional equirectangular texture, intensity, Y rotation, and preview radiance clamp. Rays that miss geometry sample this environment, and HDRI textures also build an importance distribution for direct-light sampling and MIS, so material-preview scenes can use HDRIs as lighting instead of only as a background/reflection source:
+
+```swift
+scene.environment = Environment(
+    texture: try Texture2D(contentsOf: hdriURL, colorEncoding: .linear),
+    intensity: 0.9,
+    rotationY: 2.9,
+    maxRadiance: 6
+)
+```
 
 The current material API is intentionally small. `Documentation/Materials.md` tracks the MoonRay-inspired direction for a future Denrim Standard Surface that grows from the current specular anisotropy, transmission, clearcoat, and sheen/fuzz controls toward subsurface, layering, and diagnostic controls.
+
+Built-in material presets are available for product UIs, examples, and script authoring through `BuiltInMaterialLibrary`:
+
+```swift
+let metalPresets = BuiltInMaterialLibrary.presets(in: .metal)
+let glass = BuiltInMaterialLibrary.material(named: "glass.thin-pane")
+let presetIDs = BuiltInMaterialLibrary.identifiers
+let preview = BuiltInMaterialLibrary.preview(named: "metal.brushed-aluminum")
+let thumbnailPath = preview?.thumbnailPath
+```
+
+Preset identifiers are stable strings such as `matte.clay`, `metal.brushed-aluminum`, `coating.iridescent-amber`, `glass.thin-pane`, `ceramic.white`, and `emission.warm-panel`. Lookup is case-insensitive and treats underscores like hyphens. `BuiltInMaterialLibrary.previews` exposes the same ordered identifiers with display name, category, description, and repository-relative generated thumbnail path for material-browser UIs.
 
 Future procedural material APIs should mirror SceneScript procedural commands. Denrim apps should be able to build typed procedural values in Swift, bind them to Standard Surface parameters, and get the same renderer behavior as script-authored scenes:
 
@@ -219,7 +249,7 @@ let scene = try SceneScript.parse(source)
 let session = try renderer.makeSession(scene: scene)
 ```
 
-The first script version supports comments, includes, camera, solid/checker/image texture definitions, OBJ/PLY mesh definitions, material texture bindings, quad, box, and imported mesh instance commands. Geometry commands support readable named groups such as `origin(0, 1.4, 4)`, `a(-2, 0, 2)`, `position(0, 0, 0)`, `scale(1, 1, 1)`, and `rotationY(0.25)` while keeping older positional forms for compatibility. Image texture and mesh paths can be resolved relative to a caller-provided `baseURL`, with explicit sRGB/linear color decoding and nearest/linear sampler selection for images. It is intended for reference tests, examples, and future Denrim Render automation.
+The first script version supports comments, includes, camera, environment images, solid/checker/image texture definitions, OBJ/PLY mesh definitions, material texture bindings, quad, box, and imported mesh instance commands. Geometry commands support readable named groups such as `origin(0, 1.4, 4)`, `a(-2, 0, 2)`, quad texture coordinates such as `uvA(0, 0)`, `position(0, 0, 0)`, `scale(1, 1, 1)`, and `rotationY(0.25)` while keeping older positional forms for compatibility. Environment image, image texture, and mesh paths can be resolved relative to a caller-provided `baseURL`, with explicit sRGB/linear color decoding and nearest/linear sampler selection for images. It is intended for reference tests, examples, and future Denrim Render automation.
 Reusable script fragments can be composed with `include` commands by using `SceneScript.parse(contentsOf:)` for file-based scripts or by passing an include resolver closure to `SceneScript.parse`.
 
 Interactive products can keep decoded meshes and image textures warm across repeated parses with `SceneAssetCache`:

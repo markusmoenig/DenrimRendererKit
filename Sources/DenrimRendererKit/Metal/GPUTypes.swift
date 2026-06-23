@@ -38,6 +38,7 @@ struct GPUMaterial {
     var clearcoatColor: SIMD4<Float>
     var clearcoatAttenuation: SIMD4<Float>
     var transmissionAbsorption: SIMD4<Float>
+    var thinFilm: SIMD4<Float>
 }
 
 struct GPUTextureDescriptor {
@@ -50,6 +51,10 @@ struct GPULightRecord {
     var area: Float
     var selectionCDF: Float
     var normal: SIMD4<Float>
+}
+
+struct GPUEnvironmentSample {
+    var distribution: SIMD2<Float>
 }
 
 struct GPUAccelerationNode: Equatable {
@@ -69,6 +74,11 @@ struct GPURenderConstants {
     var accelerationNodeCount: UInt32
     var transparentBackground: UInt32
     var lightCount: UInt32
+    var environmentTextureIndexPlusOne: UInt32
+    var environmentDistributionCount: UInt32
+    var environmentIntensity: Float
+    var environmentRotationY: Float
+    var environmentMaxRadiance: Float
     var padding1: UInt32
     var padding2: UInt32
 }

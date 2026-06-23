@@ -59,6 +59,15 @@ public struct Material: Sendable {
     /// Index of refraction used for clearcoat Fresnel behavior.
     public var clearcoatIndexOfRefraction: Float
 
+    /// Thin-film interference strength in the range 0...1 for reflective lobes.
+    public var thinFilm: Float
+
+    /// Thin-film optical thickness in nanometers.
+    public var thinFilmThicknessNanometers: Float
+
+    /// Index of refraction for the thin-film layer.
+    public var thinFilmIndexOfRefraction: Float
+
     /// Grazing fabric / fuzz reflection weight in the range 0...1.
     public var sheen: Float
 
@@ -115,6 +124,9 @@ public struct Material: Sendable {
         clearcoatThickness: Float = 0,
         clearcoatRoughness: Float = 0.1,
         clearcoatIndexOfRefraction: Float = 1.5,
+        thinFilm: Float = 0,
+        thinFilmThicknessNanometers: Float = 450,
+        thinFilmIndexOfRefraction: Float = 1.45,
         sheen: Float = 0,
         sheenColor: SIMD3<Float> = SIMD3<Float>(1, 1, 1),
         sheenRoughness: Float = 0.5,
@@ -144,6 +156,9 @@ public struct Material: Sendable {
         self.clearcoatThickness = clearcoatThickness
         self.clearcoatRoughness = clearcoatRoughness
         self.clearcoatIndexOfRefraction = clearcoatIndexOfRefraction
+        self.thinFilm = thinFilm
+        self.thinFilmThicknessNanometers = thinFilmThicknessNanometers
+        self.thinFilmIndexOfRefraction = thinFilmIndexOfRefraction
         self.sheen = sheen
         self.sheenColor = sheenColor
         self.sheenRoughness = sheenRoughness
@@ -192,6 +207,12 @@ public struct Material: Sendable {
             transmissionAbsorption: SIMD4<Float>(
                 transmissionAbsorptionColor,
                 transmissionAbsorptionDistance
+            ),
+            thinFilm: SIMD4<Float>(
+                thinFilm,
+                thinFilmThicknessNanometers,
+                thinFilmIndexOfRefraction,
+                0
             )
         )
     }

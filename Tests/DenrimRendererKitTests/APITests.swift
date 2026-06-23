@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import DenrimRendererKit
 
@@ -63,6 +64,9 @@ final class APITests: XCTestCase {
             clearcoatThickness: 0.6,
             clearcoatRoughness: 0.08,
             clearcoatIndexOfRefraction: 1.6,
+            thinFilm: 0.8,
+            thinFilmThicknessNanometers: 520,
+            thinFilmIndexOfRefraction: 1.42,
             sheen: 0.55,
             sheenColor: .init(0.3, 0.4, 0.5),
             sheenRoughness: 0.7,
@@ -110,6 +114,9 @@ final class APITests: XCTestCase {
         XCTAssertEqual(gpu.transmissionAbsorption.y, 0.75, accuracy: 0.0001)
         XCTAssertEqual(gpu.transmissionAbsorption.z, 0.95, accuracy: 0.0001)
         XCTAssertEqual(gpu.transmissionAbsorption.w, 1.25, accuracy: 0.0001)
+        XCTAssertEqual(gpu.thinFilm.x, 0.8, accuracy: 0.0001)
+        XCTAssertEqual(gpu.thinFilm.y, 520, accuracy: 0.0001)
+        XCTAssertEqual(gpu.thinFilm.z, 1.42, accuracy: 0.0001)
         XCTAssertEqual(gpu.emission.w, 0.75, accuracy: 0.0001)
     }
 
@@ -127,6 +134,59 @@ final class APITests: XCTestCase {
         XCTAssertEqual(material.transmissionRoughness, 0.42, accuracy: 0.0001)
         XCTAssertEqual(material.transmissionIndexOfRefraction, 1.47, accuracy: 0.0001)
         XCTAssertFalse(material.thinWalled)
+    }
+
+    func testBuiltInMaterialLibraryCanBeQueriedByIdentifierAndCategory() throws {
+        XCTAssertGreaterThan(BuiltInMaterialLibrary.presets.count, 12)
+        XCTAssertTrue(BuiltInMaterialLibrary.identifiers.contains("glass.thin-pane"))
+        XCTAssertTrue(BuiltInMaterialLibrary.identifiers.contains("coating.iridescent-amber"))
+        XCTAssertTrue(BuiltInMaterialLibrary.presets(in: .metal).contains { $0.identifier == "metal.brushed-aluminum" })
+
+        let glass = try XCTUnwrap(BuiltInMaterialLibrary.material(named: "glass.thin_pane"))
+        XCTAssertEqual(glass.transmission, 1, accuracy: 0.0001)
+        XCTAssertTrue(glass.thinWalled)
+
+        let brushed = try XCTUnwrap(BuiltInMaterialLibrary.preset(named: "METAL.BRUSHED_ALUMINUM"))
+        XCTAssertEqual(brushed.category, .metal)
+        XCTAssertEqual(brushed.material.metallic, 1, accuracy: 0.0001)
+        XCTAssertGreaterThan(brushed.material.specularAnisotropy, 0)
+
+        let iridescent = try XCTUnwrap(BuiltInMaterialLibrary.preset(named: "coating.iridescent-amber"))
+        XCTAssertEqual(iridescent.category, .coating)
+        XCTAssertGreaterThan(iridescent.material.thinFilm, 0)
+        XCTAssertGreaterThan(iridescent.material.clearcoat, 0)
+    }
+
+    func testBuiltInMaterialPreviewManifestMatchesPresets() throws {
+        let previews = BuiltInMaterialLibrary.previews
+
+        XCTAssertEqual(previews.map(\.identifier), BuiltInMaterialLibrary.identifiers)
+        XCTAssertEqual(previews.count, BuiltInMaterialLibrary.presets.count)
+        XCTAssertEqual(
+            BuiltInMaterialLibrary.previews(in: .metal).map(\.identifier),
+            BuiltInMaterialLibrary.presets(in: .metal).map(\.identifier)
+        )
+
+        let brushed = try XCTUnwrap(BuiltInMaterialLibrary.preview(named: "metal.brushed_aluminum"))
+        XCTAssertEqual(brushed.displayName, "Brushed Aluminum")
+        XCTAssertEqual(brushed.category, .metal)
+        XCTAssertEqual(brushed.thumbnailPath, "Examples/Renders/Materials/metal.brushed-aluminum.png")
+        XCTAssertEqual(
+            BuiltInMaterialLibrary.thumbnailPath(for: "glass.clear"),
+            "Examples/Renders/Materials/glass.clear.png"
+        )
+    }
+
+    func testBuiltInMaterialPreviewThumbnailsExist() {
+        let repositoryRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+
+        for preview in BuiltInMaterialLibrary.previews {
+            let thumbnailURL = repositoryRoot.appendingPathComponent(preview.thumbnailPath)
+            XCTAssertTrue(
+                FileManager.default.fileExists(atPath: thumbnailURL.path),
+                "Missing material preview thumbnail for \(preview.identifier): \(thumbnailURL.path)"
+            )
+        }
     }
 
     func testClearcoatAttenuationDefaultsToClearcoatColor() {

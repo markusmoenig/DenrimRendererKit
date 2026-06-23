@@ -7,6 +7,7 @@ The first version is intentionally small. It supports:
 * Comments with `#`.
 * `include` with an application-provided resolver.
 * `camera`.
+* `environment`.
 * `texture`.
 * `mesh`.
 * `material`.
@@ -19,6 +20,10 @@ Example:
 ```text
 # camera origin(x, y, z) target(x, y, z) fov(degrees)
 camera origin(0, 1.4, 4.0) target(0, 0.6, 0) fov(42)
+
+# environment sky
+# environment image path [intensity value] [rotationY radians] [maxRadiance value]
+environment image Textures/studio_small_01_1k.hdr intensity 0.9 rotationY 2.9 maxRadiance 6
 
 # material name r g b
 material floor 0.7 0.7 0.65
@@ -43,6 +48,7 @@ mesh objWithBottomLeftUVs Meshes/model.obj flipV
 material light 1 1 1 1 0.9 0.7 8
 
 # material name r g b [roughness value] [metallic value]
+# material name preset preset-id [overrides...]
 #                    [specular value] [specularColor r g b] [ior value] [opacity value]
 #                    [anisotropy value] [specularAnisotropy value]
 #                    [transmission value] [spectrans value]
@@ -52,19 +58,28 @@ material light 1 1 1 1 0.9 0.7 8
 #                    [clearcoat value] [clearcoatColor r g b] [clearcoatTint r g b]
 #                    [clearcoatAttenuationColor r g b] [clearcoatThickness value]
 #                    [clearcoatRoughness value] [clearcoatIOR value]
+#                    [thinFilm value] [thinFilmThickness value] [thinFilmIOR value]
 #                    [sheen value] [sheenColor r g b] [sheenRoughness value]
 #                    [emission r g b strength] [baseColorTexture name] [normalMap name]
 material brushedGold 0.95 0.78 0.35 roughness 0.18 metallic 1 specular 1 specularColor 1 0.86 0.7 ior 1.5 anisotropy 0.65 clearcoat 0.25 clearcoatColor 1 0.92 0.72 clearcoatAttenuationColor 0.95 0.78 0.48 clearcoatThickness 0.25 clearcoatRoughness 0.08 clearcoatIOR 1.5
+material amberFilm 0.95 0.28 0.035 roughness 0.22 specular 0.65 clearcoat 0.95 clearcoatColor 1 0.74 0.32 clearcoatRoughness 0.035 thinFilm 0.85 thinFilmThickness 430 thinFilmIOR 1.38
 material velvet 0.42 0.16 0.72 roughness 0.7 sheen 0.65 sheenColor 0.9 0.72 1 sheenRoughness 0.78
 material glass 0.713 0.8 0.8 roughness 0.01 specular 1 ior 1.45 transmission 1 transmissionColor 0.72 0.86 1 transmissionRoughness 0.04 transmissionIOR 1.45 absorptionColor 0.64 0.82 1 absorptionDistance 0.8
 material thinPane 0.7 0.85 1 roughness 0.02 specular 1 transmission 1 transmissionColor 0.8 0.92 1 thinWalled 1
 material textured 1 1 1 baseColorTexture checker normalMap tangentRight
 
+# Built-in presets can be queried in Swift through BuiltInMaterialLibrary.
+# Preset forms accept the same override keywords as numeric material definitions.
+material brushedPreset preset metal.brushed-aluminum roughness 0.14
+material amberPreset preset coating.iridescent-amber
+material glassPreset preset glass.thin-pane
+material warmPanel preset emission.warm-panel emission 1 0.82 0.55 6
+
 # include reusable script fragment
 include commonMaterials
 
-# quad material a(x, y, z) b(x, y, z) c(x, y, z) d(x, y, z)
-quad floor a(-2, 0, 2) b(2, 0, 2) c(2, 0, -2) d(-2, 0, -2)
+# quad material a(x, y, z) b(x, y, z) c(x, y, z) d(x, y, z) [uvA(u, v) uvB(u, v) uvC(u, v) uvD(u, v)]
+quad floor a(-2, 0, 2) b(2, 0, 2) c(2, 0, -2) d(-2, 0, -2) uvA(0, 0) uvB(4, 0) uvC(4, 4) uvD(0, 4)
 
 # box material position(x, y, z) size(x, y, z) [rotationY(radians)]
 box floor position(0, 0.3, 0) size(0.6, 0.6, 0.6) rotationY(0.4)
@@ -105,7 +120,7 @@ The repository includes a self-contained material-variant script template at `Ex
 
 The Stanford Dragon example lives at `Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim`. Run `./Examples/Tools/render-quality-examples.sh` to fetch the mesh if needed and render persistent reference outputs into `Examples/Renders`.
 
-`SceneScript.parse(contentsOf:)` resolves relative image texture paths, mesh paths, and include paths beside the script file. `SceneScript.parse(_:baseURL:assetCache:includeResolver:)` is still available for applications that want to provide script source, asset cache, and include policy themselves. If no base URL is passed, relative assets are resolved against the current process directory. Image textures default to `color srgb` and `sampler linear`; generated solid/checker textures default to nearest sampling. `normalFrom` derives a tangent-space normal map from an existing texture's luminance, which is useful for reference assets that ship only albedo images. Mesh assets use `Mesh(contentsOf:)`, so the current script path supports OBJ and PLY files. Add `flipV` to a `mesh` command when an imported asset's texture coordinates were authored for bottom-left image origin but the source images are decoded top-down.
+`SceneScript.parse(contentsOf:)` resolves relative environment image paths, image texture paths, mesh paths, and include paths beside the script file. `SceneScript.parse(_:baseURL:assetCache:includeResolver:)` is still available for applications that want to provide script source, asset cache, and include policy themselves. If no base URL is passed, relative assets are resolved against the current process directory. Environment images are linear equirectangular maps; Radiance `.hdr` files are supported for material-preview lighting. Use `maxRadiance` to clamp very bright HDR texels for preview renders until the renderer has environment importance sampling. Image textures default to `color srgb` and `sampler linear`; generated solid/checker textures default to nearest sampling. `normalFrom` derives a tangent-space normal map from an existing texture's luminance, which is useful for reference assets that ship only albedo images. Mesh assets use `Mesh(contentsOf:)`, so the current script path supports OBJ and PLY files. Add `flipV` to a `mesh` command when an imported asset's texture coordinates were authored for bottom-left image origin but the source images are decoded top-down.
 
 Grouped numeric arguments may use commas or whitespace inside parentheses. The older positional forms, such as `quad floor -2 0 2 ...` and `instance dragon clay 0 0 0 1 1 1`, remain supported for compatibility, but examples should prefer named groups because they are easier to read and review.
 

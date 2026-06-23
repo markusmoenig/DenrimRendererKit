@@ -150,6 +150,38 @@ final class BVHFlattenerTests: XCTestCase {
         XCTAssertTrue(build.lights.isEmpty)
     }
 
+    func testAccelerationBackendBuildsEnvironmentImportanceDistribution() throws {
+        var scene = RenderScene(environment: Environment(
+            texture: Texture2D(
+                width: 2,
+                height: 1,
+                pixels: [
+                    SIMD4<Float>(1, 1, 1, 1),
+                    SIMD4<Float>(3, 3, 3, 1)
+                ],
+                samplingMode: .linear
+            ),
+            intensity: 1,
+            maxRadiance: 0
+        ))
+        let matte = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.8, 0.8, 0.8)))
+
+        scene.add(mesh: Mesh.quad(
+            SIMD3<Float>(-1, -1, 0),
+            SIMD3<Float>(1, -1, 0),
+            SIMD3<Float>(1, 1, 0),
+            SIMD3<Float>(-1, 1, 0)
+        ), material: matte)
+
+        let build = try LinearTriangleAccelerationBackend().build(scene: scene)
+
+        XCTAssertEqual(build.environmentTextureIndexPlusOne, 1)
+        XCTAssertEqual(build.environmentSamples.count, 2)
+        XCTAssertEqual(build.environmentSamples[0].distribution.x, 0.25, accuracy: 0.0001)
+        XCTAssertEqual(build.environmentSamples[1].distribution.x, 1, accuracy: 0.0001)
+        XCTAssertGreaterThan(build.environmentSamples[1].distribution.y, build.environmentSamples[0].distribution.y)
+    }
+
     func testInstanceAccelerationBuildsTopLevelInstanceBounds() throws {
         var scene = RenderScene()
         let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(1, 1, 1)))

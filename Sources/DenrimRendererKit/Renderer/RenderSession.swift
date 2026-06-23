@@ -30,6 +30,7 @@ public final class RenderSession {
     private let textureDescriptorBuffer: MTLBuffer?
     private let texturePixelBuffer: MTLBuffer?
     private let lightBuffer: MTLBuffer?
+    private let environmentSampleBuffer: MTLBuffer?
     private let accelerationNodeBuffer: MTLBuffer?
     private let primitiveIndexBuffer: MTLBuffer?
     private let accumulationTexture: MTLTexture
@@ -44,6 +45,11 @@ public final class RenderSession {
     private let materialCount: Int
     private let textureDescriptorCount: Int
     private let texturePixelCount: Int
+    private let environmentTextureIndexPlusOne: UInt32
+    private let environmentDistributionCount: Int
+    private let environmentIntensity: Float
+    private let environmentRotationY: Float
+    private let environmentMaxRadiance: Float
     private let lightCount: Int
     private let accelerationNodeCount: Int
     private let metalRayTracingExperiment: MetalRayTracingExperiment?
@@ -171,6 +177,11 @@ public final class RenderSession {
         self.materialCount = compiled.materials.count
         self.textureDescriptorCount = compiled.textureDescriptors.count
         self.texturePixelCount = compiled.texturePixels.count
+        self.environmentTextureIndexPlusOne = compiled.environmentTextureIndexPlusOne
+        self.environmentDistributionCount = compiled.environmentSamples.count
+        self.environmentIntensity = scene.environment.intensity
+        self.environmentRotationY = scene.environment.rotationY
+        self.environmentMaxRadiance = scene.environment.maxRadiance
         self.lightCount = compiled.lights.count
         self.accelerationNodeCount = compiled.bvh.nodes.count
         self.metalRayTracingExperiment = compiled.metalRayTracingExperiment
@@ -196,6 +207,10 @@ public final class RenderSession {
         self.lightBuffer = Self.makeBuffer(
             device: device,
             values: compiled.lights
+        )
+        self.environmentSampleBuffer = Self.makeBuffer(
+            device: device,
+            values: compiled.environmentSamples
         )
         self.accelerationNodeBuffer = Self.makeBuffer(
             device: device,
@@ -292,6 +307,11 @@ public final class RenderSession {
             accelerationNodeCount: UInt32(accelerationNodeCount),
             transparentBackground: settings.transparentBackground ? 1 : 0,
             lightCount: UInt32(lightCount),
+            environmentTextureIndexPlusOne: environmentTextureIndexPlusOne,
+            environmentDistributionCount: UInt32(environmentDistributionCount),
+            environmentIntensity: environmentIntensity,
+            environmentRotationY: environmentRotationY,
+            environmentMaxRadiance: environmentMaxRadiance,
             padding1: settings.denoise.denoiser == .none ? 0 : 1,
             padding2: 0
         )
@@ -317,6 +337,7 @@ public final class RenderSession {
         encoder.setBuffer(textureDescriptorBuffer, offset: 0, index: 10)
         encoder.setBuffer(texturePixelBuffer, offset: 0, index: 11)
         encoder.setBuffer(lightBuffer, offset: 0, index: 12)
+        encoder.setBuffer(environmentSampleBuffer, offset: 0, index: 13)
         if useHardwareRayTracing,
            let tlasResource = metalRayTracingExperiment?.tlasResource,
            let sceneBuffers = metalRayTracingExperiment?.sceneBuffers {

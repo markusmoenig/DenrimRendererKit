@@ -12,14 +12,19 @@ public struct RenderScene: Sendable {
     /// Mesh instances in the scene.
     public private(set) var meshInstances: [MeshInstance]
 
+    /// Environment lighting sampled by rays that miss scene geometry.
+    public var environment: Environment
+
     /// Creates an empty render scene.
     public init(
         camera: Camera = Camera(
             origin: SIMD3<Float>(0, 1, 4),
             target: SIMD3<Float>(0, 1, 0)
-        )
+        ),
+        environment: Environment = .sky
     ) {
         self.camera = camera
+        self.environment = environment
         self.materials = []
         self.meshInstances = []
     }

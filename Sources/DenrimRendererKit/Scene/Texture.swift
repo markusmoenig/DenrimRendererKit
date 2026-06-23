@@ -25,6 +25,7 @@ public enum TextureSamplingMode: UInt32, Sendable, Hashable {
 public enum TextureLoadingError: Error, LocalizedError {
     case unsupportedImage(URL)
     case couldNotCreateBitmapContext(width: Int, height: Int)
+    case invalidHDR(URL)
 
     public var errorDescription: String? {
         switch self {
@@ -32,6 +33,8 @@ public enum TextureLoadingError: Error, LocalizedError {
             "Could not decode texture image at \(url.path)."
         case .couldNotCreateBitmapContext(let width, let height):
             "Could not create a \(width)x\(height) texture loading context."
+        case .invalidHDR(let url):
+            "Could not decode Radiance HDR texture at \(url.path)."
         }
     }
 }
@@ -69,6 +72,17 @@ public struct Texture2D: Sendable, Equatable {
         colorEncoding: TextureColorEncoding = .sRGB,
         samplingMode: TextureSamplingMode = .linear
     ) throws {
+        if url.pathExtension.lowercased() == "hdr" {
+            let decoded = try Self.loadRadianceHDR(contentsOf: url)
+            self.init(
+                width: decoded.width,
+                height: decoded.height,
+                pixels: decoded.pixels,
+                samplingMode: samplingMode
+            )
+            return
+        }
+
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             throw TextureLoadingError.unsupportedImage(url)
@@ -195,6 +209,156 @@ public struct Texture2D: Sendable, Equatable {
             return value / 12.92
         }
         return pow((value + 0.055) / 1.055, 2.4)
+    }
+
+    private static func loadRadianceHDR(contentsOf url: URL) throws -> (
+        width: Int,
+        height: Int,
+        pixels: [SIMD4<Float>]
+    ) {
+        let data = try Data(contentsOf: url)
+        let bytes = [UInt8](data)
+        var index = 0
+        var resolutionLine: String?
+
+        func readLine() -> String? {
+            guard index < bytes.count else {
+                return nil
+            }
+            let start = index
+            while index < bytes.count && bytes[index] != 10 {
+                index += 1
+            }
+            let end = index
+            if index < bytes.count {
+                index += 1
+            }
+            var lineBytes = bytes[start..<end]
+            if lineBytes.last == 13 {
+                lineBytes = lineBytes.dropLast()
+            }
+            return String(bytes: lineBytes, encoding: .ascii)
+        }
+
+        while let line = readLine() {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                continue
+            }
+            if trimmed.contains("-Y") || trimmed.contains("+Y") {
+                resolutionLine = trimmed
+                break
+            }
+        }
+
+        guard let resolutionLine else {
+            throw TextureLoadingError.invalidHDR(url)
+        }
+
+        let tokens = resolutionLine.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard tokens.count == 4,
+              let firstSize = Int(tokens[1]),
+              let secondSize = Int(tokens[3]),
+              firstSize > 0,
+              secondSize > 0 else {
+            throw TextureLoadingError.invalidHDR(url)
+        }
+
+        let width: Int
+        let height: Int
+        let yFirst = tokens[0].hasSuffix("Y")
+        if yFirst {
+            height = firstSize
+            width = secondSize
+        } else {
+            width = firstSize
+            height = secondSize
+        }
+
+        let scanlineByteCount = width * 4
+        var rgbe = [UInt8](repeating: 0, count: width * height * 4)
+
+        for y in 0..<height {
+            guard index + 4 <= bytes.count else {
+                throw TextureLoadingError.invalidHDR(url)
+            }
+
+            if width >= 8,
+               width <= 0x7fff,
+               bytes[index] == 2,
+               bytes[index + 1] == 2,
+               bytes[index + 2] & 0x80 == 0 {
+                let encodedWidth = Int(bytes[index + 2]) << 8 | Int(bytes[index + 3])
+                guard encodedWidth == width else {
+                    throw TextureLoadingError.invalidHDR(url)
+                }
+                index += 4
+
+                var scanline = [UInt8](repeating: 0, count: scanlineByteCount)
+                for channel in 0..<4 {
+                    var x = 0
+                    while x < width {
+                        guard index < bytes.count else {
+                            throw TextureLoadingError.invalidHDR(url)
+                        }
+                        let count = Int(bytes[index])
+                        index += 1
+                        if count > 128 {
+                            let runLength = count - 128
+                            guard runLength > 0, x + runLength <= width, index < bytes.count else {
+                                throw TextureLoadingError.invalidHDR(url)
+                            }
+                            let value = bytes[index]
+                            index += 1
+                            for _ in 0..<runLength {
+                                scanline[x * 4 + channel] = value
+                                x += 1
+                            }
+                        } else {
+                            guard count > 0, x + count <= width, index + count <= bytes.count else {
+                                throw TextureLoadingError.invalidHDR(url)
+                            }
+                            for _ in 0..<count {
+                                scanline[x * 4 + channel] = bytes[index]
+                                index += 1
+                                x += 1
+                            }
+                        }
+                    }
+                }
+
+                rgbe.replaceSubrange((y * scanlineByteCount)..<((y + 1) * scanlineByteCount), with: scanline)
+            } else {
+                guard index + scanlineByteCount <= bytes.count else {
+                    throw TextureLoadingError.invalidHDR(url)
+                }
+                rgbe.replaceSubrange(
+                    (y * scanlineByteCount)..<((y + 1) * scanlineByteCount),
+                    with: bytes[index..<(index + scanlineByteCount)]
+                )
+                index += scanlineByteCount
+            }
+        }
+
+        var pixels: [SIMD4<Float>] = []
+        pixels.reserveCapacity(width * height)
+        for offset in stride(from: 0, to: rgbe.count, by: 4) {
+            let exponent = rgbe[offset + 3]
+            if exponent == 0 {
+                pixels.append(SIMD4<Float>(0, 0, 0, 1))
+                continue
+            }
+
+            let scale = ldexpf(1, Int32(exponent) - 136)
+            pixels.append(SIMD4<Float>(
+                Float(rgbe[offset]) * scale,
+                Float(rgbe[offset + 1]) * scale,
+                Float(rgbe[offset + 2]) * scale,
+                1
+            ))
+        }
+
+        return (width, height, pixels)
     }
 
     private func luminanceAt(x: Int, y: Int) -> Float {

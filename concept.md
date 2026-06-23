@@ -1060,7 +1060,7 @@ Implemented:
 * Scene script explicit sRGB/linear image decoding and nearest/linear sampler selection
 * Scene script material specular color and IOR parameters
 * Scene script material anisotropy parameter
-* Scene script clearcoat weight, tint, attenuation color, thickness, roughness, and IOR parameters
+* Scene script clearcoat weight, tint, attenuation color, thickness, roughness, IOR, and thin-film interference parameters
 * Scene script transmission color, roughness, and IOR parameters
 * Scene script transmission absorption color and distance parameters
 * Scene script thin-walled material parameter for sheet transmission
@@ -1074,16 +1074,21 @@ Implemented:
 * Matched Fresnel and thickness-based clearcoat base-layer attenuation for sampled diffuse / base-specular indirect bounces
 * Material-controlled dielectric specular weight, specular color, and index of refraction for GGX Fresnel F0
 * Material-controlled anisotropic GGX base-specular evaluation, MIS PDF, and visible-normal sampling from mesh tangent frames
-* Material-controlled clearcoat weight, Fresnel tint, independent attenuation color, thickness-based attenuation, roughness, and index of refraction as a secondary GGX coating lobe
+* Material-controlled clearcoat weight, Fresnel tint, independent attenuation color, thickness-based attenuation, roughness, index of refraction, and thin-film interference as a secondary GGX coating lobe
 * Material-controlled transmission color, roughness, and independent index of refraction for rough dielectric transport
 * Material-controlled measured absorption through transmissive solids using exit-distance Beer attenuation
 * Material-controlled thin-walled transmission for zero-thickness sheets that reflect by Fresnel and transmit straight through
 * MoonRay-inspired sheen / fuzz material controls with active shader evaluation
+* Built-in material preset catalog queryable through Swift API and SceneScript, including generated preview metadata / thumbnails
 * In-memory `Texture2D` inputs for base color textures and tangent-space normal maps
 * ImageIO texture asset loading into `Texture2D`
+* Radiance HDR/RGBE texture asset loading into `Texture2D`
+* Scene environment API with equirectangular HDRI sampling on ray miss
+* HDRI environment importance distribution and MIS for direct lighting
 * Explicit sRGB-to-linear and linear texture import paths for color textures and data textures
 * Metal nearest and bilinear texture sampling path shared by the flat BVH and hardware TLAS kernels
 * Scene script nearest/linear sampler selection for generated textures
+* Scene script environment image command with relative asset resolution
 * Emissive triangle lights
 * Direct area-light sampling
 * Compiled emissive triangle light records shared by the flat BVH and hardware TLAS direct-light kernels
@@ -1109,7 +1114,7 @@ Implemented:
 * Command line preview rendering for SceneScript files with relative asset resolution
 * Unit tests for API defaults and scene construction
 * Unit tests for OBJ mesh import, ASCII PLY import, binary little-endian PLY import, quad triangulation, relative indices, scientific-notation floats, imported normal preservation, and unsupported format reporting
-* Unit tests for material specular color / IOR / anisotropy / clearcoat tint, attenuation color, and thickness / sheen / transmission / absorption / thin-walled GPU parameter packing
+* Unit tests for material specular color / IOR / anisotropy / clearcoat tint, attenuation color, thickness, thin-film controls, sheen, transmission, absorption, and thin-walled GPU parameter packing
 * Texture asset loading tests for image dimensions, alpha, missing files, and sRGB/linear import behavior
 * CPU triangle intersection reference tests
 * Render smoke test with image decoding and orientation regression check

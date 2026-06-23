@@ -1,0 +1,8 @@
+# Swap this material definition to preview another Denrim material on the test ball.
+# Built-in preset examples:
+# material PreviewMaterial preset matte.clay
+# material PreviewMaterial preset plastic.gloss-white
+# material PreviewMaterial preset glass.clear
+# material PreviewMaterial preset metal.gold roughness 0.16
+
+material PreviewMaterial preset metal.brushed-aluminum roughness 0.18

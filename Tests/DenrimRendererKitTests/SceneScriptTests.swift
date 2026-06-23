@@ -50,7 +50,7 @@ final class SceneScriptTests: XCTestCase {
         mesh subject fixture.ply
         material floor 0.7 0.7 0.65
         material clay 0.82 0.42 0.26 roughness 0.8
-        quad floor a(-2, 0, 2) b(2, 0, 2) c(2, 0, -2) d(-2, 0, -2)
+        quad floor a(-2, 0, 2) b(2, 0, 2) c(2, 0, -2) d(-2, 0, -2) uvA(0, 0) uvB(4, 0) uvC(4, 4) uvD(0, 4)
         box clay position(0, 0.3, 0) size(0.6, 0.6, 0.6) rotationY(0.4)
         instance mesh(subject) material(clay) position(0.5, 0, -0.25) scale(1.5, 1.5, 1.5) rotationY(0.25)
         """
@@ -66,6 +66,8 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(scene.camera.verticalFieldOfViewDegrees, 42)
         XCTAssertEqual(scene.materials.count, 2)
         XCTAssertEqual(scene.meshInstances.count, 3)
+        XCTAssertEqual(scene.meshInstances[0].mesh.texcoords[1].x, 4, accuracy: 0.0001)
+        XCTAssertEqual(scene.meshInstances[0].mesh.texcoords[2].y, 4, accuracy: 0.0001)
         XCTAssertEqual(compiled.triangles.count, 16)
     }
 
@@ -74,7 +76,7 @@ final class SceneScriptTests: XCTestCase {
         material compact 0.8 0.7 0.5 roughness 0.22 metallic 1
         material brushed 0.8 0.7 0.5 roughness 0.22 metallic 1 opacity 0.9
         material glow 1 1 1 emission 1 0.8 0.4 6
-        material glassy 0.8 0.9 1 specular 0.7 specularColor 0.9 0.8 0.7 ior 1.62 anisotropy 0.55 transmission 0.85 transmissionColor 0.45 0.72 1 transmissionRoughness 0.12 transmissionIOR 1.38 absorptionColor 0.5 0.75 1 absorptionDistance 1.4 clearcoat 0.45 clearcoatColor 0.7 0.92 1 clearcoatAttenuationColor 0.62 0.78 0.94 clearcoatThickness 0.35 clearcoatRoughness 0.08 clearcoatIOR 1.58
+        material glassy 0.8 0.9 1 specular 0.7 specularColor 0.9 0.8 0.7 ior 1.62 anisotropy 0.55 transmission 0.85 transmissionColor 0.45 0.72 1 transmissionRoughness 0.12 transmissionIOR 1.38 absorptionColor 0.5 0.75 1 absorptionDistance 1.4 clearcoat 0.45 clearcoatColor 0.7 0.92 1 clearcoatAttenuationColor 0.62 0.78 0.94 clearcoatThickness 0.35 clearcoatRoughness 0.08 clearcoatIOR 1.58 thinFilm 0.7 thinFilmThickness 510 thinFilmIOR 1.42
         material fabric 0.35 0.2 0.8 sheen 0.6 sheenColor 0.9 0.72 1 sheenRoughness 0.75
         material sourceGlass 0.7 0.8 0.8 spectrans 1 thinWalled 1 fuzz 0.4 fuzzColor 0.7 0.8 0.9 fuzzRoughness 0.65
         """
@@ -113,6 +115,9 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(scene.materials[3].clearcoatThickness, 0.35, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[3].clearcoatRoughness, 0.08, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[3].clearcoatIndexOfRefraction, 1.58, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].thinFilm, 0.7, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].thinFilmThicknessNanometers, 510, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].thinFilmIndexOfRefraction, 1.42, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[4].sheen, 0.6, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[4].sheenColor.x, 0.9, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[4].sheenColor.y, 0.72, accuracy: 0.0001)
@@ -125,6 +130,27 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(scene.materials[5].sheenColor.y, 0.8, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[5].sheenColor.z, 0.9, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[5].sheenRoughness, 0.65, accuracy: 0.0001)
+    }
+
+    func testSceneScriptParsesBuiltInMaterialPresets() throws {
+        let source = """
+        material glass preset glass.thin-pane roughness 0.03
+        material aluminum builtin metal.brushed_aluminum anisotropy 0.4
+        material amber built-in coating.iridescent-amber thinFilmThickness 470
+        material warm built-in emission.warm-panel emission 1 0.85 0.6 8
+        """
+
+        let scene = try SceneScript.parse(source)
+
+        XCTAssertEqual(scene.materials.count, 4)
+        XCTAssertEqual(scene.materials[0].transmission, 1, accuracy: 0.0001)
+        XCTAssertTrue(scene.materials[0].thinWalled)
+        XCTAssertEqual(scene.materials[0].roughness, 0.03, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[1].metallic, 1, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[1].specularAnisotropy, 0.4, accuracy: 0.0001)
+        XCTAssertGreaterThan(scene.materials[2].thinFilm, 0)
+        XCTAssertEqual(scene.materials[2].thinFilmThicknessNanometers, 470, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].emissionStrength, 8, accuracy: 0.0001)
     }
 
     func testSceneScriptParsesMaterialTextureBindings() throws {
@@ -189,6 +215,33 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(texture.pixels[0], SIMD4<Float>(1, 0, 0, 1))
         XCTAssertEqual(texture.pixels[1].z, 1, accuracy: 0.004)
         XCTAssertEqual(texture.pixels[1].w, Float(128) / 255, accuracy: 0.004)
+    }
+
+    func testSceneScriptLoadsEnvironmentImageRelativeToBaseURL() throws {
+        let baseURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("DenrimRendererKit-SceneScriptEnvironment", isDirectory: true)
+        try FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
+        try writeFixtureHDR(
+            url: baseURL.appendingPathComponent("studio.hdr"),
+            width: 1,
+            height: 1,
+            rgbe: [128, 64, 32, 129]
+        )
+
+        let scene = try SceneScript.parse(
+            "environment image studio.hdr intensity 0.75 rotationY 1.5 maxRadiance 4",
+            baseURL: baseURL
+        )
+
+        let texture = try XCTUnwrap(scene.environment.texture)
+        XCTAssertEqual(texture.width, 1)
+        XCTAssertEqual(texture.height, 1)
+        XCTAssertEqual(scene.environment.intensity, 0.75, accuracy: 0.0001)
+        XCTAssertEqual(scene.environment.rotationY, 1.5, accuracy: 0.0001)
+        XCTAssertEqual(scene.environment.maxRadiance, 4, accuracy: 0.0001)
+        XCTAssertEqual(texture.pixels[0].x, 1, accuracy: 0.001)
+        XCTAssertEqual(texture.pixels[0].y, 0.5, accuracy: 0.001)
+        XCTAssertEqual(texture.pixels[0].z, 0.25, accuracy: 0.001)
     }
 
     func testSceneScriptAssetCacheReusesDecodedImageTexturesUntilCleared() throws {
@@ -465,6 +518,12 @@ final class SceneScriptTests: XCTestCase {
         }
     }
 
+    func testSceneScriptReportsUnknownBuiltInMaterialPreset() {
+        XCTAssertThrowsError(try SceneScript.parse("material bad preset missing.material")) { error in
+            XCTAssertEqual(error as? SceneScriptError, .unknownMaterialPreset("missing.material", line: 1))
+        }
+    }
+
     func testSceneScriptReportsUnknownTexture() {
         let source = "material textured 1 1 1 baseColorTexture missing"
 
@@ -478,6 +537,12 @@ final class SceneScriptTests: XCTestCase {
 
         XCTAssertThrowsError(try SceneScript.parse(source)) { error in
             XCTAssertEqual(error as? SceneScriptError, .textureLoadFailed("missing.png", line: 1))
+        }
+    }
+
+    func testSceneScriptReportsFailedEnvironmentLoad() {
+        XCTAssertThrowsError(try SceneScript.parse("environment image missing.hdr")) { error in
+            XCTAssertEqual(error as? SceneScriptError, .environmentLoadFailed("missing.hdr", line: 1))
         }
     }
 
@@ -541,6 +606,19 @@ final class SceneScriptTests: XCTestCase {
         CGImageDestinationAddImage(destination, image, nil)
         XCTAssertTrue(CGImageDestinationFinalize(destination))
         return url
+    }
+
+    private func writeFixtureHDR(
+        url: URL,
+        width: Int,
+        height: Int,
+        rgbe: [UInt8]
+    ) throws {
+        XCTAssertEqual(rgbe.count, width * height * 4)
+        try? FileManager.default.removeItem(at: url)
+        var data = Data("#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y \(height) +X \(width)\n".utf8)
+        data.append(contentsOf: rgbe)
+        try data.write(to: url)
     }
 
     private func writeFixturePLY(url: URL, halfExtent: Float = 0.5) throws {

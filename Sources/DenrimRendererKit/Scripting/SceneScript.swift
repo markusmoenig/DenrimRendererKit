@@ -7,8 +7,10 @@ public enum SceneScriptError: Error, LocalizedError, Equatable {
     case invalidArgumentCount(String, line: Int)
     case invalidNumber(String, line: Int)
     case unknownMaterial(String, line: Int)
+    case unknownMaterialPreset(String, line: Int)
     case unknownTexture(String, line: Int)
     case unknownMesh(String, line: Int)
+    case environmentLoadFailed(String, line: Int)
     case textureLoadFailed(String, line: Int)
     case meshLoadFailed(String, line: Int)
     case includeResolverMissing(String, line: Int)
@@ -24,10 +26,14 @@ public enum SceneScriptError: Error, LocalizedError, Equatable {
             "Invalid numeric value '\(value)' on line \(line)."
         case .unknownMaterial(let name, let line):
             "Unknown material '\(name)' on line \(line)."
+        case .unknownMaterialPreset(let name, let line):
+            "Unknown built-in material preset '\(name)' on line \(line)."
         case .unknownTexture(let name, let line):
             "Unknown texture '\(name)' on line \(line)."
         case .unknownMesh(let name, let line):
             "Unknown mesh '\(name)' on line \(line)."
+        case .environmentLoadFailed(let path, let line):
+            "Could not load environment image '\(path)' on line \(line)."
         case .textureLoadFailed(let path, let line):
             "Could not load texture image '\(path)' on line \(line)."
         case .meshLoadFailed(let path, let line):
@@ -141,6 +147,13 @@ public enum SceneScript {
                 includeStack.removeLast()
             case "camera":
                 scene.camera = try parseCamera(tokens, line: lineNumber)
+            case "environment":
+                scene.environment = try parseEnvironment(
+                    tokens,
+                    line: lineNumber,
+                    baseURL: baseURL,
+                    assetCache: assetCache
+                )
             case "texture":
                 let parsed = try parseTexture(
                     tokens,
@@ -318,6 +331,83 @@ public enum SceneScript {
         }
     }
 
+    private static func parseEnvironment(
+        _ tokens: [String],
+        line: Int,
+        baseURL: URL?,
+        assetCache: SceneAssetCache?
+    ) throws -> Environment {
+        guard tokens.count >= 2 else {
+            throw SceneScriptError.invalidArgumentCount("environment", line: line)
+        }
+
+        let kind = tokens[1].lowercased()
+        if kind == "sky" || kind == "default" {
+            guard tokens.count == 2 else {
+                throw SceneScriptError.invalidArgumentCount("environment", line: line)
+            }
+            return .sky
+        }
+
+        guard kind == "image" || kind == "hdri" || kind == "hdr" else {
+            throw SceneScriptError.invalidArgumentCount("environment", line: line)
+        }
+        guard tokens.count >= 3 else {
+            throw SceneScriptError.invalidArgumentCount("environment", line: line)
+        }
+
+        var intensity: Float = 1
+        var rotationY: Float = 0
+        var maxRadiance: Float = 16
+        var index = 3
+        while index < tokens.count {
+            let keyword = tokens[index].lowercased()
+            switch keyword {
+            case "intensity", "strength", "exposure":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("environment", line: line)
+                }
+                intensity = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "rotationy", "rotatey", "yaw":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("environment", line: line)
+                }
+                rotationY = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "maxradiance", "radianceclamp", "clamp":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("environment", line: line)
+                }
+                maxRadiance = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            default:
+                throw SceneScriptError.invalidArgumentCount("environment", line: line)
+            }
+        }
+
+        let url = assetURL(path: tokens[2], baseURL: baseURL)
+        do {
+            let texture = try assetCache?.texture(
+                contentsOf: url,
+                colorEncoding: .linear,
+                samplingMode: .linear
+            ) ?? Texture2D(
+                contentsOf: url,
+                colorEncoding: .linear,
+                samplingMode: .linear
+            )
+            return Environment(
+                texture: texture,
+                intensity: intensity,
+                rotationY: rotationY,
+                maxRadiance: maxRadiance
+            )
+        } catch {
+            throw SceneScriptError.environmentLoadFailed(tokens[2], line: line)
+        }
+    }
+
     private static func parseMeshAsset(
         _ tokens: [String],
         line: Int,
@@ -361,27 +451,46 @@ public enum SceneScript {
         line: Int,
         textures: [String: Texture2D]
     ) throws -> (name: String, material: Material) {
-        guard tokens.count >= 5 else {
+        guard tokens.count >= 3 else {
             throw SceneScriptError.invalidArgumentCount("material", line: line)
         }
 
         let name = tokens[1]
-        let base = try floats(tokens[2..<5], line: line)
+        let lowercasedSource = tokens[2].lowercased()
+        let startingMaterial: Material
+        let startingIndex: Int
+        if lowercasedSource == "preset" || lowercasedSource == "builtin" || lowercasedSource == "built-in" {
+            guard tokens.count >= 4 else {
+                throw SceneScriptError.invalidArgumentCount("material", line: line)
+            }
+            guard let presetMaterial = BuiltInMaterialLibrary.material(named: tokens[3]) else {
+                throw SceneScriptError.unknownMaterialPreset(tokens[3], line: line)
+            }
+            startingMaterial = presetMaterial
+            startingIndex = 4
+        } else {
+            guard tokens.count >= 5 else {
+                throw SceneScriptError.invalidArgumentCount("material", line: line)
+            }
+            let base = try floats(tokens[2..<5], line: line)
 
-        if tokens.count == 9 && canParseFloats(tokens[5..<9]) {
-            let emission = try floats(tokens[5..<9], line: line)
-            return (
-                name,
-                Material(
-                    baseColor: SIMD3<Float>(base[0], base[1], base[2]),
-                    emission: SIMD3<Float>(emission[0], emission[1], emission[2]),
-                    emissionStrength: emission[3]
+            if tokens.count == 9 && canParseFloats(tokens[5..<9]) {
+                let emission = try floats(tokens[5..<9], line: line)
+                return (
+                    name,
+                    Material(
+                        baseColor: SIMD3<Float>(base[0], base[1], base[2]),
+                        emission: SIMD3<Float>(emission[0], emission[1], emission[2]),
+                        emissionStrength: emission[3]
+                    )
                 )
-            )
+            }
+            startingMaterial = Material(baseColor: SIMD3<Float>(base[0], base[1], base[2]))
+            startingIndex = 5
         }
 
-        var material = Material(baseColor: SIMD3<Float>(base[0], base[1], base[2]))
-        var index = 5
+        var material = startingMaterial
+        var index = startingIndex
 
         while index < tokens.count {
             let keyword = tokens[index].lowercased()
@@ -468,6 +577,24 @@ public enum SceneScript {
                     throw SceneScriptError.invalidArgumentCount("material", line: line)
                 }
                 material.clearcoatIndexOfRefraction = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "thinfilm", "iridescence":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.thinFilm = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "thinfilmthickness", "thinfilmthicknessnm", "iridescencethickness":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.thinFilmThicknessNanometers = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "thinfilmior", "thinfilmindexofrefraction", "iridescenceior":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.thinFilmIndexOfRefraction = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
                 index += 2
             case "sheen", "fuzz":
                 guard index + 1 < tokens.count else {
@@ -594,12 +721,20 @@ public enum SceneScript {
         )
         let material = try material(named: materialParse.value, line: line, materials: materials)
         var corners: [String: SIMD3<Float>] = [:]
+        var texcoords: [String: SIMD2<Float>] = [:]
         var index = materialParse.nextIndex
 
         while index < tokens.count {
-            let parsed = try parseNamedVector3(tokens, index: index, line: line)
-            corners[parsed.name.lowercased()] = parsed.value
-            index = parsed.nextIndex
+            let name = tokens[index].lowercased()
+            if name == "uva" || name == "uvb" || name == "uvc" || name == "uvd" {
+                let parsed = try parseNamedVector2(tokens, index: index, line: line)
+                texcoords[name] = parsed.value
+                index = parsed.nextIndex
+            } else {
+                let parsed = try parseNamedVector3(tokens, index: index, line: line)
+                corners[parsed.name.lowercased()] = parsed.value
+                index = parsed.nextIndex
+            }
         }
 
         guard let a = corners["a"],
@@ -609,8 +744,25 @@ public enum SceneScript {
             throw SceneScriptError.invalidArgumentCount("quad", line: line)
         }
 
+        let quadTexcoords: [SIMD2<Float>]
+        if let uvA = texcoords["uva"],
+           let uvB = texcoords["uvb"],
+           let uvC = texcoords["uvc"],
+           let uvD = texcoords["uvd"] {
+            quadTexcoords = [uvA, uvB, uvC, uvD]
+        } else if texcoords.isEmpty {
+            quadTexcoords = [
+                SIMD2<Float>(0, 0),
+                SIMD2<Float>(1, 0),
+                SIMD2<Float>(1, 1),
+                SIMD2<Float>(0, 1)
+            ]
+        } else {
+            throw SceneScriptError.invalidArgumentCount("quad", line: line)
+        }
+
         return (
-            Mesh.quad(a, b, c, d),
+            Mesh.quad(a, b, c, d, texcoords: quadTexcoords),
             material
         )
     }
@@ -850,6 +1002,41 @@ public enum SceneScript {
             name,
             SIMD3<Float>(values[0], values[1], values[2]),
             index + 4
+        )
+    }
+
+    private static func parseNamedVector2(
+        _ tokens: [String],
+        index: Int,
+        line: Int
+    ) throws -> (name: String, value: SIMD2<Float>, nextIndex: Int) {
+        guard index < tokens.count else {
+            throw SceneScriptError.invalidArgumentCount("vector", line: line)
+        }
+
+        let name = tokens[index]
+        if tokens.indices.contains(index + 1),
+           tokens[index + 1] == "(" {
+            guard tokens.indices.contains(index + 4),
+                  tokens[index + 4] == ")" else {
+                throw SceneScriptError.invalidArgumentCount(name, line: line)
+            }
+            let values = try floats(tokens[(index + 2)...(index + 3)], line: line)
+            return (
+                name,
+                SIMD2<Float>(values[0], values[1]),
+                index + 5
+            )
+        }
+
+        guard tokens.indices.contains(index + 2) else {
+            throw SceneScriptError.invalidArgumentCount(name, line: line)
+        }
+        let values = try floats(tokens[(index + 1)...(index + 2)], line: line)
+        return (
+            name,
+            SIMD2<Float>(values[0], values[1]),
+            index + 3
         )
     }
 

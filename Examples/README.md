@@ -14,6 +14,8 @@ The examples are meant to serve three purposes:
 
 `SceneScripts/MaterialVariants/glossy-metal-reference.denrim` is a focused validation scene for polished, rough, and clearcoated silver metals. It adds bright, dark, and warm reflection cards around simple geometry so glossy materials have readable reflected structure without depending on the DiningRoom asset. The rendered reference output is `Renders/glossy-metal-reference.png`.
 
+`SceneScripts/MaterialTestBall/material-testball.denrim` wraps Benedikt Bitterli's public-domain Material Test Ball geometry as a single-material preview scene. Edit `SceneScripts/MaterialTestBall/preview-material.denrim`, or inject that include through the `SceneScript` API, to swap the `PreviewMaterial` definition. The Denrim scene uses the copied CC0 mesh assets in `Assets/MaterialTestBall` and a 1K Poly Haven `studio_small_01` HDRI in `Assets/HDRIs/StudioSmall01`. The rendered reference output is `Renders/material-testball.png`.
+
 To render the checked-in examples at reference quality:
 
 ```sh
@@ -33,6 +35,26 @@ For a quick glossy-metal preview:
 ```sh
 swift run denrim-render-preview Examples/Renders/glossy-metal-reference.png 64 512 script beauty Examples/SceneScripts/MaterialVariants/glossy-metal-reference.denrim
 ```
+
+For a public-domain material-test-ball preview:
+
+```sh
+swift run denrim-render-preview Examples/Renders/material-testball.png 64 720 script beauty Examples/SceneScripts/MaterialTestBall/material-testball.denrim --width 1280
+```
+
+To render one 512x512 preview for every built-in material preset at 128 spp:
+
+```sh
+./Examples/Tools/render-built-in-materials.sh
+```
+
+Pass sample count, size, output directory, and an optional preset id when you only want to refresh one thumbnail:
+
+```sh
+./Examples/Tools/render-built-in-materials.sh 512 512 Examples/Renders/Materials glass.clear
+```
+
+The material previews are written to `Renders/Materials`. The script reads preset identifiers from `Sources/DenrimRendererKit/Scene/BuiltInMaterialLibrary.swift`, temporarily rewrites `SceneScripts/MaterialTestBall/preview-material.denrim` for each preset, and restores that include before exiting. Swift callers can query matching UI metadata and thumbnail paths with `BuiltInMaterialLibrary.previews`.
 
 `SceneScripts/MaterialVariants/dragon-material-variants.denrim` is the matching Stanford Dragon example. The quality render script fetches the mesh automatically. To fetch it manually, run `./Examples/Tools/fetch-stanford-dragon.sh`; it writes `Examples/Assets/StanfordDragon/Meshes/dragon_vrip_res4.ply`.
 

@@ -33,17 +33,18 @@ public struct Mesh: Sendable {
         _ a: SIMD3<Float>,
         _ b: SIMD3<Float>,
         _ c: SIMD3<Float>,
-        _ d: SIMD3<Float>
+        _ d: SIMD3<Float>,
+        texcoords: [SIMD2<Float>] = [
+            SIMD2<Float>(0, 0),
+            SIMD2<Float>(1, 0),
+            SIMD2<Float>(1, 1),
+            SIMD2<Float>(0, 1)
+        ]
     ) -> Mesh {
         Mesh(
             vertices: [a, b, c, d],
             indices: [0, 1, 2, 0, 2, 3],
-            texcoords: [
-                SIMD2<Float>(0, 0),
-                SIMD2<Float>(1, 0),
-                SIMD2<Float>(1, 1),
-                SIMD2<Float>(0, 1)
-            ]
+            texcoords: texcoords
         )
     }
 

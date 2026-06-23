@@ -6,6 +6,8 @@ struct AccelerationBuild {
     var materials: [GPUMaterial]
     var textureDescriptors: [GPUTextureDescriptor]
     var texturePixels: [SIMD4<Float>]
+    var environmentTextureIndexPlusOne: UInt32
+    var environmentSamples: [GPUEnvironmentSample]
     var lights: [GPULightRecord]
     var bvh: FlatBVH
     var instanceAcceleration: InstanceAcceleration
@@ -38,6 +40,8 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
             materials: materialResources.materials,
             textureDescriptors: materialResources.descriptors,
             texturePixels: materialResources.pixels,
+            environmentTextureIndexPlusOne: materialResources.environmentTextureIndexPlusOne,
+            environmentSamples: Self.environmentSamples(scene: scene),
             lights: lightResources.lights,
             bvh: flatBVH,
             instanceAcceleration: instanceAcceleration,
@@ -50,7 +54,8 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
     ) -> (
         materials: [GPUMaterial],
         descriptors: [GPUTextureDescriptor],
-        pixels: [SIMD4<Float>]
+        pixels: [SIMD4<Float>],
+        environmentTextureIndexPlusOne: UInt32
     ) {
         var descriptors: [GPUTextureDescriptor] = []
         var pixels: [SIMD4<Float>] = []
@@ -86,7 +91,9 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
             )
         }
 
-        return (materials, descriptors, pixels)
+        let environmentTextureIndexPlusOne = append(scene.environment.texture).map { UInt32($0 + 1) } ?? 0
+
+        return (materials, descriptors, pixels, environmentTextureIndexPlusOne)
     }
 
     private static func lightRecordsAndTaggedTriangles(
@@ -148,6 +155,61 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
             )
         }
         return (taggedTriangles, lights)
+    }
+
+    private static func environmentSamples(scene: RenderScene) -> [GPUEnvironmentSample] {
+        guard let texture = scene.environment.texture,
+              texture.width > 0,
+              texture.height > 0,
+              texture.pixels.count >= texture.width * texture.height else {
+            return []
+        }
+
+        let width = texture.width
+        let height = texture.height
+        let intensity = max(scene.environment.intensity, 0)
+        let maxRadiance = max(scene.environment.maxRadiance, 0)
+        let deltaTheta = Float.pi / Float(height)
+        let deltaPhi = 2 * Float.pi / Float(width)
+
+        var weights: [Float] = []
+        weights.reserveCapacity(width * height)
+        var totalWeight: Float = 0
+
+        for y in 0..<height {
+            let theta = (Float(y) + 0.5) * deltaTheta
+            let solidAngle = max(sin(theta) * deltaTheta * deltaPhi, 1e-8)
+            for x in 0..<width {
+                let texel = texture.pixels[y * width + x]
+                var color = texel.xyz * intensity
+                if maxRadiance > 0 {
+                    color = simd_min(color, SIMD3<Float>(repeating: maxRadiance))
+                }
+                let weight = max(luminance(color), 0) * solidAngle
+                weights.append(weight)
+                totalWeight += weight
+            }
+        }
+
+        guard totalWeight > 0 else {
+            return []
+        }
+
+        var cumulative: Float = 0
+        return weights.enumerated().map { index, weight in
+            cumulative += weight
+            let y = index / width
+            let theta = (Float(y) + 0.5) * deltaTheta
+            let solidAngle = max(sin(theta) * deltaTheta * deltaPhi, 1e-8)
+            let probability = weight / totalWeight
+            let pdfSolidAngle = probability / solidAngle
+            return GPUEnvironmentSample(
+                distribution: SIMD2<Float>(
+                    min(cumulative / totalWeight, 1),
+                    pdfSolidAngle
+                )
+            )
+        }
     }
 
     private static func luminance(_ value: SIMD3<Float>) -> Float {

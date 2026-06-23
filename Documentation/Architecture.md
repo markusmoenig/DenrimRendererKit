@@ -7,7 +7,7 @@ The first implementation is intentionally small:
 * Public Swift scene types describe cameras, materials, meshes, and render settings.
 * `RenderSession` owns a snapshot of the compiled scene.
 * Scene compilation now builds a BLAS/TLAS-style instance acceleration model before materializing triangles for the current GPU path.
-* The acceleration backend prepares triangle, material, texture, emissive light-index, flat BVH node, and primitive-index GPU buffers.
+* The acceleration backend prepares triangle, material, texture, environment texture / importance distribution, emissive light-index, flat BVH node, and primitive-index GPU buffers.
 * `RenderSession` currently uses an experimental Metal ray tracing acceleration backend wrapper that builds guarded BLAS/TLAS resources while preserving the flat BVH fallback.
 * A small internal Metal ray tracing traversal probe can trace one ray against the TLAS for CPU-reference comparison.
 * Metal compute kernels trace rays, sample emissive triangles for direct lighting, accumulate samples, write an image, and record primary-surface AOVs.
@@ -33,6 +33,7 @@ The first version supports:
 
 * Comments
 * Camera setup
+* Equirectangular environment images
 * Solid, checker, and image texture definitions
 * OBJ and PLY mesh definitions
 * Materials
@@ -41,7 +42,7 @@ The first version supports:
 * Boxes
 * Imported mesh instances
 
-Image texture paths are resolved through caller-controlled base URLs so tests and apps can choose their own bundle or filesystem policy. This is meant to make reference scenes easier to author and eventually make Denrim Render scriptable. It should remain a focused scene-description layer, not a replacement for import formats such as OBJ, glTF, or USDZ.
+Environment image, image texture, and mesh paths are resolved through caller-controlled base URLs so tests and apps can choose their own bundle or filesystem policy. This is meant to make reference scenes easier to author and eventually make Denrim Render scriptable. It should remain a focused scene-description layer, not a replacement for import formats such as OBJ, glTF, or USDZ.
 
 The first asset import paths are Wavefront OBJ and PLY via `Mesh(contentsOf:)`. They are deliberately small and feed the same `Mesh` API used by procedural primitives, reference scenes, and scene scripts. The OBJ path uses a byte scanner to keep large text-mesh imports usable for fixtures such as DiningRoom. The PLY path supports ASCII and binary little-endian mesh files with vertex positions, optional normals / UVs, and polygon face lists. glTF/GLB import remains future work.
 
@@ -99,6 +100,8 @@ The first path tracing kernel supports:
 * Clearcoat GGX lobe with material-controlled weight, Fresnel tint, independent attenuation color, thickness-based base-layer attenuation, roughness, and IOR.
 * In-memory base color texture and tangent-space normal-map sampling from mesh UVs.
 * ImageIO texture asset loading with explicit sRGB or linear import into `Texture2D`.
+* Radiance `.hdr` texture loading for equirectangular environment lighting.
+* HDRI importance sampling and MIS for direct environment lighting.
 * Byte-scanned Wavefront OBJ import for large text meshes.
 * Imported vertex normals are preserved when meshes are converted to GPU triangles.
 * Packed texture nearest and bilinear filtering shared by flat BVH and hardware TLAS kernels.
