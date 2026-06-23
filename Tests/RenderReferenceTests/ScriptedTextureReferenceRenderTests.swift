@@ -92,6 +92,31 @@ final class ScriptedTextureReferenceRenderTests: XCTestCase {
         XCTAssertTrue(albedo.contains { $0.b > 0.75 && $0.r < 0.3 })
     }
 
+    func testGlossyMetalReferenceSceneScriptResourceRenders() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let sceneURL = packageRoot()
+            .appendingPathComponent("Examples/SceneScripts/MaterialVariants/glossy-metal-reference.denrim")
+        let renderer = try DenrimRenderer(device: device)
+        let session = try renderer.makeSession(
+            scene: try SceneScript.parse(contentsOf: sceneURL),
+            settings: RenderSettings(width: 48, height: 48, maxBounces: 3)
+        )
+
+        try session.renderNextSample()
+        let albedo = try session.pixels(for: .albedo).filter { $0.a > 0 }
+        let materialIDs = try session.pixels(for: .materialID).filter { $0.a > 0 }
+        let beauty = try session.pixels(for: .beauty)
+
+        XCTAssertGreaterThan(albedo.count, 600)
+        XCTAssertGreaterThan(Set(materialIDs.map { Int($0.r.rounded()) }).count, 6)
+        XCTAssertTrue(albedo.contains { $0.r > 0.82 && $0.g > 0.82 && $0.b > 0.80 })
+        XCTAssertTrue(albedo.contains { $0.r < 0.08 && $0.g < 0.08 && $0.b < 0.09 })
+        XCTAssertTrue(beauty.contains { $0.r > 0.25 && $0.g > 0.23 && $0.b > 0.20 })
+    }
+
     private static let sceneSource = """
     camera 0 0 3 0 0 0 34
     texture checker checker 1 0 0 1 0 0 1 1

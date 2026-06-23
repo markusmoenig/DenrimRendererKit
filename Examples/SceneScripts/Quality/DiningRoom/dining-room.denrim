@@ -1,10 +1,11 @@
 # DiningRoom quality/performance fixture translated from Examples/Assets/DiningRoom/diningroom.scene.
 # Reference image: Examples/Assets/DiningRoom/DiningRoom.jpg rendered in glsl_pathtracer.
-# Current limitations: spectrans/glass are approximated with glossy dielectric settings.
+# Glass uses rough dielectric transmission for the source spectrans material.
 # The source fov(60) is treated as horizontal FOV at 1280x720; Denrim uses vertical FOV.
 camera origin(-4.5, 1.6, 0.0) target(0.0, 0.8, 0.0) fov(36)
 
 texture WoodenFloorTexture image ../../../Assets/DiningRoom/diningroom/textures/floor.jpg color srgb sampler linear
+texture WoodenFloorNormal normalFrom WoodenFloorTexture strength 0.06
 texture WoodenBoxTexture image ../../../Assets/DiningRoom/diningroom/textures/box.jpg color srgb sampler linear
 texture WoodenBoxNormal normalFrom WoodenBoxTexture strength 0.4
 texture PaintingTexture image ../../../Assets/DiningRoom/diningroom/textures/painting.jpg color srgb sampler linear
@@ -26,17 +27,20 @@ texture Book16Texture image ../../../Assets/DiningRoom/diningroom/textures/book1
 texture Book17Texture image ../../../Assets/DiningRoom/diningroom/textures/book17.jpg color srgb sampler linear
 texture Book18Texture image ../../../Assets/DiningRoom/diningroom/textures/book18.jpg color srgb sampler linear
 
-material BlackPlastic 0.005 0.005 0.005 roughness 0.2 specular 0.55
-material StainlessSteel 0.82 0.82 0.78 roughness 0.02 metallic 1
-material Aluminium 1.0 1.0 1.0 roughness 0.15 metallic 1
-material Glass 0.713 0.8 0.8 roughness 0.01 specular 1 ior 1.45 clearcoat 1 clearcoatRoughness 0.02
-material Ceramic 0.787 0.758 0.737 roughness 0.03 specular 0.8 clearcoat 1 clearcoatRoughness 0.03
-material WoodenFloor 1 1 1 roughness 0.05 specular 0.4 baseColorTexture WoodenFloorTexture
+material BlackPlastic 0.04 0.038 0.034 roughness 0.36 specular 0.6 clearcoat 0.25 clearcoatRoughness 0.22
+material StainlessSteel 1.0 0.98 0.94 roughness 0.025 metallic 1
+material ChairChrome 0.96 0.95 0.92 roughness 0.012 metallic 0.45 specular 1 clearcoat 1 clearcoatRoughness 0.018
+material Aluminium 1.0 1.0 1.0 roughness 0.055 metallic 1
+material FrameSilver 0.88 0.88 0.84 roughness 0.028 metallic 0.35 specular 1 clearcoat 0.8 clearcoatRoughness 0.035
+material Glass 0.88 0.94 0.94 roughness 0.012 specular 1 ior 1.45 transmission 1 transmissionColor 0.92 0.98 0.98 transmissionRoughness 0.012 transmissionIOR 1.45 clearcoat 0.35 clearcoatRoughness 0.025
+material Ceramic 0.82 0.80 0.77 roughness 0.18 specular 0.65 clearcoat 0.6 clearcoatRoughness 0.12
+material WoodenFloor 1 1 1 roughness 0.045 specular 0.45 clearcoat 0.28 clearcoatRoughness 0.08 baseColorTexture WoodenFloorTexture normalMap WoodenFloorNormal
 material WoodenBox 1 1 1 roughness 0.18 specular 0.3 baseColorTexture WoodenBoxTexture normalMap WoodenBoxNormal
 material Painting 1 1 1 roughness 0.55 baseColorTexture PaintingTexture
 material Walls 0.842 0.842 0.842 roughness 0.2
-material Green 0.016 0.047 0.002 roughness 0.2
+material Green 0.055 0.12 0.03 roughness 0.28 specular 0.35 clearcoat 0.12 clearcoatRoughness 0.2
 material DarkGlossy 0.009 0.009 0.009 roughness 0.05 specular 0.8 clearcoat 1 clearcoatRoughness 0.04
+material CupboardGlossy 0.16 0.16 0.15 roughness 0.22 specular 0.55 clearcoat 0.35 clearcoatRoughness 0.16
 material ShelfBookCover1 1 1 1 roughness 0.45 baseColorTexture ShelfBookCover1Texture
 material ShelfBookCover2 1 1 1 roughness 0.45 baseColorTexture ShelfBookCover2Texture
 material Book1 1 1 1 roughness 0.5 baseColorTexture Book1Texture
@@ -117,15 +121,15 @@ instance bucket1 WoodenBox position(0, 0, 0) scale(1, 1, 1)
 instance bucket2 WoodenBox position(0, 0, 0) scale(1, 1, 1)
 instance bucket3 WoodenBox position(0, 0, 0) scale(1, 1, 1)
 instance bucket4 WoodenBox position(0, 0, 0) scale(1, 1, 1)
-instance chair_legs StainlessSteel position(0, 0, 0) scale(1, 1, 1)
-instance chair_nuts StainlessSteel position(0, 0, 0) scale(1, 1, 1)
+instance chair_legs FrameSilver position(0, 0, 0) scale(1, 1, 1)
+instance chair_nuts FrameSilver position(0, 0, 0) scale(1, 1, 1)
 instance chair_rubber_pegs BlackPlastic position(0, 0, 0) scale(1, 1, 1)
 instance chair_seats BlackPlastic position(0, 0, 0) scale(1, 1, 1)
-instance cupboards DarkGlossy position(0, 0, 0) scale(1, 1, 1)
+instance cupboards CupboardGlossy position(0, 0, 0) scale(1, 1, 1)
 instance floor WoodenFloor position(0, 0, 0) scale(1, 1, 1)
 instance floor_frame WoodenFloor position(0, 0, 0) scale(1, 1, 1)
-instance frame1 StainlessSteel position(0, 0, 0) scale(1, 1, 1)
-instance frame2 StainlessSteel position(0, 0, 0) scale(1, 1, 1)
+instance frame1 FrameSilver position(0, 0, 0) scale(1, 1, 1)
+instance frame2 FrameSilver position(0, 0, 0) scale(1, 1, 1)
 instance left_front_wall Walls position(0, 0, 0) scale(1, 1, 1)
 instance rightwall Green position(0, 0, 0) scale(1, 1, 1)
 instance picture1 Painting position(0, 0, 0) scale(1, 1, 1)

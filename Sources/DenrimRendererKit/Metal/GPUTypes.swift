@@ -32,6 +32,12 @@ struct GPUMaterial {
     var parameters: SIMD4<Float>
     var parameters2: SIMD4<Float>
     var specularColor: SIMD4<Float>
+    var sheenColor: SIMD4<Float>
+    var transmissionColor: SIMD4<Float>
+    var parameters3: SIMD4<Float>
+    var clearcoatColor: SIMD4<Float>
+    var clearcoatAttenuation: SIMD4<Float>
+    var transmissionAbsorption: SIMD4<Float>
 }
 
 struct GPUTextureDescriptor {
@@ -42,7 +48,7 @@ struct GPULightRecord {
     var triangleIndex: UInt32
     var materialIndex: UInt32
     var area: Float
-    var padding: Float
+    var selectionCDF: Float
     var normal: SIMD4<Float>
 }
 

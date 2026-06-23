@@ -1,0 +1,37 @@
+# Self-contained glossy metal validation scene.
+# Bright and dark reflection cards make polished metals readable without depending on a large room asset.
+camera origin(0, 1.28, 4.2) target(0, 0.72, 0.1) fov(36)
+
+material floor 0.45 0.46 0.44 roughness 0.58 specular 0.45
+material back 0.34 0.37 0.40 roughness 0.72 specular 0.35
+material leftWall 0.58 0.61 0.64 roughness 0.52 specular 0.55
+material rightWall 0.30 0.38 0.34 roughness 0.46 specular 0.65
+material whiteCard 0.92 0.94 0.92 roughness 0.38 specular 0.7
+material darkCard 0.035 0.038 0.045 roughness 0.5 specular 0.4
+material warmCard 0.82 0.58 0.38 roughness 0.42 specular 0.55
+material topLight 1 1 1 emission 1 0.93 0.82 7
+material silverMirror 0.86 0.88 0.86 roughness 0.035 metallic 1
+material roughSilver 0.76 0.78 0.76 roughness 0.18 metallic 1
+material coatedSilver 0.80 0.82 0.80 roughness 0.08 metallic 1 clearcoat 0.6 clearcoatRoughness 0.035 clearcoatIOR 1.55
+material blackPlastic 0.02 0.022 0.026 roughness 0.32 specular 0.75 ior 1.5
+
+mesh subject Meshes/fixture.ply
+
+quad floor a(-3.0, 0, 2.4) b(3.0, 0, 2.4) c(3.0, 0, -2.1) d(-3.0, 0, -2.1)
+quad back a(-3.0, 0, -2.1) b(3.0, 0, -2.1) c(3.0, 2.5, -2.1) d(-3.0, 2.5, -2.1)
+quad leftWall a(-3.0, 0, 2.4) b(-3.0, 0, -2.1) c(-3.0, 2.5, -2.1) d(-3.0, 2.5, 2.4)
+quad rightWall a(3.0, 0, -2.1) b(3.0, 0, 2.4) c(3.0, 2.5, 2.4) d(3.0, 2.5, -2.1)
+quad topLight a(-0.95, 2.45, -0.65) b(0.95, 2.45, -0.65) c(0.95, 2.45, 0.45) d(-0.95, 2.45, 0.45)
+
+quad whiteCard a(-2.88, 0.34, -0.05) b(-2.88, 2.18, -0.05) c(-2.88, 2.18, 1.65) d(-2.88, 0.34, 1.65)
+quad darkCard a(2.88, 0.34, 1.65) b(2.88, 2.18, 1.65) c(2.88, 2.18, -0.05) d(2.88, 0.34, -0.05)
+quad warmCard a(-1.1, 0.22, -2.08) b(1.1, 0.22, -2.08) c(1.1, 1.85, -2.08) d(-1.1, 1.85, -2.08)
+
+box silverMirror size(0.46, 0.82, 0.46) position(-1.05, 0.41, 0.18) rotationY(-0.32)
+box roughSilver size(0.46, 0.82, 0.46) position(0, 0.41, 0) rotationY(0.22)
+box coatedSilver size(0.46, 0.82, 0.46) position(1.05, 0.41, 0.16) rotationY(0.48)
+box blackPlastic size(2.65, 0.12, 0.78) position(0, 0.06, 0.08)
+
+instance subject silverMirror position(-1.05, 1.05, 0.18) scale(0.72, 0.72, 0.72) rotationY(-0.32)
+instance subject roughSilver position(0, 1.05, 0) scale(0.72, 0.72, 0.72) rotationY(0.22)
+instance subject coatedSilver position(1.05, 1.05, 0.16) scale(0.72, 0.72, 0.72) rotationY(0.48)

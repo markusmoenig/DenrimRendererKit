@@ -23,21 +23,22 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
         let instanceAcceleration = try InstanceAccelerationBuilder(
             buildsLocalBVH: buildsFlatBVH
         ).build(scene: scene)
-        let triangles = instanceAcceleration.materializedTriangles()
+        let materialResources = Self.gpuMaterialsAndTextures(scene: scene)
+        let lightResources = Self.lightRecordsAndTaggedTriangles(
+            triangles: instanceAcceleration.materializedTriangles(),
+            materials: materialResources.materials
+        )
+        let triangles = lightResources.triangles
         let flatBVH = buildsFlatBVH
             ? BVHFlattener().flatten(BVHBuilder().build(triangles: triangles))
             : FlatBVH(nodes: [], primitiveIndices: [])
-        let materialResources = Self.gpuMaterialsAndTextures(scene: scene)
 
         return AccelerationBuild(
             triangles: triangles,
             materials: materialResources.materials,
             textureDescriptors: materialResources.descriptors,
             texturePixels: materialResources.pixels,
-            lights: Self.lightRecords(
-                triangles: triangles,
-                materials: materialResources.materials
-            ),
+            lights: lightResources.lights,
             bvh: flatBVH,
             instanceAcceleration: instanceAcceleration,
             metalRayTracingExperiment: nil
@@ -88,15 +89,21 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
         return (materials, descriptors, pixels)
     }
 
-    private static func lightRecords(
+    private static func lightRecordsAndTaggedTriangles(
         triangles: [GPUTriangle],
         materials: [GPUMaterial]
-    ) -> [GPULightRecord] {
+    ) -> (triangles: [GPUTriangle], lights: [GPULightRecord]) {
         guard !materials.isEmpty else {
-            return []
+            return (triangles, [])
         }
 
-        return triangles.enumerated().compactMap { index, triangle -> GPULightRecord? in
+        let candidates = triangles.enumerated().compactMap { index, triangle -> (
+            triangleIndex: UInt32,
+            materialIndex: UInt32,
+            area: Float,
+            weight: Float,
+            normal: SIMD4<Float>
+        )? in
             let materialIndex = min(Int(triangle.materialID), materials.count - 1)
             let material = materials[materialIndex]
             guard max(material.emission.x, material.emission.y, material.emission.z) > 0 else {
@@ -106,14 +113,45 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
             guard area > 0 else {
                 return nil
             }
-            return GPULightRecord(
-                triangleIndex: UInt32(index),
-                materialIndex: UInt32(materialIndex),
-                area: area,
-                padding: 0,
-                normal: SIMD4<Float>(triangleNormal(triangle), 0)
+            let power = luminance(material.emission.xyz) * area
+            guard power > 0 else {
+                return nil
+            }
+            return (
+                UInt32(index),
+                UInt32(materialIndex),
+                area,
+                power,
+                SIMD4<Float>(triangleNormal(triangle), 0)
             )
         }
+
+        let totalWeight = candidates.reduce(Float(0)) { $0 + $1.weight }
+        guard totalWeight > 0 else {
+            return (triangles, [])
+        }
+
+        var cumulativeWeight: Float = 0
+        var taggedTriangles = triangles
+        let lights = candidates.enumerated().map { index, light in
+            cumulativeWeight += light.weight
+            let cdf = index == candidates.count - 1
+                ? 1
+                : min(cumulativeWeight / totalWeight, 1)
+            taggedTriangles[Int(light.triangleIndex)].padding2 = UInt32(index + 1)
+            return GPULightRecord(
+                triangleIndex: light.triangleIndex,
+                materialIndex: light.materialIndex,
+                area: light.area,
+                selectionCDF: cdf,
+                normal: light.normal
+            )
+        }
+        return (taggedTriangles, lights)
+    }
+
+    private static func luminance(_ value: SIMD3<Float>) -> Float {
+        simd_dot(value, SIMD3<Float>(0.2126, 0.7152, 0.0722))
     }
 
     private static func triangleArea(_ triangle: GPUTriangle) -> Float {

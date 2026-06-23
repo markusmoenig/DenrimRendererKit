@@ -55,15 +55,15 @@ swift run -c release denrim-render-preview \
 The original `.scene` asks for `1280x720`. This is slow right now, but useful when checking image quality:
 
 ```sh
-./Examples/Tools/render-dining-room-quality.sh 128 1280 720 Examples/Renders/dining-room-128spp.png
+./Examples/Tools/render-dining-room-quality.sh 256 1280 720 Examples/Renders/dining-room-256spp.png
 ```
 
 Equivalent explicit command:
 
 ```sh
 swift run -c release denrim-render-preview \
-    Examples/Renders/dining-room-128spp.png \
-    128 \
+    Examples/Renders/dining-room-256spp.png \
+    256 \
     1280 \
     script \
     beauty \
@@ -97,7 +97,7 @@ swift run -c release denrim-render-benchmark \
 
 The Denrim translation currently approximates a few source features:
 
-* `spectrans` glass is mapped to a glossy dielectric-like material until true transmission lands.
+* `spectrans` glass is mapped to rough dielectric transmission with IOR/Fresnel reflection and refraction, roughness, tint, and shadow transparency.
 * Exposure and tone mapping are still basic, so the window lights may not match the reference exactly.
-* Low-sample renders are noisy because denoising and stronger light sampling are not implemented yet.
+* Denoising is off by default for this fixture. `--denoise apple-svgf` and `--denoise simple` are opt-in comparison modes only; stronger light sampling remains future work.
 * The wooden boxes intentionally use a subtle derived normal map to improve their material read beyond the flatter source reference.

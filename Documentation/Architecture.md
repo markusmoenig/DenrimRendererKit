@@ -43,7 +43,7 @@ The first version supports:
 
 Image texture paths are resolved through caller-controlled base URLs so tests and apps can choose their own bundle or filesystem policy. This is meant to make reference scenes easier to author and eventually make Denrim Render scriptable. It should remain a focused scene-description layer, not a replacement for import formats such as OBJ, glTF, or USDZ.
 
-The first asset import paths are Wavefront OBJ and PLY via `Mesh(contentsOf:)`. They are deliberately small and feed the same `Mesh` API used by procedural primitives, reference scenes, and scene scripts. The PLY path supports ASCII and binary little-endian mesh files with vertex positions, optional normals / UVs, and polygon face lists. glTF/GLB import remains future work.
+The first asset import paths are Wavefront OBJ and PLY via `Mesh(contentsOf:)`. They are deliberately small and feed the same `Mesh` API used by procedural primitives, reference scenes, and scene scripts. The OBJ path uses a byte scanner to keep large text-mesh imports usable for fixtures such as DiningRoom. The PLY path supports ASCII and binary little-endian mesh files with vertex positions, optional normals / UVs, and polygon face lists. glTF/GLB import remains future work.
 
 ## Current Instances
 
@@ -83,7 +83,7 @@ The BVH is flattened into Metal-friendly buffers:
 
 `MetalRayTracingAccelerationBackend` currently wraps the flat BVH backend and, on devices where `supportsRaytracing` is true, creates per-mesh BLAS resources, a TLAS resource over scene instances, and shader-side local triangle / instance buffers. `MetalRayTracingTraversalProbe` can trace a single ray against that TLAS and compare the result with CPU intersection. `pathTraceHardwareKernel` now uses the TLAS for bounce and shadow intersections when `RenderSession` can bind the hardware resources; `pathTraceKernel` remains the flat BVH fallback. Tests can force either backend through an internal acceleration mode to compare deterministic primary AOVs.
 
-Scene compilation builds compact emissive light records for direct light sampling. Each record stores the triangle index, material index, area, and geometric normal, so both the flat BVH and hardware TLAS kernels avoid scanning every triangle and avoid recomputing per-light area/normal data at each shading point.
+Scene compilation builds compact emissive light records for direct light sampling. Each record stores the triangle index, material index, area, and geometric normal, so both the flat BVH and hardware TLAS kernels avoid scanning every triangle and avoid recomputing per-light area/normal data at each shading point. Materialized emissive triangles store their one-based light-record index, allowing BSDF-sampled emissive-hit MIS to recover the matching light PDF without scanning the whole light list.
 
 ## Current Lighting
 
@@ -91,21 +91,30 @@ The first path tracing kernel supports:
 
 * Diffuse triangle surfaces.
 * GGX-style rough metallic path sampling using material roughness and metallic parameters.
-* Schlick Fresnel weighting for direct light evaluation and specular bounce sampling.
+* Visible-normal GGX sampling and probability-compensated `BRDF * cos / PDF` weighting for sampled specular and clearcoat bounces.
+* Schlick Fresnel weighting for direct light evaluation and GGX reflection lobes.
+* Matching Fresnel and thickness-based clearcoat attenuation on sampled diffuse / base-specular indirect bounces, so the layered BRDF energy split is consistent between direct lighting and path continuation.
 * Material-controlled dielectric specular weight, specular color, and index of refraction for GGX Fresnel F0.
-* Clearcoat GGX lobe with material-controlled weight, roughness, and IOR.
+* Material-controlled anisotropic GGX base-specular evaluation and sampling from mesh tangent frames.
+* Clearcoat GGX lobe with material-controlled weight, Fresnel tint, independent attenuation color, thickness-based base-layer attenuation, roughness, and IOR.
 * In-memory base color texture and tangent-space normal-map sampling from mesh UVs.
 * ImageIO texture asset loading with explicit sRGB or linear import into `Texture2D`.
+* Byte-scanned Wavefront OBJ import for large text meshes.
+* Imported vertex normals are preserved when meshes are converted to GPU triangles.
 * Packed texture nearest and bilinear filtering shared by flat BVH and hardware TLAS kernels.
 * Emissive triangle lights.
-* Direct area-light sampling from compiled emissive light records for faster Cornell Box convergence.
+* Power-weighted direct area-light sampling from compiled emissive light records for faster multi-light scenes.
+* Constant-time light-record lookup for BSDF-sampled emissive-hit MIS through per-triangle light indices.
 * First-pass MIS using power-heuristic weights between direct light samples and BSDF-sampled emissive hits.
 * Cosine-weighted diffuse bounce sampling for non-metallic energy.
+* Energy-preserving Russian roulette path termination after early bounces instead of a hard low-throughput cutoff.
 * Progressive accumulation.
 * Optional transparent background behavior for beauty output alpha and PNG export.
 * Fully transparent alpha-cutout camera-ray pass-through before primary AOV capture.
+* Rough dielectric transmissive transport with IOR/Fresnel reflection and refraction, measured exit absorption for visible paths and direct-light shadows, thin-walled straight-through sheet transmission, and transparent shadowing.
+* Optional simple spatial GPU denoising for beauty output, guided by depth, normal, and albedo AOVs.
 
-This is still a starter integrator. It exists to create a useful visual baseline before the renderer grows mipmapped Metal texture objects, semi-transparent blending, shadow transparency, refraction/transmission, layered materials, denoising, or richer Metal ray tracing features.
+This is still a starter integrator. It exists to create a useful visual baseline before the renderer grows mipmapped Metal texture objects, semi-transparent blending, nested dielectric priority, layered materials, MetalFX / neural denoising, or richer Metal ray tracing features.
 
 ## Current AOVs
 
@@ -122,6 +131,6 @@ These are written from the primary camera hit in `PathTrace.metal`.
 
 The albedo output preserves primary material opacity in alpha. Fully transparent primary camera surfaces are skipped as alpha cutouts before AOV capture, but semi-transparent blending and refractive transport are not yet implemented.
 
-They are used for tests, denoising/export groundwork, and public output readback.
+They are used for tests, simple spatial denoising, export groundwork, and public output readback.
 
-The public API exposes these outputs through `RenderOutput`. Applications can read exact floating-point pixels or export selected outputs to visualization PNGs. The PNG path uses output-specific encoding: ACES-fitted beauty tonemapping with alpha preservation, display gamma and opacity alpha preservation for albedo, display gamma for normals, dynamic visible-depth normalization, deterministic palette colors for material/object IDs, and neutral-gray signed motion-vector visualization.
+The public API exposes these outputs through `RenderOutput`. Applications can read exact floating-point pixels or export selected outputs to visualization PNGs. The PNG path uses output-specific encoding: ACES-fitted beauty tonemapping with alpha preservation, display gamma and opacity alpha preservation for albedo, display gamma for normals, dynamic visible-depth normalization, deterministic palette colors for material/object IDs, and neutral-gray signed motion-vector visualization. Denoising is off by default. When `RenderSettings.denoise` is explicitly set to `.appleSVGF`, beauty readback/export is sourced from Apple's MPS SVGF denoiser using packed depth/normal guidance and preserved beauty alpha. `.simpleSpatial` remains available as an internal experimental comparison filter, while the auxiliary outputs remain raw guidance buffers.

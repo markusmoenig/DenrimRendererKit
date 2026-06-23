@@ -12,6 +12,8 @@ The examples are meant to serve three purposes:
 
 `SceneScripts/MaterialVariants/material-variants.denrim` renders the same mesh with several material looks. It uses a small bundled PLY fixture so the example is self-contained. The rendered reference output is `Renders/material-variants.png`.
 
+`SceneScripts/MaterialVariants/glossy-metal-reference.denrim` is a focused validation scene for polished, rough, and clearcoated silver metals. It adds bright, dark, and warm reflection cards around simple geometry so glossy materials have readable reflected structure without depending on the DiningRoom asset. The rendered reference output is `Renders/glossy-metal-reference.png`.
+
 To render the checked-in examples at reference quality:
 
 ```sh
@@ -24,6 +26,12 @@ For a quick preview of the self-contained fixture scene:
 
 ```sh
 swift run denrim-render-preview Examples/Renders/material-variants.png 32 512 script beauty Examples/SceneScripts/MaterialVariants/material-variants.denrim
+```
+
+For a quick glossy-metal preview:
+
+```sh
+swift run denrim-render-preview Examples/Renders/glossy-metal-reference.png 64 512 script beauty Examples/SceneScripts/MaterialVariants/glossy-metal-reference.denrim
 ```
 
 `SceneScripts/MaterialVariants/dragon-material-variants.denrim` is the matching Stanford Dragon example. The quality render script fetches the mesh automatically. To fetch it manually, run `./Examples/Tools/fetch-stanford-dragon.sh`; it writes `Examples/Assets/StanfordDragon/Meshes/dragon_vrip_res4.ply`.
@@ -50,4 +58,4 @@ Run the manual benchmark:
 ./Examples/Tools/benchmark-dining-room.sh
 ```
 
-The GLSL path tracer reference image is `Examples/Assets/DiningRoom/DiningRoom.jpg`; the current Denrim baseline is `Examples/Renders/dining-room-128spp.png`. Quick smoke renders default to `/tmp/denrim-dining-room.png` so `Examples/Renders` stays reserved for polished references.
+The GLSL path tracer reference image is `Examples/Assets/DiningRoom/DiningRoom.jpg`; the current Denrim baseline is `Examples/Renders/dining-room-256spp.png`. Quick smoke renders default to `/tmp/denrim-dining-room.png` so `Examples/Renders` stays reserved for polished references.

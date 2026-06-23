@@ -53,7 +53,7 @@ This catches blank renders, major lighting shifts, orientation bugs, and severe 
 Current test foundation:
 
 * API tests validate the built-in Cornell Box scene, material GPU parameter packing, and render setting defaults.
-* Scene script tests validate parsing, file-based parsing, comments, includes, generated textures, image texture assets with base-URL resolution, mesh assets with base-URL resolution, include files with script-relative resolution, named/grouped geometry arguments with comma separators, specular color / IOR / clearcoat material parameters, textured materials, quads, boxes, imported mesh instances, transformed instances, include cycle handling, useful parser errors, scripted UV/normal-map rendering, scripted image-texture rendering, and scripted imported-mesh rendering.
+* Scene script tests validate parsing, file-based parsing, comments, includes, generated textures, image texture assets with base-URL resolution, mesh assets with base-URL resolution, include files with script-relative resolution, named/grouped geometry arguments with comma separators, specular color / IOR / anisotropy / clearcoat tint, attenuation color, and thickness / transmission absorption / thin-walled material parameters, textured materials, quads, boxes, imported mesh instances, transformed instances, include cycle handling, useful parser errors, scripted UV/normal-map rendering, scripted image-texture rendering, and scripted imported-mesh rendering.
 * CPU intersector tests provide deterministic triangle-hit reference behavior.
 * Transform tests validate point transforms, normal transforms, materialized instance transforms, and top-level instance bounds during scene compilation.
 * BVH builder tests validate empty builds, leaf construction, primitive remapping, bounds, and leaf size limits.
@@ -64,6 +64,7 @@ Current test foundation:
 * Beauty parity metrics compare average and maximum RGB differences between hardware TLAS and flat BVH reference-scene renders.
 * Reference render metrics cover the MIS-adjusted energy distribution for Cornell Box and material scenes.
 * AOV tests validate that depth, normal, albedo, material ID, object ID, and motion vector textures exist, receive primary-surface data, preserve material opacity in albedo alpha, can be read through the public output API, can be exported as PNGs, and use output-specific PNG visualization encoding.
+* Denoising tests validate that the opt-in Apple MPS SVGF denoiser and experimental simple spatial denoiser allocate output textures, build their Metal support pipelines, produce finite beauty pixels, and change low-sample beauty output without altering the raw AOV contract.
 * Opacity transport tests validate that fully transparent primary surfaces reveal rear albedo and emission instead of behaving like opaque blockers.
 * Texture loading tests validate PNG dimensions, alpha, missing-file errors, and explicit sRGB versus linear import behavior.
 * Mesh import tests validate OBJ loading, ASCII PLY loading, binary little-endian PLY loading, quad triangulation, UV/normal packing, relative face indices, and unsupported-format errors.
@@ -71,7 +72,7 @@ Current test foundation:
 * Transparent export tests validate raw beauty alpha, default opaque sky behavior, PNG alpha preservation, and stored transparent-export alpha metrics.
 * The first render reference test renders a small Cornell Box PNG, verifies that the image is non-empty, checks basic color variation, and confirms that the ceiling light appears above the floor.
 * The material reference render test renders the built-in diffuse, GGX-style rough metallic, and emissive material scene and checks that the output is bright and colorful enough to catch blank or severely broken material rendering.
-* The transparent material reference render test verifies semi-transparent albedo alpha, cutout pass-through visibility, and rear-surface beauty contribution.
+* The transparent material reference render test verifies semi-transparent albedo alpha, cutout pass-through visibility, measured absorption setup, and rear-surface beauty contribution.
 * Cornell Box, material reference, scripted UV/normal-map, and transparent export tests compare rendered image or alpha metrics against stored tolerant baselines.
 
 Current visual reference scenes:

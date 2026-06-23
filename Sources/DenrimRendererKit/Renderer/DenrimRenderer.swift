@@ -33,6 +33,9 @@ public final class DenrimRenderer {
     private let commandQueue: MTLCommandQueue
     private let pipeline: MTLComputePipelineState
     private let hardwareRayTracingPipeline: MTLComputePipelineState?
+    private let simpleSpatialDenoisePipeline: MTLComputePipelineState?
+    private let svgfDepthNormalPipeline: MTLComputePipelineState?
+    private let svgfOutputCopyPipeline: MTLComputePipelineState?
 
     /// Creates a renderer using the supplied Metal device or the system default device.
     public init(device: MTLDevice? = MTLCreateSystemDefaultDevice()) throws {
@@ -57,25 +60,67 @@ public final class DenrimRenderer {
         } else {
             self.hardwareRayTracingPipeline = nil
         }
+        if let denoiseFunction = library.makeFunction(name: "simpleSpatialDenoiseKernel") {
+            self.simpleSpatialDenoisePipeline = try device.makeComputePipelineState(function: denoiseFunction)
+        } else {
+            self.simpleSpatialDenoisePipeline = nil
+        }
+        if let packFunction = library.makeFunction(name: "packSVGFDepthNormalKernel"),
+           let copyFunction = library.makeFunction(name: "copySVGFOutputKernel") {
+            self.svgfDepthNormalPipeline = try device.makeComputePipelineState(function: packFunction)
+            self.svgfOutputCopyPipeline = try device.makeComputePipelineState(function: copyFunction)
+        } else {
+            self.svgfDepthNormalPipeline = nil
+            self.svgfOutputCopyPipeline = nil
+        }
     }
 
     private static func makeLibrary(device: MTLDevice) throws -> MTLLibrary {
-        if let library = try? device.makeDefaultLibrary(bundle: .module) {
+        if let library = try? device.makeDefaultLibrary(bundle: .module),
+           library.makeFunction(name: "pathTraceKernel") != nil,
+           library.makeFunction(name: "simpleSpatialDenoiseKernel") != nil,
+           library.makeFunction(name: "packSVGFDepthNormalKernel") != nil,
+           library.makeFunction(name: "copySVGFOutputKernel") != nil {
             return library
         }
 
-        let shaderURL = Bundle.module.url(
-            forResource: "PathTrace",
-            withExtension: "metal",
-            subdirectory: "Shaders"
-        ) ?? Bundle.module.url(forResource: "PathTrace", withExtension: "metal")
+        let shaderURLs = shaderSourceURLs()
 
-        guard let shaderURL else {
-            throw DenrimRendererError.missingShaderFunction("PathTrace.metal")
+        guard !shaderURLs.isEmpty else {
+            guard let pathTraceURL = Bundle.module.url(forResource: "PathTrace", withExtension: "metal") else {
+                throw DenrimRendererError.missingShaderFunction("Shaders")
+            }
+            let source = try String(contentsOf: pathTraceURL, encoding: .utf8)
+            return try device.makeLibrary(source: source, options: nil)
         }
 
-        let source = try String(contentsOf: shaderURL, encoding: .utf8)
+        let source = try shaderURLs
+            .map { try String(contentsOf: $0, encoding: .utf8) }
+            .joined(separator: "\n\n")
         return try device.makeLibrary(source: source, options: nil)
+    }
+
+    private static func shaderSourceURLs() -> [URL] {
+        let names = ["Denoise", "PathTrace"]
+        var urls: [URL] = []
+
+        for name in names {
+            if let url = Bundle.module.url(
+                forResource: name,
+                withExtension: "metal",
+                subdirectory: "Shaders"
+            ) ?? Bundle.module.url(forResource: name, withExtension: "metal") {
+                urls.append(url)
+            }
+        }
+
+        if urls.isEmpty {
+            urls = Bundle.module.urls(forResourcesWithExtension: "metal", subdirectory: "Shaders")
+                ?? Bundle.module.urls(forResourcesWithExtension: "metal", subdirectory: nil)
+                ?? []
+        }
+
+        return urls.sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
     /// Creates a progressive render session for a scene and settings.
@@ -100,6 +145,9 @@ public final class DenrimRenderer {
             commandQueue: commandQueue,
             pipeline: pipeline,
             hardwareRayTracingPipeline: hardwareRayTracingPipeline,
+            simpleSpatialDenoisePipeline: simpleSpatialDenoisePipeline,
+            svgfDepthNormalPipeline: svgfDepthNormalPipeline,
+            svgfOutputCopyPipeline: svgfOutputCopyPipeline,
             scene: scene,
             settings: settings,
             accelerationMode: accelerationMode

@@ -34,6 +34,12 @@ struct GPUMaterial {
     float4 parameters;
     float4 parameters2;
     float4 specularColor;
+    float4 sheenColor;
+    float4 transmissionColor;
+    float4 parameters3;
+    float4 clearcoatColor;
+    float4 clearcoatAttenuation;
+    float4 transmissionAbsorption;
 };
 
 struct GPUAccelerationNode {
@@ -50,7 +56,7 @@ struct GPULightRecord {
     uint triangleIndex;
     uint materialIndex;
     float area;
-    float padding;
+    float selectionCDF;
     float4 normal;
 };
 
@@ -93,6 +99,7 @@ struct Hit {
     uint materialID;
     uint objectID;
     uint primitiveID;
+    bool frontFacing;
 };
 
 static uint hash(uint value) {
@@ -135,6 +142,22 @@ static float3 fresnelSchlick(float cosTheta, float3 f0) {
     return f0 + (float3(1.0f) - f0) * factor;
 }
 
+static float dielectricFresnel(float cosThetaI, float etaI, float etaT) {
+    cosThetaI = clamp(cosThetaI, 0.0f, 1.0f);
+    float eta = etaI / etaT;
+    float sinThetaTSquared = eta * eta * max(0.0f, 1.0f - cosThetaI * cosThetaI);
+    if (sinThetaTSquared >= 1.0f) {
+        return 1.0f;
+    }
+
+    float cosThetaT = sqrt(max(0.0f, 1.0f - sinThetaTSquared));
+    float parallel = ((etaT * cosThetaI) - (etaI * cosThetaT))
+        / max((etaT * cosThetaI) + (etaI * cosThetaT), 1e-5f);
+    float perpendicular = ((etaI * cosThetaI) - (etaT * cosThetaT))
+        / max((etaI * cosThetaI) + (etaT * cosThetaT), 1e-5f);
+    return clamp(0.5f * (parallel * parallel + perpendicular * perpendicular), 0.0f, 1.0f);
+}
+
 static float dielectricF0(float indexOfRefraction, float specularWeight) {
     float ior = max(indexOfRefraction, 1.0f);
     float f0 = (ior - 1.0f) / (ior + 1.0f);
@@ -156,8 +179,124 @@ static float materialClearcoatRoughness(GPUMaterial material) {
     return clamp(material.parameters2.w, 0.02f, 1.0f);
 }
 
+static float materialClearcoatThickness(GPUMaterial material) {
+    return max(material.clearcoatAttenuation.w, 0.0f);
+}
+
 static float materialClearcoatF0(GPUMaterial material) {
     return dielectricF0(material.specularColor.w, 1.0f);
+}
+
+static float3 materialClearcoatF0Color(GPUMaterial material) {
+    return materialClearcoatF0(material)
+        * clamp(material.clearcoatColor.xyz, float3(0.0f), float3(1.0f));
+}
+
+static float3 materialClearcoatAttenuationColor(GPUMaterial material) {
+    return clamp(material.clearcoatAttenuation.xyz, float3(0.0001f), float3(1.0f));
+}
+
+static float3 materialClearcoatDepthAttenuation(
+    GPUMaterial material,
+    float3 normal,
+    float3 viewDirection,
+    float3 lightDirection
+) {
+    float thickness = materialClearcoatThickness(material) * materialClearcoat(material);
+    if (thickness <= 1e-5f) {
+        return float3(1.0f);
+    }
+
+    float nDotV = max(dot(normal, viewDirection), 0.05f);
+    float nDotL = max(dot(normal, lightDirection), 0.05f);
+    float pathLength = thickness * 0.5f * (1.0f / nDotV + 1.0f / nDotL);
+    return exp(log(materialClearcoatAttenuationColor(material)) * pathLength);
+}
+
+static float materialSpecularAnisotropy(GPUMaterial material) {
+    return clamp(material.parameters3.w, -0.95f, 0.95f);
+}
+
+static float materialTransmission(GPUMaterial material) {
+    return clamp(material.emission.w, 0.0f, 1.0f);
+}
+
+static float3 materialTransmissionColor(GPUMaterial material) {
+    return clamp(material.transmissionColor.xyz, float3(0.0f), float3(1.0f));
+}
+
+static bool materialThinWalled(GPUMaterial material) {
+    return material.transmissionColor.w > 0.5f;
+}
+
+static float materialTransmissionRoughness(GPUMaterial material) {
+    return clamp(material.parameters3.y, 0.001f, 1.0f);
+}
+
+static float materialTransmissionIOR(GPUMaterial material) {
+    return max(material.parameters3.z, 1.0001f);
+}
+
+static float materialSheen(GPUMaterial material) {
+    return clamp(material.sheenColor.w, 0.0f, 1.0f);
+}
+
+static float3 materialSheenColor(GPUMaterial material) {
+    return clamp(material.sheenColor.xyz, float3(0.0f), float3(1.0f));
+}
+
+static float materialSheenRoughness(GPUMaterial material) {
+    return clamp(material.parameters3.x, 0.02f, 1.0f);
+}
+
+static float3 materialTransmissionTint(GPUMaterial material, float strength) {
+    return mix(float3(1.0f), materialTransmissionColor(material), strength);
+}
+
+static float3 materialTransmissionAbsorption(GPUMaterial material, float distance, bool applies) {
+    float referenceDistance = material.transmissionAbsorption.w;
+    if (!applies || referenceDistance <= 1e-5f || distance <= 0.0f) {
+        return float3(1.0f);
+    }
+
+    float3 referenceColor = clamp(material.transmissionAbsorption.xyz, float3(0.0001f), float3(1.0f));
+    float3 absorptionCoefficient = -log(referenceColor) / referenceDistance;
+    return exp(-absorptionCoefficient * distance);
+}
+
+struct TangentFrame {
+    float3 tangent;
+    float3 bitangent;
+};
+
+static TangentFrame makeTangentFrame(float3 normal, float3 rawTangent, float3 rawBitangent) {
+    TangentFrame frame;
+    float3 tangent = rawTangent - normal * dot(rawTangent, normal);
+    if (dot(tangent, tangent) <= 1e-8f) {
+        float3 helper = fabs(normal.y) < 0.999f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
+        tangent = cross(helper, normal);
+    }
+    frame.tangent = normalize(tangent);
+
+    float3 bitangent = rawBitangent
+        - normal * dot(rawBitangent, normal)
+        - frame.tangent * dot(rawBitangent, frame.tangent);
+    if (dot(bitangent, bitangent) <= 1e-8f) {
+        bitangent = cross(normal, frame.tangent);
+    }
+    frame.bitangent = normalize(bitangent);
+    return frame;
+}
+
+static float2 anisotropicGGXAlpha(float roughness, float anisotropy) {
+    float alpha = max(roughness * roughness, 0.001f);
+    float amount = clamp(anisotropy, -0.95f, 0.95f);
+    float aspect = sqrt(max(0.1f, 1.0f - 0.9f * fabs(amount)));
+    float alphaLong = alpha / aspect;
+    float alphaShort = alpha * aspect;
+    return amount >= 0.0f
+        ? float2(alphaLong, alphaShort)
+        : float2(alphaShort, alphaLong);
 }
 
 static float distributionGGX(float nDotH, float roughness) {
@@ -167,19 +306,146 @@ static float distributionGGX(float nDotH, float roughness) {
     return alpha2 / max(3.14159265359f * denominator * denominator, 1e-5f);
 }
 
-static float geometrySchlickGGX(float nDotV, float roughness) {
-    float r = roughness + 1.0f;
-    float k = (r * r) * 0.125f;
-    return nDotV / max(nDotV * (1.0f - k) + k, 1e-5f);
+static float geometrySmithG1GGX(float nDotV, float roughness) {
+    float alpha = roughness * roughness;
+    float alpha2 = alpha * alpha;
+    float denominator = nDotV + sqrt(max(alpha2 + (1.0f - alpha2) * nDotV * nDotV, 0.0f));
+    return (2.0f * nDotV) / max(denominator, 1e-5f);
 }
 
 static float geometrySmith(float nDotV, float nDotL, float roughness) {
-    return geometrySchlickGGX(nDotV, roughness) * geometrySchlickGGX(nDotL, roughness);
+    return geometrySmithG1GGX(nDotV, roughness) * geometrySmithG1GGX(nDotL, roughness);
+}
+
+static float distributionGGXAnisotropic(
+    float3 halfVector,
+    float3 normal,
+    float3 tangent,
+    float3 bitangent,
+    float roughness,
+    float anisotropy
+) {
+    float nDotH = max(dot(normal, halfVector), 0.0f);
+    if (nDotH <= 0.0f) {
+        return 0.0f;
+    }
+
+    float2 alpha = anisotropicGGXAlpha(roughness, anisotropy);
+    float tDotH = dot(tangent, halfVector);
+    float bDotH = dot(bitangent, halfVector);
+    float denominator = (tDotH * tDotH) / max(alpha.x * alpha.x, 1e-6f)
+        + (bDotH * bDotH) / max(alpha.y * alpha.y, 1e-6f)
+        + nDotH * nDotH;
+    return 1.0f / max(3.14159265359f * alpha.x * alpha.y * denominator * denominator, 1e-6f);
+}
+
+static float geometrySmithG1GGXAnisotropic(
+    float3 direction,
+    float3 normal,
+    float3 tangent,
+    float3 bitangent,
+    float roughness,
+    float anisotropy
+) {
+    float nDotD = max(dot(normal, direction), 0.0f);
+    if (nDotD <= 0.0f) {
+        return 0.0f;
+    }
+
+    float2 alpha = anisotropicGGXAlpha(roughness, anisotropy);
+    float tDotD = dot(tangent, direction);
+    float bDotD = dot(bitangent, direction);
+    float root = sqrt(max(
+        alpha.x * alpha.x * tDotD * tDotD
+            + alpha.y * alpha.y * bDotD * bDotD
+            + nDotD * nDotD,
+        0.0f
+    ));
+    return (2.0f * nDotD) / max(nDotD + root, 1e-5f);
+}
+
+static float geometrySmithAnisotropic(
+    float3 viewDirection,
+    float3 lightDirection,
+    float3 normal,
+    float3 tangent,
+    float3 bitangent,
+    float roughness,
+    float anisotropy
+) {
+    return geometrySmithG1GGXAnisotropic(viewDirection, normal, tangent, bitangent, roughness, anisotropy)
+        * geometrySmithG1GGXAnisotropic(lightDirection, normal, tangent, bitangent, roughness, anisotropy);
+}
+
+static float3 evaluateMaterialSheenBRDF(
+    GPUMaterial material,
+    float3 normal,
+    float3 viewDirection,
+    float3 lightDirection
+) {
+    float sheen = materialSheen(material);
+    if (sheen <= 0.0f) {
+        return float3(0.0f);
+    }
+
+    float metallic = clamp(material.parameters.y, 0.0f, 1.0f);
+    float3 halfDirection = viewDirection + lightDirection;
+    if (dot(halfDirection, halfDirection) <= 1e-8f) {
+        return float3(0.0f);
+    }
+
+    float3 halfVector = normalize(halfDirection);
+    float nDotL = max(dot(normal, lightDirection), 0.0f);
+    float nDotV = max(dot(normal, viewDirection), 0.0f);
+    float nDotH = max(dot(normal, halfVector), 0.0f);
+    if (nDotL <= 0.0f || nDotV <= 0.0f) {
+        return float3(0.0f);
+    }
+
+    float sinThetaH = sqrt(max(0.0f, 1.0f - nDotH * nDotH));
+    float inverseAlpha = mix(20.0f, 0.5f, materialSheenRoughness(material));
+    float distribution = (2.0f + inverseAlpha) * pow(sinThetaH, inverseAlpha) * 0.15915494309f;
+    float visibility = 1.0f / max(4.0f * (nDotL + nDotV - nDotL * nDotV), 1e-5f);
+    return sheen
+        * (1.0f - metallic)
+        * materialSheenColor(material)
+        * distribution
+        * visibility;
+}
+
+static float3 materialClearcoatAttenuationForDirection(
+    GPUMaterial material,
+    float3 normal,
+    float3 viewDirection,
+    float3 lightDirection
+) {
+    float clearcoat = materialClearcoat(material);
+    if (clearcoat <= 0.0f) {
+        return float3(1.0f);
+    }
+
+    float3 halfDirection = viewDirection + lightDirection;
+    if (dot(halfDirection, halfDirection) <= 1e-8f) {
+        return float3(1.0f);
+    }
+
+    float3 halfVector = normalize(halfDirection);
+    float vDotH = max(dot(viewDirection, halfVector), 0.0f);
+    float3 clearcoatFresnel = fresnelSchlick(vDotH, materialClearcoatF0Color(material));
+    float3 fresnelAttenuation = max(float3(0.0f), float3(1.0f) - clearcoatFresnel * clearcoat);
+    return fresnelAttenuation * materialClearcoatDepthAttenuation(
+        material,
+        normal,
+        viewDirection,
+        lightDirection
+    );
 }
 
 static float3 evaluateMaterialBRDF(
     GPUMaterial material,
     float3 normal,
+    float3 tangent,
+    float3 bitangent,
     float3 viewDirection,
     float3 lightDirection
 ) {
@@ -199,20 +465,42 @@ static float3 evaluateMaterialBRDF(
 
     float3 f0 = materialF0(material);
     float3 fresnel = fresnelSchlick(vDotH, f0);
-    float distribution = distributionGGX(nDotH, roughness);
-    float geometry = geometrySmith(nDotV, nDotL, roughness);
+    TangentFrame frame = makeTangentFrame(normal, tangent, bitangent);
+    float anisotropy = materialSpecularAnisotropy(material);
+    float distribution = distributionGGXAnisotropic(
+        halfVector,
+        normal,
+        frame.tangent,
+        frame.bitangent,
+        roughness,
+        anisotropy
+    );
+    float geometry = geometrySmithAnisotropic(
+        viewDirection,
+        lightDirection,
+        normal,
+        frame.tangent,
+        frame.bitangent,
+        roughness,
+        anisotropy
+    );
     float3 specular = distribution * geometry * fresnel / max(4.0f * nDotV * nDotL, 1e-5f);
     float clearcoat = materialClearcoat(material);
-    float clearcoatF0 = materialClearcoatF0(material);
     float clearcoatRoughness = materialClearcoatRoughness(material);
-    float3 clearcoatFresnel = fresnelSchlick(vDotH, float3(clearcoatF0));
+    float3 clearcoatFresnel = fresnelSchlick(vDotH, materialClearcoatF0Color(material));
     float clearcoatDistribution = distributionGGX(nDotH, clearcoatRoughness);
     float clearcoatGeometry = geometrySmith(nDotV, nDotL, clearcoatRoughness);
     float3 clearcoatSpecular = clearcoatDistribution * clearcoatGeometry * clearcoatFresnel / max(4.0f * nDotV * nDotL, 1e-5f);
-    float3 clearcoatAttenuation = float3(1.0f) - clearcoatFresnel * clearcoat;
+    float3 clearcoatAttenuation = materialClearcoatAttenuationForDirection(
+        material,
+        normal,
+        viewDirection,
+        lightDirection
+    );
     float3 diffuse = clearcoatAttenuation * (float3(1.0f) - fresnel) * (1.0f - metallic) * baseColor * inversePi;
+    float3 sheen = evaluateMaterialSheenBRDF(material, normal, viewDirection, lightDirection);
 
-    return diffuse + clearcoatAttenuation * specular + clearcoatSpecular * clearcoat;
+    return diffuse + clearcoatAttenuation * (specular + sheen) + clearcoatSpecular * clearcoat;
 }
 
 static float powerHeuristic(float pdfA, float pdfB) {
@@ -231,34 +519,53 @@ static void materialLobeProbabilities(
     float3 baseColor = material.baseColor.xyz;
     float3 f0 = materialF0(material);
     float clearcoat = materialClearcoat(material);
-    float clearcoatF0 = materialClearcoatF0(material);
-    float diffuseWeight = luminance(baseColor * (1.0f - metallic));
+    float sheenWeight = materialSheen(material) * luminance(materialSheenColor(material)) * (1.0f - metallic);
+    float diffuseWeight = luminance(baseColor * (1.0f - metallic)) + sheenWeight;
     float specularWeight = luminance(f0);
-    float clearcoatWeight = clearcoat * max(clearcoatF0, 0.0f);
+    float clearcoatWeight = clearcoat * luminance(materialClearcoatF0Color(material));
     float totalLobeWeight = max(diffuseWeight + specularWeight + clearcoatWeight, 1e-5f);
 
     clearcoatProbability = clearcoatWeight > 1e-5f
         ? clamp(clearcoatWeight / totalLobeWeight, 0.02f, 0.35f)
         : 0.0f;
-    specularProbability = specularWeight > 1e-5f
-        ? clamp(specularWeight / totalLobeWeight, 0.08f, 0.92f - clearcoatProbability)
-        : 0.0f;
+    float remainingProbability = max(0.0f, 1.0f - clearcoatProbability);
+    if (specularWeight <= 1e-5f) {
+        specularProbability = 0.0f;
+    } else if (diffuseWeight <= 1e-5f) {
+        specularProbability = remainingProbability;
+    } else {
+        specularProbability = clamp(specularWeight / totalLobeWeight, 0.08f, remainingProbability);
+    }
     diffuseProbability = max(0.0f, 1.0f - specularProbability - clearcoatProbability);
 }
 
-static float ggxReflectionPDF(float3 normal, float3 viewDirection, float3 lightDirection, float roughness) {
+static float ggxReflectionPDF(
+    float3 normal,
+    float3 tangent,
+    float3 bitangent,
+    float3 viewDirection,
+    float3 lightDirection,
+    float roughness,
+    float anisotropy
+) {
     float3 halfVector = normalize(viewDirection + lightDirection);
     float nDotH = max(dot(normal, halfVector), 0.0f);
+    float nDotV = max(dot(normal, viewDirection), 0.0f);
     float vDotH = max(dot(viewDirection, halfVector), 0.0f);
-    if (nDotH <= 0.0f || vDotH <= 0.0f) {
+    if (nDotH <= 0.0f || nDotV <= 0.0f || vDotH <= 0.0f) {
         return 0.0f;
     }
-    return distributionGGX(nDotH, roughness) * nDotH / max(4.0f * vDotH, 1e-5f);
+    TangentFrame frame = makeTangentFrame(normal, tangent, bitangent);
+    return distributionGGXAnisotropic(halfVector, normal, frame.tangent, frame.bitangent, roughness, anisotropy)
+        * geometrySmithG1GGXAnisotropic(viewDirection, normal, frame.tangent, frame.bitangent, roughness, anisotropy)
+        / max(4.0f * nDotV, 1e-5f);
 }
 
 static float materialBSDFPDF(
     GPUMaterial material,
     float3 normal,
+    float3 tangent,
+    float3 bitangent,
     float3 viewDirection,
     float3 lightDirection
 ) {
@@ -276,34 +583,147 @@ static float materialBSDFPDF(
 
     float roughness = clamp(material.parameters.x, 0.02f, 1.0f);
     float clearcoatRoughness = materialClearcoatRoughness(material);
+    float anisotropy = materialSpecularAnisotropy(material);
     float diffusePDF = nDotL * inversePi;
-    float specularPDF = ggxReflectionPDF(normal, viewDirection, lightDirection, roughness);
-    float clearcoatPDF = ggxReflectionPDF(normal, viewDirection, lightDirection, clearcoatRoughness);
+    float specularPDF = ggxReflectionPDF(
+        normal,
+        tangent,
+        bitangent,
+        viewDirection,
+        lightDirection,
+        roughness,
+        anisotropy
+    );
+    float clearcoatPDF = ggxReflectionPDF(
+        normal,
+        tangent,
+        bitangent,
+        viewDirection,
+        lightDirection,
+        clearcoatRoughness,
+        0.0f
+    );
     return diffuseProbability * diffusePDF
         + specularProbability * specularPDF
         + clearcoatProbability * clearcoatPDF;
+}
+
+static float3 materialDiffuseBounceWeight(
+    GPUMaterial material,
+    float3 normal,
+    float3 viewDirection,
+    float3 lightDirection
+) {
+    float metallic = clamp(material.parameters.y, 0.0f, 1.0f);
+    float3 baseColor = material.baseColor.xyz;
+    float3 halfDirection = viewDirection + lightDirection;
+    if (dot(halfDirection, halfDirection) <= 1e-8f) {
+        return float3(0.0f);
+    }
+
+    float3 halfVector = normalize(halfDirection);
+    float vDotH = max(dot(viewDirection, halfVector), 0.0f);
+    float3 fresnel = fresnelSchlick(vDotH, materialF0(material));
+    float3 clearcoatAttenuation = materialClearcoatAttenuationForDirection(
+        material,
+        normal,
+        viewDirection,
+        lightDirection
+    );
+    float3 diffuse = (float3(1.0f) - fresnel) * (1.0f - metallic) * baseColor;
+    float3 sheen = evaluateMaterialSheenBRDF(material, normal, viewDirection, lightDirection)
+        * 3.14159265359f;
+    return clearcoatAttenuation * (diffuse + sheen);
+}
+
+static bool terminatePathWithRussianRoulette(
+    uint bounce,
+    thread float3 &throughput,
+    thread uint &state
+) {
+    float continuationWeight = maxComponent(throughput);
+    if (continuationWeight <= 0.0f) {
+        return true;
+    }
+
+    if (bounce < 2u) {
+        return false;
+    }
+
+    float survivalProbability = clamp(continuationWeight, 0.05f, 0.95f);
+    if (randomFloat(state) > survivalProbability) {
+        return true;
+    }
+
+    throughput /= survivalProbability;
+    return false;
 }
 
 static float lightSolidAnglePDF(float distanceSquared, float cosLight, float area) {
     return distanceSquared / max(cosLight * area, 1e-6f);
 }
 
-static float lightPDFForHit(Hit hit, float3 incomingDirection, constant GPULightRecord *lights, uint lightCount) {
-    for (uint index = 0; index < lightCount; ++index) {
-        constant GPULightRecord &light = lights[index];
-        if (light.triangleIndex != hit.primitiveID || light.area <= 0.0f) {
-            continue;
-        }
+static float lightSelectionCDF(constant GPULightRecord *lights, uint index) {
+    return clamp(lights[index].selectionCDF, 0.0f, 1.0f);
+}
 
-        float cosLight = max(0.0f, dot(light.normal.xyz, -incomingDirection));
-        if (cosLight <= 0.0f) {
-            return 0.0f;
-        }
+static float lightSelectionPDF(constant GPULightRecord *lights, uint index) {
+    float previousCDF = index == 0u ? 0.0f : lightSelectionCDF(lights, index - 1u);
+    return max(lightSelectionCDF(lights, index) - previousCDF, 0.0f);
+}
 
-        return lightSolidAnglePDF(hit.t * hit.t, cosLight, light.area);
+static uint selectLightIndex(constant GPULightRecord *lights, uint lightCount, float sample) {
+    if (lightCount <= 1u) {
+        return 0u;
     }
 
-    return 0.0f;
+    float target = clamp(sample, 0.0f, 0.99999994f);
+    uint low = 0u;
+    uint high = lightCount - 1u;
+    while (low < high) {
+        uint mid = (low + high) >> 1u;
+        if (target <= lightSelectionCDF(lights, mid)) {
+            high = mid;
+        } else {
+            low = mid + 1u;
+        }
+    }
+    return low;
+}
+
+static float lightPDFForHit(
+    Hit hit,
+    float3 incomingDirection,
+    constant GPUTriangle *triangles,
+    uint triangleCount,
+    constant GPULightRecord *lights,
+    uint lightCount
+) {
+    if (hit.primitiveID >= triangleCount) {
+        return 0.0f;
+    }
+
+    uint lightIndexPlusOne = triangles[hit.primitiveID].padding2;
+    if (lightIndexPlusOne == 0u) {
+        return 0.0f;
+    }
+
+    uint index = lightIndexPlusOne - 1u;
+    if (index >= lightCount) {
+        return 0.0f;
+    }
+
+    constant GPULightRecord &light = lights[index];
+    if (light.triangleIndex != hit.primitiveID || light.area <= 0.0f) {
+        return 0.0f;
+    }
+
+    float cosLight = max(0.0f, dot(light.normal.xyz, -incomingDirection));
+    if (cosLight <= 0.0f) {
+        return 0.0f;
+    }
+
+    return lightSelectionPDF(lights, index) * lightSolidAnglePDF(hit.t * hit.t, cosLight, light.area);
 }
 
 static float3 sampleGGXHalfVector(float2 u, float3 normal, float roughness) {
@@ -314,6 +734,47 @@ static float3 sampleGGXHalfVector(float2 u, float3 normal, float roughness) {
     float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
     float3 localDirection = float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
     return orientHemisphere(localDirection, normal);
+}
+
+static float3 sampleGGXVisibleNormal(
+    float2 u,
+    float3 normal,
+    float3 tangent,
+    float3 bitangent,
+    float3 viewDirection,
+    float roughness,
+    float anisotropy
+) {
+    TangentFrame frame = makeTangentFrame(normal, tangent, bitangent);
+    float2 alpha = anisotropicGGXAlpha(roughness, anisotropy);
+    float3 localView = normalize(float3(
+        dot(viewDirection, frame.tangent),
+        dot(viewDirection, frame.bitangent),
+        max(dot(viewDirection, normal), 1e-5f)
+    ));
+    float3 stretchedView = normalize(float3(alpha.x * localView.x, alpha.y * localView.y, localView.z));
+    float lensq = stretchedView.x * stretchedView.x + stretchedView.y * stretchedView.y;
+    float3 t1 = lensq > 1e-7f
+        ? float3(-stretchedView.y, stretchedView.x, 0.0f) * rsqrt(lensq)
+        : float3(1.0f, 0.0f, 0.0f);
+    float3 t2 = cross(stretchedView, t1);
+
+    float radius = sqrt(u.x);
+    float phi = 6.28318530718f * u.y;
+    float p1 = radius * cos(phi);
+    float p2 = radius * sin(phi);
+    float blend = 0.5f * (1.0f + stretchedView.z);
+    p2 = mix(sqrt(max(0.0f, 1.0f - p1 * p1)), p2, blend);
+
+    float3 visibleNormal = p1 * t1
+        + p2 * t2
+        + sqrt(max(0.0f, 1.0f - p1 * p1 - p2 * p2)) * stretchedView;
+    float3 localHalfVector = normalize(float3(
+        alpha.x * visibleNormal.x,
+        alpha.y * visibleNormal.y,
+        max(visibleNormal.z, 0.0f)
+    ));
+    return normalize(localHalfVector.x * frame.tangent + localHalfVector.y * frame.bitangent + localHalfVector.z * normal);
 }
 
 static bool projectToScreen(
@@ -368,6 +829,80 @@ static float3 sampleTriangle(constant GPUTriangle &triangle, float2 randomSample
     return b0 * triangle.v0.xyz + b1 * triangle.v1.xyz + b2 * triangle.v2.xyz;
 }
 
+static bool continueTransmissiveSurface(
+    Hit hit,
+    GPUMaterial material,
+    thread Ray &ray,
+    thread float3 &throughput,
+    thread float &previousBSDFPDF,
+    thread uint &state
+) {
+    float transmission = materialTransmission(material);
+    if (transmission <= 0.0f || randomFloat(state) > transmission) {
+        return false;
+    }
+
+    float3 incomingDirection = ray.direction;
+    float3 viewDirection = -incomingDirection;
+    float roughness = materialTransmissionRoughness(material);
+    float ior = materialTransmissionIOR(material);
+    float3 microNormal = hit.normal;
+
+    if (roughness > 0.01f) {
+        microNormal = sampleGGXHalfVector(float2(randomFloat(state), randomFloat(state)), hit.normal, roughness);
+        if (dot(microNormal, incomingDirection) > 0.0f) {
+            microNormal = -microNormal;
+        }
+    }
+
+    float etaI = hit.frontFacing ? 1.0f : ior;
+    float etaT = hit.frontFacing ? ior : 1.0f;
+    float eta = etaI / etaT;
+    float cosThetaI = max(dot(viewDirection, microNormal), 0.0f);
+    float fresnel = dielectricFresnel(cosThetaI, etaI, etaT);
+
+    if (materialThinWalled(material)) {
+        fresnel = dielectricFresnel(cosThetaI, 1.0f, ior);
+        float reflectProbability = clamp(fresnel, 0.02f, 0.98f);
+        if (randomFloat(state) < reflectProbability) {
+            ray.direction = normalize(reflect(incomingDirection, microNormal));
+            ray.origin = hit.position + microNormal * 0.001f;
+            throughput *= fresnel / max(reflectProbability, 1e-5f);
+        } else {
+            ray.direction = incomingDirection;
+            ray.origin = hit.position + ray.direction * 0.001f;
+            float grazing = 1.0f - abs(dot(viewDirection, hit.normal));
+            float tintStrength = mix(0.35f, 0.95f, grazing * grazing);
+            float transmissionWeight = (1.0f - fresnel) / max(1.0f - reflectProbability, 1e-5f);
+            throughput *= materialTransmissionTint(material, tintStrength) * transmissionWeight;
+        }
+
+        previousBSDFPDF = 0.0f;
+        return true;
+    }
+
+    float3 refractedDirection = refract(incomingDirection, microNormal, eta);
+    bool totalInternalReflection = dot(refractedDirection, refractedDirection) <= 1e-7f;
+    float reflectProbability = totalInternalReflection ? 1.0f : clamp(fresnel, 0.02f, 0.98f);
+
+    if (randomFloat(state) < reflectProbability) {
+        ray.direction = normalize(reflect(incomingDirection, microNormal));
+        ray.origin = hit.position + microNormal * 0.001f;
+        throughput *= totalInternalReflection ? 1.0f : fresnel / max(reflectProbability, 1e-5f);
+    } else {
+        ray.direction = normalize(refractedDirection);
+        ray.origin = hit.position + ray.direction * 0.001f;
+        float grazing = 1.0f - abs(dot(viewDirection, hit.normal));
+        float tintStrength = mix(0.35f, 0.95f, grazing * grazing);
+        float transmissionWeight = (1.0f - fresnel) / max(1.0f - reflectProbability, 1e-5f);
+        float3 absorption = materialTransmissionAbsorption(material, hit.t, !hit.frontFacing);
+        throughput *= materialTransmissionTint(material, tintStrength) * absorption * transmissionWeight;
+    }
+
+    previousBSDFPDF = 0.0f;
+    return true;
+}
+
 static bool intersectTriangle(
     Ray ray,
     constant GPUTriangle &triangle,
@@ -375,7 +910,8 @@ static bool intersectTriangle(
     thread float3 &normal,
     thread float2 &uv,
     thread float3 &tangent,
-    thread float3 &bitangent
+    thread float3 &bitangent,
+    thread bool &frontFacing
 ) {
     float3 v0 = triangle.v0.xyz;
     float3 v1 = triangle.v1.xyz;
@@ -410,6 +946,7 @@ static bool intersectTriangle(
     t = candidateT;
     float w = 1.0f - u - v;
     normal = normalize(w * triangle.n0.xyz + u * triangle.n1.xyz + v * triangle.n2.xyz);
+    frontFacing = dot(normal, ray.direction) <= 0.0f;
     if (dot(normal, ray.direction) > 0.0f) {
         normal = -normal;
     }
@@ -442,6 +979,7 @@ static Hit emptyHit() {
     closest.materialID = 0;
     closest.objectID = 0;
     closest.primitiveID = 0;
+    closest.frontFacing = true;
     return closest;
 }
 
@@ -453,7 +991,8 @@ static Hit intersectSceneLinear(Ray ray, constant GPURenderConstants &constants,
         float2 uv;
         float3 tangent;
         float3 bitangent;
-        if (intersectTriangle(ray, triangles[index], t, normal, uv, tangent, bitangent) && t < closest.t) {
+        bool frontFacing;
+        if (intersectTriangle(ray, triangles[index], t, normal, uv, tangent, bitangent, frontFacing) && t < closest.t) {
             closest.hit = true;
             closest.t = t;
             closest.position = ray.origin + t * ray.direction;
@@ -464,6 +1003,7 @@ static Hit intersectSceneLinear(Ray ray, constant GPURenderConstants &constants,
             closest.materialID = triangles[index].materialID;
             closest.objectID = triangles[index].objectID;
             closest.primitiveID = index;
+            closest.frontFacing = frontFacing;
         }
     }
 
@@ -512,7 +1052,8 @@ static Hit intersectScene(
                 float2 uv;
                 float3 tangent;
                 float3 bitangent;
-                if (intersectTriangle(ray, triangles[triangleIndex], t, normal, uv, tangent, bitangent) && t < closest.t) {
+                bool frontFacing;
+                if (intersectTriangle(ray, triangles[triangleIndex], t, normal, uv, tangent, bitangent, frontFacing) && t < closest.t) {
                     closest.hit = true;
                     closest.t = t;
                     closest.position = ray.origin + t * ray.direction;
@@ -523,6 +1064,7 @@ static Hit intersectScene(
                     closest.materialID = triangles[triangleIndex].materialID;
                     closest.objectID = triangles[triangleIndex].objectID;
                     closest.primitiveID = triangleIndex;
+                    closest.frontFacing = frontFacing;
                 }
             }
         } else {
@@ -582,6 +1124,7 @@ static Hit intersectSceneHardware(
         instance,
         normalize(w * triangle.n0.xyz + barycentric.x * triangle.n1.xyz + barycentric.y * triangle.n2.xyz)
     );
+    hit.frontFacing = dot(hit.normal, ray.direction) <= 0.0f;
     if (dot(hit.normal, ray.direction) > 0.0f) {
         hit.normal = -hit.normal;
     }
@@ -687,6 +1230,176 @@ static Hit applyNormalMap(
     return hit;
 }
 
+static Ray makeCameraRay(GPUCamera camera, uint width, uint height, uint2 gid, float jitterX, float jitterY) {
+    float u = ((float)gid.x + jitterX) / (float)width;
+    float v = 1.0f - (((float)gid.y + jitterY) / (float)height);
+
+    Ray ray;
+    ray.origin = camera.origin.xyz;
+    ray.direction = normalize(camera.lowerLeft.xyz + u * camera.horizontal.xyz + v * camera.vertical.xyz - ray.origin);
+    return ray;
+}
+
+static bool tracePrimaryAOV(
+    Ray ray,
+    constant GPURenderConstants &constants,
+    constant GPUTriangle *triangles,
+    constant GPUAccelerationNode *nodes,
+    constant uint *primitiveIndices,
+    constant GPUMaterial *materials,
+    constant GPUTextureDescriptor *textureDescriptors,
+    constant float4 *texturePixels,
+    thread Hit &primaryHit,
+    thread GPUMaterial &primaryMaterial
+) {
+    for (uint pass = 0; pass < 32u; ++pass) {
+        Hit hit = intersectScene(ray, constants, triangles, nodes, primitiveIndices);
+        if (!hit.hit) {
+            return false;
+        }
+
+        GPUMaterial material = materials[min(hit.materialID, constants.materialCount - 1u)];
+        hit = applyNormalMap(hit, material, textureDescriptors, texturePixels, ray.direction);
+        material = applyBaseColorTexture(material, hit, textureDescriptors, texturePixels);
+        if (material.baseColor.w <= 0.001f) {
+            ray.origin = hit.position + ray.direction * 0.001f;
+            continue;
+        }
+
+        primaryHit = hit;
+        primaryMaterial = material;
+        return true;
+    }
+
+    return false;
+}
+
+static bool tracePrimaryAOVHardware(
+    Ray ray,
+    acceleration_structure<instancing> scene,
+    constant GPURayTracingInstance *rtInstances,
+    constant GPUTriangle *localTriangles,
+    constant GPUMaterial *materials,
+    uint materialCount,
+    constant GPUTextureDescriptor *textureDescriptors,
+    constant float4 *texturePixels,
+    thread Hit &primaryHit,
+    thread GPUMaterial &primaryMaterial
+) {
+    for (uint pass = 0; pass < 32u; ++pass) {
+        Hit hit = intersectSceneHardware(ray, scene, localTriangles, rtInstances);
+        if (!hit.hit) {
+            return false;
+        }
+
+        GPUMaterial material = materials[min(hit.materialID, materialCount - 1u)];
+        hit = applyNormalMap(hit, material, textureDescriptors, texturePixels, ray.direction);
+        material = applyBaseColorTexture(material, hit, textureDescriptors, texturePixels);
+        if (material.baseColor.w <= 0.001f) {
+            ray.origin = hit.position + ray.direction * 0.001f;
+            continue;
+        }
+
+        primaryHit = hit;
+        primaryMaterial = material;
+        return true;
+    }
+
+    return false;
+}
+
+static bool shadowOccluded(
+    Ray shadowRay,
+    float maxDistance,
+    constant GPURenderConstants &constants,
+    constant GPUTriangle *triangles,
+    constant GPUMaterial *materials,
+    constant GPUAccelerationNode *nodes,
+    constant uint *primitiveIndices,
+    thread float3 &transmittance
+) {
+    float traveled = 0.0f;
+    for (uint step = 0; step < 8u; ++step) {
+        Hit shadowHit = intersectScene(shadowRay, constants, triangles, nodes, primitiveIndices);
+        if (!shadowHit.hit || traveled + shadowHit.t >= maxDistance) {
+            return false;
+        }
+
+        GPUMaterial shadowMaterial = materials[min(shadowHit.materialID, constants.materialCount - 1u)];
+        if (shadowMaterial.baseColor.w <= 0.001f) {
+            traveled += shadowHit.t;
+            shadowRay.origin = shadowHit.position + shadowRay.direction * 0.001f;
+            continue;
+        }
+
+        float transmission = materialTransmission(shadowMaterial);
+        if (transmission <= 0.001f) {
+            return true;
+        }
+
+        float3 absorption = materialTransmissionAbsorption(
+            shadowMaterial,
+            shadowHit.t,
+            !shadowHit.frontFacing && !materialThinWalled(shadowMaterial)
+        );
+        transmittance *= materialTransmissionTint(shadowMaterial, 0.35f) * absorption * transmission;
+        if (maxComponent(transmittance) < 0.02f) {
+            return true;
+        }
+
+        traveled += shadowHit.t;
+        shadowRay.origin = shadowHit.position + shadowRay.direction * 0.001f;
+    }
+
+    return true;
+}
+
+static bool shadowOccludedHardware(
+    Ray shadowRay,
+    float maxDistance,
+    constant GPURenderConstants &constants,
+    constant GPUMaterial *materials,
+    acceleration_structure<instancing> scene,
+    constant GPUTriangle *localTriangles,
+    constant GPURayTracingInstance *rtInstances,
+    thread float3 &transmittance
+) {
+    float traveled = 0.0f;
+    for (uint step = 0; step < 8u; ++step) {
+        Hit shadowHit = intersectSceneHardware(shadowRay, scene, localTriangles, rtInstances);
+        if (!shadowHit.hit || traveled + shadowHit.t >= maxDistance) {
+            return false;
+        }
+
+        GPUMaterial shadowMaterial = materials[min(shadowHit.materialID, constants.materialCount - 1u)];
+        if (shadowMaterial.baseColor.w <= 0.001f) {
+            traveled += shadowHit.t;
+            shadowRay.origin = shadowHit.position + shadowRay.direction * 0.001f;
+            continue;
+        }
+
+        float transmission = materialTransmission(shadowMaterial);
+        if (transmission <= 0.001f) {
+            return true;
+        }
+
+        float3 absorption = materialTransmissionAbsorption(
+            shadowMaterial,
+            shadowHit.t,
+            !shadowHit.frontFacing && !materialThinWalled(shadowMaterial)
+        );
+        transmittance *= materialTransmissionTint(shadowMaterial, 0.35f) * absorption * transmission;
+        if (maxComponent(transmittance) < 0.02f) {
+            return true;
+        }
+
+        traveled += shadowHit.t;
+        shadowRay.origin = shadowHit.position + shadowRay.direction * 0.001f;
+    }
+
+    return true;
+}
+
 static float3 sampleDirectLighting(
     Hit hit,
     GPUMaterial surfaceMaterial,
@@ -700,53 +1413,79 @@ static float3 sampleDirectLighting(
     thread uint &state
 ) {
     float3 direct = float3(0);
-
-    for (uint index = 0; index < constants.lightCount; ++index) {
-        constant GPULightRecord &light = lights[index];
-        uint lightTriangleIndex = light.triangleIndex;
-        if (lightTriangleIndex >= constants.triangleCount) {
-            continue;
-        }
-
-        constant GPUTriangle &lightTriangle = triangles[lightTriangleIndex];
-        GPUMaterial lightMaterial = materials[min(light.materialIndex, constants.materialCount - 1u)];
-        float3 emission = lightMaterial.emission.xyz;
-
-        float area = light.area;
-        if (area <= 0.0f) {
-            continue;
-        }
-
-        float3 lightPoint = sampleTriangle(lightTriangle, float2(randomFloat(state), randomFloat(state)));
-        float3 toLight = lightPoint - hit.position;
-        float distanceSquared = dot(toLight, toLight);
-        float distanceToLight = sqrt(distanceSquared);
-        float3 lightDirection = toLight / distanceToLight;
-        float cosSurface = max(0.0f, dot(hit.normal, lightDirection));
-        float3 lightNormal = light.normal.xyz;
-        float cosLight = max(0.0f, dot(lightNormal, -lightDirection));
-
-        if (cosSurface <= 0.0f || cosLight <= 0.0f) {
-            continue;
-        }
-
-        float lightPDF = lightSolidAnglePDF(distanceSquared, cosLight, area);
-        float bsdfPDF = materialBSDFPDF(surfaceMaterial, hit.normal, viewDirection, lightDirection);
-        float misWeight = powerHeuristic(lightPDF, bsdfPDF);
-
-        Ray shadowRay;
-        shadowRay.origin = hit.position + hit.normal * 0.001f;
-        shadowRay.direction = lightDirection;
-        Hit shadowHit = intersectScene(shadowRay, constants, triangles, nodes, primitiveIndices);
-
-        if (shadowHit.hit && shadowHit.t < distanceToLight - 0.002f) {
-            continue;
-        }
-
-        float geometryTerm = cosSurface * cosLight * area / max(distanceSquared, 1e-6f);
-        float3 brdf = evaluateMaterialBRDF(surfaceMaterial, hit.normal, viewDirection, lightDirection);
-        direct += brdf * emission * geometryTerm * misWeight;
+    if (constants.lightCount == 0u) {
+        return direct;
     }
+
+    uint index = selectLightIndex(lights, constants.lightCount, randomFloat(state));
+    constant GPULightRecord &light = lights[index];
+    float selectionPDF = lightSelectionPDF(lights, index);
+    uint lightTriangleIndex = light.triangleIndex;
+    if (lightTriangleIndex >= constants.triangleCount || selectionPDF <= 0.0f) {
+        return direct;
+    }
+
+    constant GPUTriangle &lightTriangle = triangles[lightTriangleIndex];
+    GPUMaterial lightMaterial = materials[min(light.materialIndex, constants.materialCount - 1u)];
+    float3 emission = lightMaterial.emission.xyz;
+
+    float area = light.area;
+    if (area <= 0.0f) {
+        return direct;
+    }
+
+    float3 lightPoint = sampleTriangle(lightTriangle, float2(randomFloat(state), randomFloat(state)));
+    float3 toLight = lightPoint - hit.position;
+    float distanceSquared = dot(toLight, toLight);
+    float distanceToLight = sqrt(distanceSquared);
+    float3 lightDirection = toLight / distanceToLight;
+    float cosSurface = max(0.0f, dot(hit.normal, lightDirection));
+    float3 lightNormal = light.normal.xyz;
+    float cosLight = max(0.0f, dot(lightNormal, -lightDirection));
+
+    if (cosSurface <= 0.0f || cosLight <= 0.0f) {
+        return direct;
+    }
+
+    float lightPDF = selectionPDF * lightSolidAnglePDF(distanceSquared, cosLight, area);
+    float bsdfPDF = materialBSDFPDF(
+        surfaceMaterial,
+        hit.normal,
+        hit.tangent,
+        hit.bitangent,
+        viewDirection,
+        lightDirection
+    );
+    float misWeight = powerHeuristic(lightPDF, bsdfPDF);
+
+    Ray shadowRay;
+    shadowRay.origin = hit.position + hit.normal * 0.001f;
+    shadowRay.direction = lightDirection;
+    float3 shadowTransmittance = float3(1.0f);
+
+    if (shadowOccluded(
+        shadowRay,
+        distanceToLight - 0.002f,
+        constants,
+        triangles,
+        materials,
+        nodes,
+        primitiveIndices,
+        shadowTransmittance
+    )) {
+        return direct;
+    }
+
+    float geometryTerm = cosSurface * cosLight * area / max(distanceSquared, 1e-6f);
+    float3 brdf = evaluateMaterialBRDF(
+        surfaceMaterial,
+        hit.normal,
+        hit.tangent,
+        hit.bitangent,
+        viewDirection,
+        lightDirection
+    );
+    direct += brdf * emission * geometryTerm * misWeight * shadowTransmittance / selectionPDF;
 
     return direct;
 }
@@ -765,53 +1504,79 @@ static float3 sampleDirectLightingHardware(
     thread uint &state
 ) {
     float3 direct = float3(0);
-
-    for (uint index = 0; index < constants.lightCount; ++index) {
-        constant GPULightRecord &light = lights[index];
-        uint lightTriangleIndex = light.triangleIndex;
-        if (lightTriangleIndex >= constants.triangleCount) {
-            continue;
-        }
-
-        constant GPUTriangle &lightTriangle = triangles[lightTriangleIndex];
-        GPUMaterial lightMaterial = materials[min(light.materialIndex, constants.materialCount - 1u)];
-        float3 emission = lightMaterial.emission.xyz;
-
-        float area = light.area;
-        if (area <= 0.0f) {
-            continue;
-        }
-
-        float3 lightPoint = sampleTriangle(lightTriangle, float2(randomFloat(state), randomFloat(state)));
-        float3 toLight = lightPoint - hit.position;
-        float distanceSquared = dot(toLight, toLight);
-        float distanceToLight = sqrt(distanceSquared);
-        float3 lightDirection = toLight / distanceToLight;
-        float cosSurface = max(0.0f, dot(hit.normal, lightDirection));
-        float3 lightNormal = light.normal.xyz;
-        float cosLight = max(0.0f, dot(lightNormal, -lightDirection));
-
-        if (cosSurface <= 0.0f || cosLight <= 0.0f) {
-            continue;
-        }
-
-        float lightPDF = lightSolidAnglePDF(distanceSquared, cosLight, area);
-        float bsdfPDF = materialBSDFPDF(surfaceMaterial, hit.normal, viewDirection, lightDirection);
-        float misWeight = powerHeuristic(lightPDF, bsdfPDF);
-
-        Ray shadowRay;
-        shadowRay.origin = hit.position + hit.normal * 0.001f;
-        shadowRay.direction = lightDirection;
-        Hit shadowHit = intersectSceneHardware(shadowRay, scene, localTriangles, rtInstances);
-
-        if (shadowHit.hit && shadowHit.t < distanceToLight - 0.002f) {
-            continue;
-        }
-
-        float geometryTerm = cosSurface * cosLight * area / max(distanceSquared, 1e-6f);
-        float3 brdf = evaluateMaterialBRDF(surfaceMaterial, hit.normal, viewDirection, lightDirection);
-        direct += brdf * emission * geometryTerm * misWeight;
+    if (constants.lightCount == 0u) {
+        return direct;
     }
+
+    uint index = selectLightIndex(lights, constants.lightCount, randomFloat(state));
+    constant GPULightRecord &light = lights[index];
+    float selectionPDF = lightSelectionPDF(lights, index);
+    uint lightTriangleIndex = light.triangleIndex;
+    if (lightTriangleIndex >= constants.triangleCount || selectionPDF <= 0.0f) {
+        return direct;
+    }
+
+    constant GPUTriangle &lightTriangle = triangles[lightTriangleIndex];
+    GPUMaterial lightMaterial = materials[min(light.materialIndex, constants.materialCount - 1u)];
+    float3 emission = lightMaterial.emission.xyz;
+
+    float area = light.area;
+    if (area <= 0.0f) {
+        return direct;
+    }
+
+    float3 lightPoint = sampleTriangle(lightTriangle, float2(randomFloat(state), randomFloat(state)));
+    float3 toLight = lightPoint - hit.position;
+    float distanceSquared = dot(toLight, toLight);
+    float distanceToLight = sqrt(distanceSquared);
+    float3 lightDirection = toLight / distanceToLight;
+    float cosSurface = max(0.0f, dot(hit.normal, lightDirection));
+    float3 lightNormal = light.normal.xyz;
+    float cosLight = max(0.0f, dot(lightNormal, -lightDirection));
+
+    if (cosSurface <= 0.0f || cosLight <= 0.0f) {
+        return direct;
+    }
+
+    float lightPDF = selectionPDF * lightSolidAnglePDF(distanceSquared, cosLight, area);
+    float bsdfPDF = materialBSDFPDF(
+        surfaceMaterial,
+        hit.normal,
+        hit.tangent,
+        hit.bitangent,
+        viewDirection,
+        lightDirection
+    );
+    float misWeight = powerHeuristic(lightPDF, bsdfPDF);
+
+    Ray shadowRay;
+    shadowRay.origin = hit.position + hit.normal * 0.001f;
+    shadowRay.direction = lightDirection;
+    float3 shadowTransmittance = float3(1.0f);
+
+    if (shadowOccludedHardware(
+        shadowRay,
+        distanceToLight - 0.002f,
+        constants,
+        materials,
+        scene,
+        localTriangles,
+        rtInstances,
+        shadowTransmittance
+    )) {
+        return direct;
+    }
+
+    float geometryTerm = cosSurface * cosLight * area / max(distanceSquared, 1e-6f);
+    float3 brdf = evaluateMaterialBRDF(
+        surfaceMaterial,
+        hit.normal,
+        hit.tangent,
+        hit.bitangent,
+        viewDirection,
+        lightDirection
+    );
+    direct += brdf * emission * geometryTerm * misWeight * shadowTransmittance / selectionPDF;
 
     return direct;
 }
@@ -844,14 +1609,14 @@ kernel void pathTraceKernel(
         ^ hash(gid.x + gid.y * constants.width)
         ^ hash(constants.sampleIndex + 1u);
 
-    float jitterX = randomFloat(state);
-    float jitterY = randomFloat(state);
-    float u = ((float)gid.x + jitterX) / (float)constants.width;
-    float v = 1.0f - (((float)gid.y + jitterY) / (float)constants.height);
-
-    Ray ray;
-    ray.origin = camera.origin.xyz;
-    ray.direction = normalize(camera.lowerLeft.xyz + u * camera.horizontal.xyz + v * camera.vertical.xyz - ray.origin);
+    Ray ray = makeCameraRay(
+        camera,
+        constants.width,
+        constants.height,
+        gid,
+        randomFloat(state),
+        randomFloat(state)
+    );
 
     float3 radiance = float3(0);
     float3 throughput = float3(1);
@@ -865,6 +1630,12 @@ kernel void pathTraceKernel(
     primaryMaterial.parameters = float4(0);
     primaryMaterial.parameters2 = float4(0);
     primaryMaterial.specularColor = float4(0);
+    primaryMaterial.sheenColor = float4(0);
+    primaryMaterial.transmissionColor = float4(0);
+    primaryMaterial.parameters3 = float4(0);
+    primaryMaterial.clearcoatColor = float4(0);
+    primaryMaterial.clearcoatAttenuation = float4(0);
+    primaryMaterial.transmissionAbsorption = float4(0);
 
     for (uint bounce = 0; bounce < constants.maxBounces; ++bounce) {
         Hit hit = intersectScene(ray, constants, triangles, nodes, primitiveIndices);
@@ -892,10 +1663,24 @@ kernel void pathTraceKernel(
             primaryMaterial = material;
         }
 
+        if (continueTransmissiveSurface(hit, material, ray, throughput, previousBSDFPDF, state)) {
+            if (terminatePathWithRussianRoulette(bounce, throughput, state)) {
+                break;
+            }
+            continue;
+        }
+
         if (maxComponent(material.emission.xyz) > 0.0f) {
             float emissionWeight = 1.0f;
             if (bounce > 0u && previousBSDFPDF > 0.0f) {
-                float lightPDF = lightPDFForHit(hit, ray.direction, lights, constants.lightCount);
+                float lightPDF = lightPDFForHit(
+                    hit,
+                    ray.direction,
+                    triangles,
+                    constants.triangleCount,
+                    lights,
+                    constants.lightCount
+                );
                 emissionWeight = powerHeuristic(previousBSDFPDF, lightPDF);
             }
             radiance += throughput * material.emission.xyz * emissionWeight;
@@ -915,20 +1700,14 @@ kernel void pathTraceKernel(
             state
         );
         float roughness = clamp(material.parameters.x, 0.02f, 1.0f);
-        float metallic = clamp(material.parameters.y, 0.0f, 1.0f);
-        float3 baseColor = material.baseColor.xyz;
+        float anisotropy = materialSpecularAnisotropy(material);
         float3 f0 = materialF0(material);
         float clearcoat = materialClearcoat(material);
-        float clearcoatF0 = materialClearcoatF0(material);
         float clearcoatRoughness = materialClearcoatRoughness(material);
-        float diffuseWeight = luminance(baseColor * (1.0f - metallic));
-        float specularWeight = luminance(f0);
-        float clearcoatWeight = clearcoat * max(clearcoatF0, 0.0f);
-        float totalLobeWeight = max(diffuseWeight + specularWeight + clearcoatWeight, 1e-5f);
-        float clearcoatProbability = clearcoatWeight > 1e-5f ? clamp(clearcoatWeight / totalLobeWeight, 0.02f, 0.35f) : 0.0f;
-        float specularProbability = specularWeight > 1e-5f
-            ? clamp(specularWeight / totalLobeWeight, 0.08f, 0.92f - clearcoatProbability)
-            : 0.0f;
+        float diffuseProbability;
+        float specularProbability;
+        float clearcoatProbability;
+        materialLobeProbabilities(material, diffuseProbability, specularProbability, clearcoatProbability);
         float3 localDirection = cosineHemisphere(float2(randomFloat(state), randomFloat(state)));
         float3 diffuseDirection = orientHemisphere(localDirection, hit.normal);
         float3 nextDirection;
@@ -936,30 +1715,83 @@ kernel void pathTraceKernel(
         float3 viewDirection = -ray.direction;
 
         if (lobeSample < clearcoatProbability) {
-            float3 halfVector = sampleGGXHalfVector(float2(randomFloat(state), randomFloat(state)), hit.normal, clearcoatRoughness);
+            float3 halfVector = sampleGGXVisibleNormal(
+                float2(randomFloat(state), randomFloat(state)),
+                hit.normal,
+                hit.tangent,
+                hit.bitangent,
+                viewDirection,
+                clearcoatRoughness,
+                0.0f
+            );
             nextDirection = normalize(reflect(ray.direction, halfVector));
             if (dot(nextDirection, hit.normal) <= 0.0f) {
                 nextDirection = diffuseDirection;
+                throughput *= materialDiffuseBounceWeight(material, hit.normal, viewDirection, nextDirection)
+                    / max(diffuseProbability, 1e-5f);
+            } else {
+                float nDotL = max(dot(hit.normal, nextDirection), 1e-5f);
+                float vDotH = max(dot(viewDirection, halfVector), 1e-5f);
+                throughput *= clearcoat
+                    * fresnelSchlick(vDotH, materialClearcoatF0Color(material))
+                    * geometrySmithG1GGX(nDotL, clearcoatRoughness)
+                    / max(clearcoatProbability, 1e-5f);
             }
-            throughput *= clearcoat * fresnelSchlick(max(dot(viewDirection, halfVector), 0.0f), float3(clearcoatF0));
         } else if (lobeSample < clearcoatProbability + specularProbability) {
-            float3 halfVector = sampleGGXHalfVector(float2(randomFloat(state), randomFloat(state)), hit.normal, roughness);
+            float3 halfVector = sampleGGXVisibleNormal(
+                float2(randomFloat(state), randomFloat(state)),
+                hit.normal,
+                hit.tangent,
+                hit.bitangent,
+                viewDirection,
+                roughness,
+                anisotropy
+            );
             nextDirection = normalize(reflect(ray.direction, halfVector));
             if (dot(nextDirection, hit.normal) <= 0.0f) {
                 nextDirection = diffuseDirection;
+                throughput *= materialDiffuseBounceWeight(material, hit.normal, viewDirection, nextDirection)
+                    / max(diffuseProbability, 1e-5f);
+            } else {
+                float nDotL = max(dot(hit.normal, nextDirection), 1e-5f);
+                float vDotH = max(dot(viewDirection, halfVector), 1e-5f);
+                float3 fresnel = fresnelSchlick(vDotH, f0);
+                float3 clearcoatAttenuation = materialClearcoatAttenuationForDirection(
+                    material,
+                    hit.normal,
+                    viewDirection,
+                    nextDirection
+                );
+                throughput *= clearcoatAttenuation
+                    * fresnel
+                    * geometrySmithG1GGXAnisotropic(
+                        nextDirection,
+                        hit.normal,
+                        hit.tangent,
+                        hit.bitangent,
+                        roughness,
+                        anisotropy
+                    )
+                    / max(specularProbability, 1e-5f);
             }
-            float3 fresnel = fresnelSchlick(max(dot(viewDirection, halfVector), 0.0f), f0);
-            throughput *= fresnel;
         } else {
             nextDirection = diffuseDirection;
-            throughput *= baseColor * (1.0f - metallic);
+            throughput *= materialDiffuseBounceWeight(material, hit.normal, viewDirection, nextDirection)
+                / max(diffuseProbability, 1e-5f);
         }
 
-        previousBSDFPDF = materialBSDFPDF(material, hit.normal, viewDirection, nextDirection);
+        previousBSDFPDF = materialBSDFPDF(
+            material,
+            hit.normal,
+            hit.tangent,
+            hit.bitangent,
+            viewDirection,
+            nextDirection
+        );
         ray.origin = hit.position + hit.normal * 0.001f;
         ray.direction = nextDirection;
 
-        if (maxComponent(throughput) < 0.02f) {
+        if (terminatePathWithRussianRoulette(bounce, throughput, state)) {
             break;
         }
     }
@@ -970,20 +1802,40 @@ kernel void pathTraceKernel(
     float alpha = mix(previous.w, outputAlpha, sampleWeight);
     accumulation.write(float4(color, alpha), gid);
 
-    if (primaryHit.hit) {
-        float3 encodedNormal = primaryHit.normal * 0.5f + 0.5f;
-        depthOutput.write(float4(primaryHit.t, primaryHit.t, primaryHit.t, 1.0f), gid);
+    Hit aovHit = emptyHit();
+    GPUMaterial aovMaterial;
+    bool hasAOVHit = primaryHit.hit;
+    aovHit = primaryHit;
+    aovMaterial = primaryMaterial;
+    if (constants.padding1 != 0u) {
+        hasAOVHit = tracePrimaryAOV(
+            makeCameraRay(camera, constants.width, constants.height, gid, 0.5f, 0.5f),
+            constants,
+            triangles,
+            nodes,
+            primitiveIndices,
+            materials,
+            textureDescriptors,
+            texturePixels,
+            aovHit,
+            aovMaterial
+        );
+    }
+
+    if (hasAOVHit) {
+        float3 encodedNormal = aovHit.normal * 0.5f + 0.5f;
+        depthOutput.write(float4(aovHit.t, aovHit.t, aovHit.t, 1.0f), gid);
         normalOutput.write(float4(encodedNormal, 1.0f), gid);
-        albedoOutput.write(float4(primaryMaterial.baseColor.xyz, primaryMaterial.baseColor.w), gid);
-        float materialID = (float)(primaryHit.materialID + 1u);
-        float objectID = (float)(primaryHit.objectID + 1u);
+        albedoOutput.write(float4(aovMaterial.baseColor.xyz, aovMaterial.baseColor.w), gid);
+        float materialID = (float)(aovHit.materialID + 1u);
+        float objectID = (float)(aovHit.objectID + 1u);
         materialIDOutput.write(float4(materialID, materialID, materialID, 1.0f), gid);
         objectIDOutput.write(float4(objectID, objectID, objectID, 1.0f), gid);
 
         float2 currentScreen;
         float2 previousScreen;
-        if (projectToScreen(camera, primaryHit.position, constants.width, constants.height, currentScreen)
-            && projectToScreen(previousCamera, primaryHit.position, constants.width, constants.height, previousScreen)) {
+        if (projectToScreen(camera, aovHit.position, constants.width, constants.height, currentScreen)
+            && projectToScreen(previousCamera, aovHit.position, constants.width, constants.height, previousScreen)) {
             float2 motion = previousScreen - currentScreen;
             motionVectorOutput.write(float4(motion.x, motion.y, 0.0f, 1.0f), gid);
         } else {
@@ -1033,14 +1885,14 @@ kernel void pathTraceHardwareKernel(
         ^ hash(gid.x + gid.y * constants.width)
         ^ hash(constants.sampleIndex + 1u);
 
-    float jitterX = randomFloat(state);
-    float jitterY = randomFloat(state);
-    float u = ((float)gid.x + jitterX) / (float)constants.width;
-    float v = 1.0f - (((float)gid.y + jitterY) / (float)constants.height);
-
-    Ray ray;
-    ray.origin = camera.origin.xyz;
-    ray.direction = normalize(camera.lowerLeft.xyz + u * camera.horizontal.xyz + v * camera.vertical.xyz - ray.origin);
+    Ray ray = makeCameraRay(
+        camera,
+        constants.width,
+        constants.height,
+        gid,
+        randomFloat(state),
+        randomFloat(state)
+    );
 
     float3 radiance = float3(0);
     float3 throughput = float3(1);
@@ -1054,6 +1906,12 @@ kernel void pathTraceHardwareKernel(
     primaryMaterial.parameters = float4(0);
     primaryMaterial.parameters2 = float4(0);
     primaryMaterial.specularColor = float4(0);
+    primaryMaterial.sheenColor = float4(0);
+    primaryMaterial.transmissionColor = float4(0);
+    primaryMaterial.parameters3 = float4(0);
+    primaryMaterial.clearcoatColor = float4(0);
+    primaryMaterial.clearcoatAttenuation = float4(0);
+    primaryMaterial.transmissionAbsorption = float4(0);
 
     for (uint bounce = 0; bounce < constants.maxBounces; ++bounce) {
         Hit hit = intersectSceneHardware(ray, scene, localTriangles, rtInstances);
@@ -1081,10 +1939,24 @@ kernel void pathTraceHardwareKernel(
             primaryMaterial = material;
         }
 
+        if (continueTransmissiveSurface(hit, material, ray, throughput, previousBSDFPDF, state)) {
+            if (terminatePathWithRussianRoulette(bounce, throughput, state)) {
+                break;
+            }
+            continue;
+        }
+
         if (maxComponent(material.emission.xyz) > 0.0f) {
             float emissionWeight = 1.0f;
             if (bounce > 0u && previousBSDFPDF > 0.0f) {
-                float lightPDF = lightPDFForHit(hit, ray.direction, lights, constants.lightCount);
+                float lightPDF = lightPDFForHit(
+                    hit,
+                    ray.direction,
+                    triangles,
+                    constants.triangleCount,
+                    lights,
+                    constants.lightCount
+                );
                 emissionWeight = powerHeuristic(previousBSDFPDF, lightPDF);
             }
             radiance += throughput * material.emission.xyz * emissionWeight;
@@ -1105,20 +1977,14 @@ kernel void pathTraceHardwareKernel(
             state
         );
         float roughness = clamp(material.parameters.x, 0.02f, 1.0f);
-        float metallic = clamp(material.parameters.y, 0.0f, 1.0f);
-        float3 baseColor = material.baseColor.xyz;
+        float anisotropy = materialSpecularAnisotropy(material);
         float3 f0 = materialF0(material);
         float clearcoat = materialClearcoat(material);
-        float clearcoatF0 = materialClearcoatF0(material);
         float clearcoatRoughness = materialClearcoatRoughness(material);
-        float diffuseWeight = luminance(baseColor * (1.0f - metallic));
-        float specularWeight = luminance(f0);
-        float clearcoatWeight = clearcoat * max(clearcoatF0, 0.0f);
-        float totalLobeWeight = max(diffuseWeight + specularWeight + clearcoatWeight, 1e-5f);
-        float clearcoatProbability = clearcoatWeight > 1e-5f ? clamp(clearcoatWeight / totalLobeWeight, 0.02f, 0.35f) : 0.0f;
-        float specularProbability = specularWeight > 1e-5f
-            ? clamp(specularWeight / totalLobeWeight, 0.08f, 0.92f - clearcoatProbability)
-            : 0.0f;
+        float diffuseProbability;
+        float specularProbability;
+        float clearcoatProbability;
+        materialLobeProbabilities(material, diffuseProbability, specularProbability, clearcoatProbability);
         float3 localDirection = cosineHemisphere(float2(randomFloat(state), randomFloat(state)));
         float3 diffuseDirection = orientHemisphere(localDirection, hit.normal);
         float3 nextDirection;
@@ -1126,30 +1992,83 @@ kernel void pathTraceHardwareKernel(
         float3 viewDirection = -ray.direction;
 
         if (lobeSample < clearcoatProbability) {
-            float3 halfVector = sampleGGXHalfVector(float2(randomFloat(state), randomFloat(state)), hit.normal, clearcoatRoughness);
+            float3 halfVector = sampleGGXVisibleNormal(
+                float2(randomFloat(state), randomFloat(state)),
+                hit.normal,
+                hit.tangent,
+                hit.bitangent,
+                viewDirection,
+                clearcoatRoughness,
+                0.0f
+            );
             nextDirection = normalize(reflect(ray.direction, halfVector));
             if (dot(nextDirection, hit.normal) <= 0.0f) {
                 nextDirection = diffuseDirection;
+                throughput *= materialDiffuseBounceWeight(material, hit.normal, viewDirection, nextDirection)
+                    / max(diffuseProbability, 1e-5f);
+            } else {
+                float nDotL = max(dot(hit.normal, nextDirection), 1e-5f);
+                float vDotH = max(dot(viewDirection, halfVector), 1e-5f);
+                throughput *= clearcoat
+                    * fresnelSchlick(vDotH, materialClearcoatF0Color(material))
+                    * geometrySmithG1GGX(nDotL, clearcoatRoughness)
+                    / max(clearcoatProbability, 1e-5f);
             }
-            throughput *= clearcoat * fresnelSchlick(max(dot(viewDirection, halfVector), 0.0f), float3(clearcoatF0));
         } else if (lobeSample < clearcoatProbability + specularProbability) {
-            float3 halfVector = sampleGGXHalfVector(float2(randomFloat(state), randomFloat(state)), hit.normal, roughness);
+            float3 halfVector = sampleGGXVisibleNormal(
+                float2(randomFloat(state), randomFloat(state)),
+                hit.normal,
+                hit.tangent,
+                hit.bitangent,
+                viewDirection,
+                roughness,
+                anisotropy
+            );
             nextDirection = normalize(reflect(ray.direction, halfVector));
             if (dot(nextDirection, hit.normal) <= 0.0f) {
                 nextDirection = diffuseDirection;
+                throughput *= materialDiffuseBounceWeight(material, hit.normal, viewDirection, nextDirection)
+                    / max(diffuseProbability, 1e-5f);
+            } else {
+                float nDotL = max(dot(hit.normal, nextDirection), 1e-5f);
+                float vDotH = max(dot(viewDirection, halfVector), 1e-5f);
+                float3 fresnel = fresnelSchlick(vDotH, f0);
+                float3 clearcoatAttenuation = materialClearcoatAttenuationForDirection(
+                    material,
+                    hit.normal,
+                    viewDirection,
+                    nextDirection
+                );
+                throughput *= clearcoatAttenuation
+                    * fresnel
+                    * geometrySmithG1GGXAnisotropic(
+                        nextDirection,
+                        hit.normal,
+                        hit.tangent,
+                        hit.bitangent,
+                        roughness,
+                        anisotropy
+                    )
+                    / max(specularProbability, 1e-5f);
             }
-            float3 fresnel = fresnelSchlick(max(dot(viewDirection, halfVector), 0.0f), f0);
-            throughput *= fresnel;
         } else {
             nextDirection = diffuseDirection;
-            throughput *= baseColor * (1.0f - metallic);
+            throughput *= materialDiffuseBounceWeight(material, hit.normal, viewDirection, nextDirection)
+                / max(diffuseProbability, 1e-5f);
         }
 
-        previousBSDFPDF = materialBSDFPDF(material, hit.normal, viewDirection, nextDirection);
+        previousBSDFPDF = materialBSDFPDF(
+            material,
+            hit.normal,
+            hit.tangent,
+            hit.bitangent,
+            viewDirection,
+            nextDirection
+        );
         ray.origin = hit.position + hit.normal * 0.001f;
         ray.direction = nextDirection;
 
-        if (maxComponent(throughput) < 0.02f) {
+        if (terminatePathWithRussianRoulette(bounce, throughput, state)) {
             break;
         }
     }
@@ -1160,20 +2079,40 @@ kernel void pathTraceHardwareKernel(
     float alpha = mix(previous.w, outputAlpha, sampleWeight);
     accumulation.write(float4(color, alpha), gid);
 
-    if (primaryHit.hit) {
-        float3 encodedNormal = primaryHit.normal * 0.5f + 0.5f;
-        depthOutput.write(float4(primaryHit.t, primaryHit.t, primaryHit.t, 1.0f), gid);
+    Hit aovHit = emptyHit();
+    GPUMaterial aovMaterial;
+    bool hasAOVHit = primaryHit.hit;
+    aovHit = primaryHit;
+    aovMaterial = primaryMaterial;
+    if (constants.padding1 != 0u) {
+        hasAOVHit = tracePrimaryAOVHardware(
+            makeCameraRay(camera, constants.width, constants.height, gid, 0.5f, 0.5f),
+            scene,
+            rtInstances,
+            localTriangles,
+            materials,
+            constants.materialCount,
+            textureDescriptors,
+            texturePixels,
+            aovHit,
+            aovMaterial
+        );
+    }
+
+    if (hasAOVHit) {
+        float3 encodedNormal = aovHit.normal * 0.5f + 0.5f;
+        depthOutput.write(float4(aovHit.t, aovHit.t, aovHit.t, 1.0f), gid);
         normalOutput.write(float4(encodedNormal, 1.0f), gid);
-        albedoOutput.write(float4(primaryMaterial.baseColor.xyz, primaryMaterial.baseColor.w), gid);
-        float materialID = (float)(primaryHit.materialID + 1u);
-        float objectID = (float)(primaryHit.objectID + 1u);
+        albedoOutput.write(float4(aovMaterial.baseColor.xyz, aovMaterial.baseColor.w), gid);
+        float materialID = (float)(aovHit.materialID + 1u);
+        float objectID = (float)(aovHit.objectID + 1u);
         materialIDOutput.write(float4(materialID, materialID, materialID, 1.0f), gid);
         objectIDOutput.write(float4(objectID, objectID, objectID, 1.0f), gid);
 
         float2 currentScreen;
         float2 previousScreen;
-        if (projectToScreen(camera, primaryHit.position, constants.width, constants.height, currentScreen)
-            && projectToScreen(previousCamera, primaryHit.position, constants.width, constants.height, previousScreen)) {
+        if (projectToScreen(camera, aovHit.position, constants.width, constants.height, currentScreen)
+            && projectToScreen(previousCamera, aovHit.position, constants.width, constants.height, previousScreen)) {
             float2 motion = previousScreen - currentScreen;
             motionVectorOutput.write(float4(motion.x, motion.y, 0.0f, 1.0f), gid);
         } else {

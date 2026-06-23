@@ -1,0 +1,17 @@
+{
+  "assetPath" : "Examples\/SceneScripts\/Quality\/DiningRoom\/dining-room.denrim",
+  "createdAt" : "2026-06-23T06:16:48Z",
+  "deviceName" : "Apple M1 Max",
+  "height" : 180,
+  "maxBounces" : 4,
+  "pixelSamplesPerSecond" : 787110.9857135876,
+  "renderSeconds" : 0.07317900657653809,
+  "rendererCreateSeconds" : 0.0385969877243042,
+  "samples" : 1,
+  "samplesPerSecond" : 13.665121279749783,
+  "sceneLoadSeconds" : 0.6471110582351685,
+  "sceneName" : "script",
+  "sessionCreateSeconds" : 0.41170597076416016,
+  "totalSeconds" : 1.170593023300171,
+  "width" : 320
+}

@@ -16,6 +16,14 @@ swift run denrim-render-preview \
     beauty \
     Examples/SceneScripts/MaterialVariants/material-variants.denrim
 
+swift run denrim-render-preview \
+    Examples/Renders/glossy-metal-reference.png \
+    "$SAMPLES" \
+    "$SIZE" \
+    script \
+    beauty \
+    Examples/SceneScripts/MaterialVariants/glossy-metal-reference.denrim
+
 if [ ! -f Examples/Assets/StanfordDragon/Meshes/dragon_vrip_res4.ply ]; then
     ./Examples/Tools/fetch-stanford-dragon.sh
 fi

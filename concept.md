@@ -760,10 +760,11 @@ Support levels:
 
 1. None
 2. Temporal accumulation
-3. Simple spatial denoiser
-4. À-trous / bilateral denoiser
-5. MetalFX denoising where available
-6. Open Image Denoise on macOS
+3. Apple MPS SVGF denoiser
+4. Simple spatial denoiser
+5. À-trous / bilateral denoiser
+6. MetalFX denoising where available
+7. Open Image Denoise on macOS
 
 The renderer must remain fully functional without MetalFX or Open Image Denoise.
 
@@ -1046,6 +1047,8 @@ Implemented:
 * Public render output API for beauty, depth, normal, albedo, material ID, object ID, and motion vector
 * Public floating-point output pixel readback
 * Wavefront OBJ and PLY mesh import through `Mesh(contentsOf:)`
+* Byte-scanned OBJ importer for large text-mesh assets
+* Imported vertex normals preserved through GPU triangle conversion
 * Built-in Cornell Box scene
 * Small line-based scene scripting language for test scenes and automation
 * Reusable scene script includes/fragments with caller-provided resolution
@@ -1056,15 +1059,26 @@ Implemented:
 * Scene script named/grouped geometry arguments with comma separators for camera, quad, box, and instance commands
 * Scene script explicit sRGB/linear image decoding and nearest/linear sampler selection
 * Scene script material specular color and IOR parameters
-* Scene script clearcoat weight, roughness, and IOR parameters
+* Scene script material anisotropy parameter
+* Scene script clearcoat weight, tint, attenuation color, thickness, roughness, and IOR parameters
+* Scene script transmission color, roughness, and IOR parameters
+* Scene script transmission absorption color and distance parameters
+* Scene script thin-walled material parameter for sheet transmission
 * Metal compute path tracing kernel
 * Progressive accumulation
 * Diffuse triangle surfaces
 * Mesh UV coordinates and per-triangle tangent frames for material evaluation
 * GGX-style rough metallic path sampling using material roughness and metallic parameters
-* Schlick Fresnel weighting for direct light evaluation and specular bounce sampling
+* Visible-normal GGX sampling and probability-compensated `BRDF * cos / PDF` weighting for sampled specular and clearcoat bounces
+* Schlick Fresnel weighting for direct light evaluation and GGX reflection lobes
+* Matched Fresnel and thickness-based clearcoat base-layer attenuation for sampled diffuse / base-specular indirect bounces
 * Material-controlled dielectric specular weight, specular color, and index of refraction for GGX Fresnel F0
-* Material-controlled clearcoat weight, roughness, and index of refraction as a secondary GGX coating lobe
+* Material-controlled anisotropic GGX base-specular evaluation, MIS PDF, and visible-normal sampling from mesh tangent frames
+* Material-controlled clearcoat weight, Fresnel tint, independent attenuation color, thickness-based attenuation, roughness, and index of refraction as a secondary GGX coating lobe
+* Material-controlled transmission color, roughness, and independent index of refraction for rough dielectric transport
+* Material-controlled measured absorption through transmissive solids using exit-distance Beer attenuation
+* Material-controlled thin-walled transmission for zero-thickness sheets that reflect by Fresnel and transmit straight through
+* MoonRay-inspired sheen / fuzz material controls with active shader evaluation
 * In-memory `Texture2D` inputs for base color textures and tangent-space normal maps
 * ImageIO texture asset loading into `Texture2D`
 * Explicit sRGB-to-linear and linear texture import paths for color textures and data textures
@@ -1073,24 +1087,29 @@ Implemented:
 * Emissive triangle lights
 * Direct area-light sampling
 * Compiled emissive triangle light records shared by the flat BVH and hardware TLAS direct-light kernels
+* Power-weighted direct-light importance sampling over compiled emissive light records
+* Per-triangle light-record indices for constant-time BSDF-sampled emissive-hit MIS PDF lookup
 * First-pass MIS weights between direct light sampling and BSDF-sampled emissive hits
+* Energy-preserving Russian roulette path termination after early bounces
 * Built-in material reference scene for diffuse, GGX-style rough metallic, specular tint / IOR, clearcoat control, and emissive baseline checks
-* Material-variant reference scene for rendering one caller-supplied mesh with matte, plastic, metallic, polished, and clearcoat material variants
+* Material-variant reference scene for rendering one caller-supplied mesh with matte, plastic, anisotropic brushed metal, polished metal, and tinted clearcoat material variants
 * Bundled SceneScript material-variant template with reusable material include, self-contained PLY fixture, and checked-in rendered output for visual validation
+* Bundled glossy-metal SceneScript reference with bright, dark, and warm reflection cards for validating polished / rough / clearcoated metal behavior
 * Persistent example SceneScript and render-output folder for future examples and references
 * Stanford Dragon example scene and fetch script for local benchmark rendering
-* Built-in transparent material reference scene for opacity, cutout, and future transmission/refraction planning
+* Built-in transparent material reference scene for opacity, cutout, measured absorption setup, and transmission/refraction planning
 * MoonRay-inspired material roadmap in `Documentation/Materials.md`
 * Box mesh primitive for reference scenes
 * PNG export
 * Transparent beauty export with alpha-preserving PNG output
 * Material opacity preserved in albedo AOV alpha and albedo PNG export
 * Fully transparent alpha-cutout camera-ray pass-through for rear-surface visibility
+* Rough dielectric transmissive material transport with independent IOR/Fresnel reflection and refraction, independent roughness, explicit tint, measured exit absorption for visible paths and direct-light shadows, thin-walled sheet transmission, and transparent shadowing
 * Command line preview renderer
 * Command line preview rendering for SceneScript files with relative asset resolution
 * Unit tests for API defaults and scene construction
-* Unit tests for OBJ mesh import, ASCII PLY import, binary little-endian PLY import, quad triangulation, relative indices, and unsupported format reporting
-* Unit tests for material specular color / IOR / clearcoat GPU parameter packing
+* Unit tests for OBJ mesh import, ASCII PLY import, binary little-endian PLY import, quad triangulation, relative indices, scientific-notation floats, imported normal preservation, and unsupported format reporting
+* Unit tests for material specular color / IOR / anisotropy / clearcoat tint, attenuation color, and thickness / sheen / transmission / absorption / thin-walled GPU parameter packing
 * Texture asset loading tests for image dimensions, alpha, missing files, and sRGB/linear import behavior
 * CPU triangle intersection reference tests
 * Render smoke test with image decoding and orientation regression check
@@ -1100,11 +1119,14 @@ Implemented:
 * Stored scripted UV/normal-map AOV metric baselines for texture visual regression testing
 * Stored transparent export alpha metric baseline
 * Internal AOV textures for depth, normal, albedo, material ID, object ID, and motion vector
+* Opt-in Apple MPS SVGF denoiser backend for beauty output guided by packed depth/normal AOVs, motion vectors, and temporal depth-normal history
+* Opt-in experimental simple spatial GPU denoiser prototype for beauty output guided by depth, normal, and albedo AOVs
 * AOV readback tests for primary surface data
 * Material opacity AOV tests for albedo readback and PNG alpha preservation
 * Alpha-cutout transport tests proving fully transparent primary surfaces reveal rear albedo and emission
 * Transparent export tests for raw beauty alpha, default opaque sky behavior, PNG alpha preservation, and reference alpha metrics
 * Transparent material reference render test proving semi-transparent albedo alpha and cutout rear-surface visibility
+* Apple MPS SVGF and simple spatial denoiser render tests proving opt-in denoised beauty output is finite and distinct from raw low-sample beauty output
 * Render-driven texture tests proving checker base color and normal-map data reach AOVs
 * Render-driven texture filtering test proving bilinear sampling produces blended albedo
 * Scripted UV/normal-map render test proving the DSL can author textured visual evaluation scenes
@@ -1135,26 +1157,26 @@ Implemented:
 * Command line benchmark JSON output for persistent comparison in `Examples/Benchmarks`
 * Opt-in XCTest performance benchmarks gated by `DENRIM_RUN_PERFORMANCE_TESTS=1`
 * `Documentation/Performance.md` with benchmark commands, JSON fields, and first optimization targets
+* DiningRoom scene-load benchmark reduced from roughly 5.39s to roughly 0.66s on Apple M1 Max by replacing string-tokenized OBJ parsing with byte-scanned parsing
 * Local documentation seeds in Documentation/
 
 Not yet implemented:
 
-* Texture mipmapping, GPU texture objects, anisotropy, and richer sampler-state control
+* Texture mipmapping, GPU texture objects, and richer sampler-state control
 * Procedural material graph API and matching SceneScript procedural commands
 * Procedural noise, ramps, coordinate nodes, color/value math, triplanar mapping, and procedural bump/normal inputs
 * Stored performance baselines by Apple device class and backend
-* Broader Denrim Standard Surface material API with staged anisotropy, transmission, clearcoat thickness / attenuation / independent normals, sheen/fuzz, subsurface, layering, and material diagnostics
-* Semi-transparent blending, shadow transparency, transmission, refraction, and layered material behavior
-* Denoising
+* Broader Denrim Standard Surface material API with anisotropy rotation, independent clearcoat normals, subsurface, layering, and material diagnostics
+* Semi-transparent blending, nested dielectric priority, caustic controls, and layered material behavior
+* MetalFX integration, Open Image Denoise backends, deeper temporal denoising controls, and denoiser comparison scenes
 * GLB import
 * Heightmaps, voxels, SDFs, and participating media
 
 Immediate next milestones:
 
-1. Add texture mipmapping, GPU texture objects, anisotropy, and richer sampler-state control.
+1. Add texture mipmapping, GPU texture objects, and richer sampler-state control.
 2. Add a small procedural material graph shared by the Swift API and SceneScript, starting with noise, ramps, math, coordinate nodes, and bindings to base color, roughness, metallic, opacity, clearcoat, and bump/normal inputs.
 3. Add performance baselines for Cornell, material reference, material variants, and Stanford Dragon scenes by Apple device class and backend.
-4. Continue staging the Denrim Standard Surface API, then add semi-transparent blending, shadow transparency, transmission, refraction, and layered material behavior.
+4. Continue staging the Denrim Standard Surface API, then add semi-transparent blending, nested dielectric priority, caustic controls, and layered material behavior.
 5. Extend motion vectors to include object/instance deformation on top of instance records.
-6. Improve MIS with importance sampling over compiled emissive light records for scenes with many or unevenly sized lights.
-7. Add stored metrics or image baselines for the transparent material reference scene once semi-transparent transport stabilizes.
+6. Add stored metrics or image baselines for the transparent material reference scene once semi-transparent transport stabilizes.

@@ -103,7 +103,9 @@ public struct Mesh: Sendable {
                 vertices[i1] - vertices[i0],
                 vertices[i2] - vertices[i0]
             ))
-            let normal = transform.transformNormal(localNormal)
+            let n0 = transform.transformNormal(normal(at: i0, fallback: localNormal))
+            let n1 = transform.transformNormal(normal(at: i1, fallback: localNormal))
+            let n2 = transform.transformNormal(normal(at: i2, fallback: localNormal))
             let localTangentFrame = tangentFrame(
                 p0: vertices[i0],
                 p1: vertices[i1],
@@ -120,9 +122,9 @@ public struct Mesh: Sendable {
                 v0: SIMD4<Float>(v0, 0),
                 v1: SIMD4<Float>(v1, 0),
                 v2: SIMD4<Float>(v2, 0),
-                n0: SIMD4<Float>(normal, 0),
-                n1: SIMD4<Float>(normal, 0),
-                n2: SIMD4<Float>(normal, 0),
+                n0: SIMD4<Float>(n0, 0),
+                n1: SIMD4<Float>(n1, 0),
+                n2: SIMD4<Float>(n2, 0),
                 uv0: SIMD4<Float>(uv0.x, uv0.y, 0, 0),
                 uv1: SIMD4<Float>(uv1.x, uv1.y, 0, 0),
                 uv2: SIMD4<Float>(uv2.x, uv2.y, 0, 0),
@@ -141,6 +143,18 @@ public struct Mesh: Sendable {
             return SIMD2<Float>(0, 0)
         }
         return texcoords[index]
+    }
+
+    private func normal(at index: Int, fallback: SIMD3<Float>) -> SIMD3<Float> {
+        guard index < normals.count else {
+            return fallback
+        }
+
+        let normal = normals[index]
+        guard simd_length_squared(normal) > 1e-8 else {
+            return fallback
+        }
+        return simd_normalize(normal)
     }
 
     private func tangentFrame(

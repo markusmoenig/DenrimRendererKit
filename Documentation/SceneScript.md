@@ -44,9 +44,20 @@ material light 1 1 1 1 0.9 0.7 8
 
 # material name r g b [roughness value] [metallic value]
 #                    [specular value] [specularColor r g b] [ior value] [opacity value]
-#                    [clearcoat value] [clearcoatRoughness value] [clearcoatIOR value]
+#                    [anisotropy value] [specularAnisotropy value]
+#                    [transmission value] [spectrans value]
+#                    [transmissionColor r g b] [transmissionRoughness value] [transmissionIOR value]
+#                    [absorptionColor r g b] [absorptionDistance value]
+#                    [thinWalled 0|1]
+#                    [clearcoat value] [clearcoatColor r g b] [clearcoatTint r g b]
+#                    [clearcoatAttenuationColor r g b] [clearcoatThickness value]
+#                    [clearcoatRoughness value] [clearcoatIOR value]
+#                    [sheen value] [sheenColor r g b] [sheenRoughness value]
 #                    [emission r g b strength] [baseColorTexture name] [normalMap name]
-material brushedGold 0.95 0.78 0.35 roughness 0.18 metallic 1 specular 1 specularColor 1 0.86 0.7 ior 1.5 clearcoat 0.25 clearcoatRoughness 0.08 clearcoatIOR 1.5
+material brushedGold 0.95 0.78 0.35 roughness 0.18 metallic 1 specular 1 specularColor 1 0.86 0.7 ior 1.5 anisotropy 0.65 clearcoat 0.25 clearcoatColor 1 0.92 0.72 clearcoatAttenuationColor 0.95 0.78 0.48 clearcoatThickness 0.25 clearcoatRoughness 0.08 clearcoatIOR 1.5
+material velvet 0.42 0.16 0.72 roughness 0.7 sheen 0.65 sheenColor 0.9 0.72 1 sheenRoughness 0.78
+material glass 0.713 0.8 0.8 roughness 0.01 specular 1 ior 1.45 transmission 1 transmissionColor 0.72 0.86 1 transmissionRoughness 0.04 transmissionIOR 1.45 absorptionColor 0.64 0.82 1 absorptionDistance 0.8
+material thinPane 0.7 0.85 1 roughness 0.02 specular 1 transmission 1 transmissionColor 0.8 0.92 1 thinWalled 1
 material textured 1 1 1 baseColorTexture checker normalMap tangentRight
 
 # include reusable script fragment
@@ -87,6 +98,8 @@ Preview CLI usage:
 ```sh
 swift run denrim-render-preview ./ScriptedScene.png 32 512 script beauty ./Scenes/scene.denrim
 ```
+
+Denoising is off by default. `--denoise apple-svgf` and `--denoise experimental-simple` are explicit opt-in comparison modes, not baseline output modes.
 
 The repository includes a self-contained material-variant script template at `Examples/SceneScripts/MaterialVariants/material-variants.denrim` and a rendered output at `Examples/Renders/material-variants.png`. It uses a bundled toy PLY mesh so tests can run without external assets.
 

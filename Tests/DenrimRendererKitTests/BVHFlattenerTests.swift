@@ -88,6 +88,49 @@ final class BVHFlattenerTests: XCTestCase {
         })
         XCTAssertTrue(build.lights.allSatisfy { abs($0.area - 0.5) < 0.0001 })
         XCTAssertTrue(build.lights.allSatisfy { $0.normal.y < -0.99 })
+        XCTAssertEqual(build.triangles[2].padding2, 1)
+        XCTAssertEqual(build.triangles[3].padding2, 2)
+        XCTAssertEqual(try XCTUnwrap(build.lights.last).selectionCDF, 1, accuracy: 0.0001)
+    }
+
+    func testAccelerationBackendBuildsPowerWeightedLightSelectionCDF() throws {
+        var scene = RenderScene()
+        let dimLight = scene.addMaterial(Material(
+            baseColor: SIMD3<Float>(1, 1, 1),
+            emission: SIMD3<Float>(1, 1, 1),
+            emissionStrength: 1
+        ))
+        let brightLight = scene.addMaterial(Material(
+            baseColor: SIMD3<Float>(1, 1, 1),
+            emission: SIMD3<Float>(1, 1, 1),
+            emissionStrength: 3
+        ))
+
+        scene.add(mesh: Mesh.quad(
+            SIMD3<Float>(-1, 0, 1),
+            SIMD3<Float>(0, 0, 1),
+            SIMD3<Float>(0, 0, 0),
+            SIMD3<Float>(-1, 0, 0)
+        ), material: dimLight)
+        scene.add(mesh: Mesh.quad(
+            SIMD3<Float>(0, 0, 1),
+            SIMD3<Float>(1, 0, 1),
+            SIMD3<Float>(1, 0, 0),
+            SIMD3<Float>(0, 0, 0)
+        ), material: brightLight)
+
+        let build = try LinearTriangleAccelerationBackend().build(scene: scene)
+
+        XCTAssertEqual(build.lights.count, 4)
+        XCTAssertEqual(try XCTUnwrap(build.lights.last).selectionCDF, 1, accuracy: 0.0001)
+        XCTAssertTrue(zip(build.lights, build.lights.dropFirst()).allSatisfy { previous, current in
+            current.selectionCDF > previous.selectionCDF
+        })
+        XCTAssertEqual(build.lights[1].selectionCDF, 0.25, accuracy: 0.0001)
+        XCTAssertEqual(build.triangles[0].padding2, 1)
+        XCTAssertEqual(build.triangles[1].padding2, 2)
+        XCTAssertEqual(build.triangles[2].padding2, 3)
+        XCTAssertEqual(build.triangles[3].padding2, 4)
     }
 
     func testAccelerationBackendLeavesLightListEmptyWithoutEmission() throws {
@@ -194,5 +237,28 @@ final class BVHFlattenerTests: XCTestCase {
             XCTAssertNil(experiment.tlasResource)
             XCTAssertNil(experiment.sceneBuffers)
         }
+    }
+
+    func testMetalRayTracingSceneBufferInstancesStoreMaterializedTriangleOffsets() throws {
+        guard let device = MTLCreateSystemDefaultDevice(), device.supportsRaytracing else {
+            throw XCTSkip("Metal ray tracing is not supported.")
+        }
+
+        var scene = RenderScene()
+        let red = scene.addMaterial(Material(baseColor: SIMD3<Float>(1, 0, 0)))
+        let blue = scene.addMaterial(Material(baseColor: SIMD3<Float>(0, 0, 1)))
+        let sharedMesh = Mesh.box(size: SIMD3<Float>(1, 1, 1))
+
+        scene.add(mesh: sharedMesh, material: red, transform: .translation(SIMD3<Float>(-1, 0, 0)))
+        scene.add(mesh: sharedMesh, material: blue, transform: .translation(SIMD3<Float>(1, 0, 0)))
+
+        let build = try MetalRayTracingAccelerationBackend(device: device).build(scene: scene)
+        let sceneBuffers = try XCTUnwrap(build.metalRayTracingExperiment?.sceneBuffers)
+        let instances = sceneBuffers.instanceBuffer.contents()
+            .bindMemory(to: GPURayTracingInstance.self, capacity: sceneBuffers.instanceCount)
+
+        XCTAssertEqual(sceneBuffers.instanceCount, 2)
+        XCTAssertEqual(instances[0].metadata.w, 0)
+        XCTAssertEqual(instances[1].metadata.w, 12)
     }
 }

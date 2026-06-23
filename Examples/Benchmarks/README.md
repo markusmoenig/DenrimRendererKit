@@ -15,4 +15,4 @@ swift run -c release denrim-render-benchmark \
 
 Benchmark files are device-specific. Keep the filename explicit about the scene, device, resolution, and samples so future comparisons are meaningful.
 
-`dragon-m1max-64px-1spp.json` is the first stored local regression marker for the Stanford Dragon material-variant scene on an Apple M1 Max. `dining-room-local-160x90-1spp.json` is the first manual marker for the DiningRoom fixture.
+`dragon-m1max-64px-1spp.json` is the first stored local regression marker for the Stanford Dragon material-variant scene on an Apple M1 Max. `dining-room-local-320x180-1spp.json` is the current manual marker for the DiningRoom fixture.

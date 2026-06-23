@@ -27,6 +27,9 @@ let package = Package(
             name: "DenrimRendererKit",
             resources: [
                 .process("Resources")
+            ],
+            linkerSettings: [
+                .linkedFramework("MetalPerformanceShaders")
             ]
         ),
         .executableTarget(

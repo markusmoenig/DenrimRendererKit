@@ -53,11 +53,15 @@ private enum OBJMeshImporter {
     }
 
     static func load(url: URL) throws -> Mesh {
-        let source = try String(contentsOf: url, encoding: .utf8)
-        return try parse(source)
+        try parse(Data(contentsOf: url))
     }
 
     static func parse(_ source: String) throws -> Mesh {
+        try parse(Data(source.utf8))
+    }
+
+    private static func parse(_ data: Data) throws -> Mesh {
+        var scanner = OBJByteScanner(data: data)
         var sourcePositions: [SIMD3<Float>] = []
         var sourceTexcoords: [SIMD2<Float>] = []
         var sourceNormals: [SIMD3<Float>] = []
@@ -68,66 +72,108 @@ private enum OBJMeshImporter {
         var indices: [UInt32] = []
         var packedIndices: [VertexKey: UInt32] = [:]
 
-        for (lineIndex, rawLine) in source.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
-            let lineNumber = lineIndex + 1
-            let uncommentedLine = rawLine.split(
-                separator: "#",
-                maxSplits: 1,
-                omittingEmptySubsequences: false
-            ).first ?? ""
-            let tokens = uncommentedLine.split(whereSeparator: \.isWhitespace)
-            guard let command = tokens.first else {
+        sourcePositions.reserveCapacity(data.count / 96)
+        sourceTexcoords.reserveCapacity(data.count / 128)
+        sourceNormals.reserveCapacity(data.count / 128)
+        vertices.reserveCapacity(data.count / 96)
+        texcoords.reserveCapacity(data.count / 96)
+        normals.reserveCapacity(data.count / 96)
+        indices.reserveCapacity(data.count / 32)
+
+        while !scanner.isAtEnd {
+            scanner.skipHorizontalWhitespace()
+            if scanner.consumeLineBreakIfPresent() {
+                continue
+            }
+            if scanner.consumeCommentIfPresent() {
                 continue
             }
 
-            switch command {
-            case "v":
-                guard tokens.count >= 4 else {
-                    throw MeshLoadingError.invalidOBJ("vertex position requires x y z", line: lineNumber)
-                }
+            let command = scanner.readToken()
+            let lineNumber = scanner.line
+
+            if command.matches("v") {
                 sourcePositions.append(SIMD3<Float>(
-                    try float(tokens[1], line: lineNumber),
-                    try float(tokens[2], line: lineNumber),
-                    try float(tokens[3], line: lineNumber)
+                    try scanner.readFloat(),
+                    try scanner.readFloat(),
+                    try scanner.readFloat()
                 ))
-            case "vt":
-                guard tokens.count >= 3 else {
-                    throw MeshLoadingError.invalidOBJ("texture coordinate requires u v", line: lineNumber)
-                }
+            } else if command.matches("vt") {
                 sourceTexcoords.append(SIMD2<Float>(
-                    try float(tokens[1], line: lineNumber),
-                    try float(tokens[2], line: lineNumber)
+                    try scanner.readFloat(),
+                    try scanner.readFloat()
                 ))
-            case "vn":
-                guard tokens.count >= 4 else {
-                    throw MeshLoadingError.invalidOBJ("normal requires x y z", line: lineNumber)
-                }
+            } else if command.matches("vn") {
                 sourceNormals.append(simd_normalize(SIMD3<Float>(
-                    try float(tokens[1], line: lineNumber),
-                    try float(tokens[2], line: lineNumber),
-                    try float(tokens[3], line: lineNumber)
+                    try scanner.readFloat(),
+                    try scanner.readFloat(),
+                    try scanner.readFloat()
                 )))
-            case "f":
-                guard tokens.count >= 4 else {
-                    throw MeshLoadingError.invalidOBJ("face requires at least three vertices", line: lineNumber)
-                }
-                let face = try tokens.dropFirst().map {
-                    try parseFaceVertex(
-                        $0,
+            } else if command.matches("f") {
+                var first: FaceVertex?
+                var previous: FaceVertex?
+                var faceVertexCount = 0
+
+                while true {
+                    scanner.skipHorizontalWhitespace()
+                    if scanner.isAtEnd || scanner.isAtLineBreak || scanner.isAtComment {
+                        break
+                    }
+
+                    let faceVertex = try scanner.readFaceVertex(
                         positions: sourcePositions.count,
                         texcoords: sourceTexcoords.count,
-                        normals: sourceNormals.count,
-                        line: lineNumber
+                        normals: sourceNormals.count
                     )
+                    if faceVertexCount == 0 {
+                        first = faceVertex
+                    } else if faceVertexCount == 1 {
+                        previous = faceVertex
+                    } else if let first, let previousFace = previous {
+                        try append(
+                            first,
+                            sourcePositions,
+                            sourceTexcoords,
+                            sourceNormals,
+                            &vertices,
+                            &texcoords,
+                            &normals,
+                            &indices,
+                            &packedIndices
+                        )
+                        try append(
+                            previousFace,
+                            sourcePositions,
+                            sourceTexcoords,
+                            sourceNormals,
+                            &vertices,
+                            &texcoords,
+                            &normals,
+                            &indices,
+                            &packedIndices
+                        )
+                        try append(
+                            faceVertex,
+                            sourcePositions,
+                            sourceTexcoords,
+                            sourceNormals,
+                            &vertices,
+                            &texcoords,
+                            &normals,
+                            &indices,
+                            &packedIndices
+                        )
+                        previous = faceVertex
+                    }
+                    faceVertexCount += 1
                 }
-                for index in 1..<(face.count - 1) {
-                    try append(face[0], sourcePositions, sourceTexcoords, sourceNormals, &vertices, &texcoords, &normals, &indices, &packedIndices)
-                    try append(face[index], sourcePositions, sourceTexcoords, sourceNormals, &vertices, &texcoords, &normals, &indices, &packedIndices)
-                    try append(face[index + 1], sourcePositions, sourceTexcoords, sourceNormals, &vertices, &texcoords, &normals, &indices, &packedIndices)
+
+                guard faceVertexCount >= 3 else {
+                    throw MeshLoadingError.invalidOBJ("face requires at least three vertices", line: lineNumber)
                 }
-            default:
-                continue
             }
+
+            scanner.skipLine()
         }
 
         guard !vertices.isEmpty, !indices.isEmpty else {
@@ -137,46 +183,239 @@ private enum OBJMeshImporter {
         return Mesh(vertices: vertices, indices: indices, normals: normals, texcoords: texcoords)
     }
 
-    private static func float(_ token: some StringProtocol, line: Int) throws -> Float {
-        guard let value = Float(token) else {
-            throw MeshLoadingError.invalidOBJ("invalid number '\(token)'", line: line)
+    private struct OBJCommand {
+        var bytes: [UInt8]
+        var start: Int
+        var end: Int
+
+        func matches(_ literal: StaticString) -> Bool {
+            let count = literal.utf8CodeUnitCount
+            guard end - start == count else {
+                return false
+            }
+            return literal.withUTF8Buffer { literalBytes in
+                for offset in 0..<count where bytes[start + offset] != literalBytes[offset] {
+                    return false
+                }
+                return true
+            }
         }
-        return value
     }
 
-    private static func parseFaceVertex(
-        _ token: some StringProtocol,
-        positions: Int,
-        texcoords: Int,
-        normals: Int,
-        line: Int
-    ) throws -> FaceVertex {
-        let parts = token.split(separator: "/", omittingEmptySubsequences: false)
-        guard !parts.isEmpty, parts.count <= 3 else {
-            throw MeshLoadingError.invalidOBJ("unsupported face vertex '\(token)'", line: line)
+    private struct OBJByteScanner {
+        var bytes: [UInt8]
+        var index: Int = 0
+        var line: Int = 1
+
+        init(data: Data) {
+            self.bytes = Array(data)
         }
 
-        return FaceVertex(
-            position: try resolveIndex(parts[0], count: positions, line: line),
-            texcoord: parts.count > 1 && !parts[1].isEmpty
-                ? try resolveIndex(parts[1], count: texcoords, line: line)
-                : nil,
-            normal: parts.count > 2 && !parts[2].isEmpty
-                ? try resolveIndex(parts[2], count: normals, line: line)
-                : nil
-        )
-    }
-
-    private static func resolveIndex(_ token: some StringProtocol, count: Int, line: Int) throws -> Int {
-        guard let rawIndex = Int(token), rawIndex != 0 else {
-            throw MeshLoadingError.invalidIndex(String(token), line: line)
+        var isAtEnd: Bool {
+            index >= bytes.count
         }
 
-        let index = rawIndex > 0 ? rawIndex - 1 : count + rawIndex
-        guard index >= 0, index < count else {
-            throw MeshLoadingError.invalidIndex(String(token), line: line)
+        var isAtLineBreak: Bool {
+            !isAtEnd && bytes[index] == 10
         }
-        return index
+
+        var isAtComment: Bool {
+            !isAtEnd && bytes[index] == 35
+        }
+
+        mutating func skipHorizontalWhitespace() {
+            while !isAtEnd {
+                let byte = bytes[index]
+                if byte == 32 || byte == 9 || byte == 13 {
+                    index += 1
+                } else {
+                    break
+                }
+            }
+        }
+
+        mutating func consumeLineBreakIfPresent() -> Bool {
+            guard !isAtEnd, bytes[index] == 10 else {
+                return false
+            }
+            index += 1
+            line += 1
+            return true
+        }
+
+        mutating func consumeCommentIfPresent() -> Bool {
+            guard isAtComment else {
+                return false
+            }
+            skipLine()
+            return true
+        }
+
+        mutating func skipLine() {
+            while !isAtEnd {
+                let byte = bytes[index]
+                index += 1
+                if byte == 10 {
+                    line += 1
+                    return
+                }
+            }
+        }
+
+        mutating func readToken() -> OBJCommand {
+            let start = index
+            while !isAtEnd {
+                let byte = bytes[index]
+                if byte == 32 || byte == 9 || byte == 10 || byte == 13 || byte == 35 {
+                    break
+                }
+                index += 1
+            }
+            return OBJCommand(bytes: bytes, start: start, end: index)
+        }
+
+        mutating func readFaceVertex(positions: Int, texcoords: Int, normals: Int) throws -> FaceVertex {
+            let position = try resolveIndex(readInt(), count: positions)
+            var texcoord: Int?
+            var normal: Int?
+
+            if consumeSlash() {
+                if !isAtEnd, bytes[index] != 47, !isAtLineBreak, !isAtComment {
+                    texcoord = try resolveIndex(readInt(), count: texcoords)
+                }
+
+                if consumeSlash(), !isAtEnd, !isAtLineBreak, !isAtComment {
+                    normal = try resolveIndex(readInt(), count: normals)
+                }
+            }
+
+            return FaceVertex(position: position, texcoord: texcoord, normal: normal)
+        }
+
+        mutating func readFloat() throws -> Float {
+            skipHorizontalWhitespace()
+            let start = index
+            var sign: Double = 1
+            if consume(byte: 45) {
+                sign = -1
+            } else {
+                _ = consume(byte: 43)
+            }
+
+            var value: Double = 0
+            var hasDigits = false
+            while let digit = readDigit() {
+                hasDigits = true
+                value = value * 10 + Double(digit)
+            }
+
+            if consume(byte: 46) {
+                var scale: Double = 0.1
+                while let digit = readDigit() {
+                    hasDigits = true
+                    value += Double(digit) * scale
+                    scale *= 0.1
+                }
+            }
+
+            guard hasDigits else {
+                throw MeshLoadingError.invalidOBJ("invalid number '\(tokenString(start: start))'", line: line)
+            }
+
+            if consume(byte: 101) || consume(byte: 69) {
+                var exponentSign = 1
+                if consume(byte: 45) {
+                    exponentSign = -1
+                } else {
+                    _ = consume(byte: 43)
+                }
+
+                var exponent = 0
+                var hasExponentDigits = false
+                while let digit = readDigit() {
+                    hasExponentDigits = true
+                    exponent = exponent * 10 + digit
+                }
+                guard hasExponentDigits else {
+                    throw MeshLoadingError.invalidOBJ("invalid number '\(tokenString(start: start))'", line: line)
+                }
+                value *= pow(10, Double(exponent * exponentSign))
+            }
+
+            return Float(sign * value)
+        }
+
+        mutating func readInt() throws -> Int {
+            skipHorizontalWhitespace()
+            let start = index
+            var sign = 1
+            if consume(byte: 45) {
+                sign = -1
+            } else {
+                _ = consume(byte: 43)
+            }
+
+            var value = 0
+            var hasDigits = false
+            while let digit = readDigit() {
+                hasDigits = true
+                value = value * 10 + digit
+            }
+
+            guard hasDigits else {
+                throw MeshLoadingError.invalidIndex(tokenString(start: start), line: line)
+            }
+
+            return value * sign
+        }
+
+        private mutating func resolveIndex(_ rawIndex: Int, count: Int) throws -> Int {
+            guard rawIndex != 0 else {
+                throw MeshLoadingError.invalidIndex("0", line: line)
+            }
+
+            let resolved = rawIndex > 0 ? rawIndex - 1 : count + rawIndex
+            guard resolved >= 0, resolved < count else {
+                throw MeshLoadingError.invalidIndex(String(rawIndex), line: line)
+            }
+            return resolved
+        }
+
+        private mutating func consumeSlash() -> Bool {
+            consume(byte: 47)
+        }
+
+        private mutating func consume(byte: UInt8) -> Bool {
+            guard !isAtEnd, bytes[index] == byte else {
+                return false
+            }
+            index += 1
+            return true
+        }
+
+        private mutating func readDigit() -> Int? {
+            guard !isAtEnd else {
+                return nil
+            }
+            let byte = bytes[index]
+            guard byte >= 48, byte <= 57 else {
+                return nil
+            }
+            index += 1
+            return Int(byte - 48)
+        }
+
+        private func tokenString(start: Int) -> String {
+            var end = start
+            while end < bytes.count {
+                let byte = bytes[end]
+                if byte == 32 || byte == 9 || byte == 10 || byte == 13 || byte == 35 || byte == 47 {
+                    break
+                }
+                end += 1
+            }
+            return String(decoding: bytes[start..<end], as: UTF8.self)
+        }
     }
 
     private static func append(

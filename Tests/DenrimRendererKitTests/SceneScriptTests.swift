@@ -74,12 +74,14 @@ final class SceneScriptTests: XCTestCase {
         material compact 0.8 0.7 0.5 roughness 0.22 metallic 1
         material brushed 0.8 0.7 0.5 roughness 0.22 metallic 1 opacity 0.9
         material glow 1 1 1 emission 1 0.8 0.4 6
-        material glassy 0.8 0.9 1 specular 0.7 specularColor 0.9 0.8 0.7 ior 1.62 clearcoat 0.45 clearcoatRoughness 0.08 clearcoatIOR 1.58
+        material glassy 0.8 0.9 1 specular 0.7 specularColor 0.9 0.8 0.7 ior 1.62 anisotropy 0.55 transmission 0.85 transmissionColor 0.45 0.72 1 transmissionRoughness 0.12 transmissionIOR 1.38 absorptionColor 0.5 0.75 1 absorptionDistance 1.4 clearcoat 0.45 clearcoatColor 0.7 0.92 1 clearcoatAttenuationColor 0.62 0.78 0.94 clearcoatThickness 0.35 clearcoatRoughness 0.08 clearcoatIOR 1.58
+        material fabric 0.35 0.2 0.8 sheen 0.6 sheenColor 0.9 0.72 1 sheenRoughness 0.75
+        material sourceGlass 0.7 0.8 0.8 spectrans 1 thinWalled 1 fuzz 0.4 fuzzColor 0.7 0.8 0.9 fuzzRoughness 0.65
         """
 
         let scene = try SceneScript.parse(source)
 
-        XCTAssertEqual(scene.materials.count, 4)
+        XCTAssertEqual(scene.materials.count, 6)
         XCTAssertEqual(scene.materials[0].roughness, 0.22, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[0].metallic, 1, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[1].opacity, 0.9, accuracy: 0.0001)
@@ -89,9 +91,40 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(scene.materials[3].specularColor.y, 0.8, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[3].specularColor.z, 0.7, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[3].indexOfRefraction, 1.62, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].specularAnisotropy, 0.55, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].transmission, 0.85, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].transmissionColor.x, 0.45, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].transmissionColor.y, 0.72, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].transmissionColor.z, 1, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].transmissionRoughness, 0.12, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].transmissionIndexOfRefraction, 1.38, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].transmissionAbsorptionColor.x, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].transmissionAbsorptionColor.y, 0.75, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].transmissionAbsorptionColor.z, 1, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].transmissionAbsorptionDistance, 1.4, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[3].clearcoat, 0.45, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].clearcoatColor.x, 0.7, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].clearcoatColor.y, 0.92, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].clearcoatColor.z, 1, accuracy: 0.0001)
+        let clearcoatAttenuationColor = try XCTUnwrap(scene.materials[3].clearcoatAttenuationColor)
+        XCTAssertEqual(clearcoatAttenuationColor.x, 0.62, accuracy: 0.0001)
+        XCTAssertEqual(clearcoatAttenuationColor.y, 0.78, accuracy: 0.0001)
+        XCTAssertEqual(clearcoatAttenuationColor.z, 0.94, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].clearcoatThickness, 0.35, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[3].clearcoatRoughness, 0.08, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[3].clearcoatIndexOfRefraction, 1.58, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[4].sheen, 0.6, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[4].sheenColor.x, 0.9, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[4].sheenColor.y, 0.72, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[4].sheenColor.z, 1, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[4].sheenRoughness, 0.75, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[5].transmission, 1, accuracy: 0.0001)
+        XCTAssertTrue(scene.materials[5].thinWalled)
+        XCTAssertEqual(scene.materials[5].sheen, 0.4, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[5].sheenColor.x, 0.7, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[5].sheenColor.y, 0.8, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[5].sheenColor.z, 0.9, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[5].sheenRoughness, 0.65, accuracy: 0.0001)
     }
 
     func testSceneScriptParsesMaterialTextureBindings() throws {

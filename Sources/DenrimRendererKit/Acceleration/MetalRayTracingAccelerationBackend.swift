@@ -244,20 +244,23 @@ struct MetalRayTracingAccelerationBackend: AccelerationBackend {
             return nil
         }
 
+        var materializedTriangleOffset: UInt32 = 0
         let instances = instanceAcceleration.instances.map { instance in
             let normalTransform = instance.transform.matrix.transpose.inverse
-            return GPURayTracingInstance(
+            let instanceRecord = GPURayTracingInstance(
                 metadata: SIMD4<UInt32>(
                     meshTriangleOffsets[instance.meshIndex],
                     instance.material.rawValue,
                     instance.objectID,
-                    0
+                    materializedTriangleOffset
                 ),
                 normalTransform0: normalTransform.columns.0,
                 normalTransform1: normalTransform.columns.1,
                 normalTransform2: normalTransform.columns.2,
                 normalTransform3: normalTransform.columns.3
             )
+            materializedTriangleOffset += UInt32(instanceAcceleration.meshes[instance.meshIndex].localTriangles.count)
+            return instanceRecord
         }
 
         guard let localTriangleBuffer = device.makeBuffer(

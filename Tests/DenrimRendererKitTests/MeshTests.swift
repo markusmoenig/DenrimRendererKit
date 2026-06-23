@@ -31,6 +31,28 @@ final class MeshTests: XCTestCase {
         XCTAssertEqual(triangles[1].primitiveID, 1)
     }
 
+    func testGPUTrianglesPreserveImportedVertexNormals() {
+        let mesh = Mesh(
+            vertices: [
+                SIMD3<Float>(0, 0, 0),
+                SIMD3<Float>(1, 0, 0),
+                SIMD3<Float>(0, 1, 0)
+            ],
+            indices: [0, 1, 2],
+            normals: [
+                SIMD3<Float>(1, 0, 0),
+                SIMD3<Float>(0, 1, 0),
+                SIMD3<Float>(0, 0, 1)
+            ]
+        )
+
+        let triangle = mesh.gpuTriangles(material: MaterialID(rawValue: 0))[0]
+
+        XCTAssertEqual(triangle.n0.xyz, SIMD3<Float>(1, 0, 0))
+        XCTAssertEqual(triangle.n1.xyz, SIMD3<Float>(0, 1, 0))
+        XCTAssertEqual(triangle.n2.xyz, SIMD3<Float>(0, 0, 1))
+    }
+
     func testBoxBoundsMatchInputCorners() {
         let mesh = Mesh.box(
             minimum: SIMD3<Float>(-1, -2, -3),
@@ -85,6 +107,28 @@ final class MeshTests: XCTestCase {
         XCTAssertEqual(mesh.vertices.count, 3)
         XCTAssertEqual(mesh.indices, [0, 1, 2])
         XCTAssertEqual(mesh.vertices[2], SIMD3<Float>(0, 1, 0))
+    }
+
+    func testOBJLoaderParsesScientificNotationFloats() throws {
+        let url = try temporaryMeshURL("ScientificNotationTriangle.obj")
+        let source = """
+        v -1.0e-1 0 0
+        v 1.25E+0 0 0
+        v 0 2.5e-1 0
+        vt 0 0
+        vt 1.0e0 0
+        vt 0 1
+        f 1/1 2/2 3/3
+        """
+        try source.write(to: url, atomically: true, encoding: .utf8)
+
+        let mesh = try Mesh(contentsOf: url)
+
+        XCTAssertEqual(mesh.indices, [0, 1, 2])
+        XCTAssertEqual(mesh.vertices[0].x, -0.1, accuracy: 0.0001)
+        XCTAssertEqual(mesh.vertices[1].x, 1.25, accuracy: 0.0001)
+        XCTAssertEqual(mesh.vertices[2].y, 0.25, accuracy: 0.0001)
+        XCTAssertEqual(mesh.texcoords[1].x, 1, accuracy: 0.0001)
     }
 
     func testLoadsASCIIPLYMesh() throws {

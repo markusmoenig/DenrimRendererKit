@@ -118,7 +118,13 @@ public struct RenderScene: Sendable {
         let back = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.38, 0.42, 0.48)))
         let warm = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.95, 0.42, 0.24), roughness: 0.8))
         let cool = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.18, 0.44, 0.9), roughness: 0.18, metallic: 1))
-        let green = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.18, 0.72, 0.35), roughness: 0.45))
+        let green = scene.addMaterial(Material(
+            baseColor: SIMD3<Float>(0.18, 0.72, 0.35),
+            roughness: 0.58,
+            sheen: 0.65,
+            sheenColor: SIMD3<Float>(0.72, 1.0, 0.82),
+            sheenRoughness: 0.72
+        ))
         let violet = scene.addMaterial(Material(
             baseColor: SIMD3<Float>(0.62, 0.36, 0.95),
             roughness: 0.35,
@@ -194,7 +200,14 @@ public struct RenderScene: Sendable {
             emission: SIMD3<Float>(1, 0.93, 0.82),
             emissionStrength: 9
         ))
-        let matteClay = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.82, 0.42, 0.26), roughness: 0.88, specular: 0.35))
+        let matteClay = scene.addMaterial(Material(
+            baseColor: SIMD3<Float>(0.82, 0.42, 0.26),
+            roughness: 0.88,
+            specular: 0.35,
+            sheen: 0.35,
+            sheenColor: SIMD3<Float>(1.0, 0.72, 0.52),
+            sheenRoughness: 0.8
+        ))
         let satinPlastic = scene.addMaterial(Material(
             baseColor: SIMD3<Float>(0.18, 0.45, 0.95),
             roughness: 0.32,
@@ -202,7 +215,12 @@ public struct RenderScene: Sendable {
             specularColor: SIMD3<Float>(0.9, 0.96, 1),
             indexOfRefraction: 1.48
         ))
-        let brushedMetal = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.86, 0.72, 0.46), roughness: 0.42, metallic: 1))
+        let brushedMetal = scene.addMaterial(Material(
+            baseColor: SIMD3<Float>(0.86, 0.72, 0.46),
+            roughness: 0.42,
+            metallic: 1,
+            specularAnisotropy: 0.72
+        ))
         let polishedMetal = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.72, 0.78, 0.82), roughness: 0.12, metallic: 1))
         let coated = scene.addMaterial(Material(
             baseColor: SIMD3<Float>(0.22, 0.72, 0.38),
@@ -210,6 +228,7 @@ public struct RenderScene: Sendable {
             specular: 0.85,
             indexOfRefraction: 1.52,
             clearcoat: 0.55,
+            clearcoatColor: SIMD3<Float>(0.78, 1.0, 0.84),
             clearcoatRoughness: 0.05,
             clearcoatIndexOfRefraction: 1.55
         ))
@@ -275,7 +294,13 @@ public struct RenderScene: Sendable {
         let semiTransparent = scene.addMaterial(Material(
             baseColor: SIMD3<Float>(0.18, 0.48, 0.92),
             roughness: 0.18,
-            opacity: 0.45
+            opacity: 0.45,
+            transmission: 0.75,
+            transmissionColor: SIMD3<Float>(0.58, 0.78, 1.0),
+            transmissionRoughness: 0.05,
+            transmissionIndexOfRefraction: 1.45,
+            transmissionAbsorptionColor: SIMD3<Float>(0.64, 0.82, 1.0),
+            transmissionAbsorptionDistance: 0.8
         ))
         let cutout = scene.addMaterial(Material(
             baseColor: SIMD3<Float>(1, 1, 1),

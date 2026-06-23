@@ -38,8 +38,20 @@ public struct Material: Sendable {
     /// Index of refraction used for dielectric Fresnel behavior.
     public var indexOfRefraction: Float
 
+    /// Specular lobe anisotropy in the range -1...1.
+    public var specularAnisotropy: Float
+
     /// Clearcoat lobe weight in the range 0...1.
     public var clearcoat: Float
+
+    /// Clearcoat reflection tint in linear RGB.
+    public var clearcoatColor: SIMD3<Float>
+
+    /// Color remaining after traveling `clearcoatThickness` through the coating. Nil inherits `clearcoatColor`.
+    public var clearcoatAttenuationColor: SIMD3<Float>?
+
+    /// Clearcoat depth used for tint attenuation through the coating. Zero disables depth attenuation.
+    public var clearcoatThickness: Float
 
     /// Clearcoat roughness in the range 0...1.
     public var clearcoatRoughness: Float
@@ -47,8 +59,38 @@ public struct Material: Sendable {
     /// Index of refraction used for clearcoat Fresnel behavior.
     public var clearcoatIndexOfRefraction: Float
 
+    /// Grazing fabric / fuzz reflection weight in the range 0...1.
+    public var sheen: Float
+
+    /// Grazing fabric / fuzz reflection tint in linear RGB.
+    public var sheenColor: SIMD3<Float>
+
+    /// Grazing fabric / fuzz lobe roughness in the range 0...1.
+    public var sheenRoughness: Float
+
     /// Opacity in the range 0...1.
     public var opacity: Float
+
+    /// Specular transmission weight in the range 0...1.
+    public var transmission: Float
+
+    /// Specular transmission tint in linear RGB.
+    public var transmissionColor: SIMD3<Float>
+
+    /// Specular transmission microfacet roughness in the range 0...1.
+    public var transmissionRoughness: Float
+
+    /// Index of refraction used for specular transmission.
+    public var transmissionIndexOfRefraction: Float
+
+    /// Remaining transmission color after traveling `transmissionAbsorptionDistance` units through the material.
+    public var transmissionAbsorptionColor: SIMD3<Float>
+
+    /// Distance at which `transmissionAbsorptionColor` is reached. Zero disables absorption.
+    public var transmissionAbsorptionDistance: Float
+
+    /// Treats transmission as a zero-thickness surface with no volume refraction.
+    public var thinWalled: Bool
 
     /// Optional base color texture sampled by mesh UVs.
     public var baseColorTexture: Texture2D?
@@ -66,10 +108,24 @@ public struct Material: Sendable {
         specular: Float = 1,
         specularColor: SIMD3<Float> = SIMD3<Float>(1, 1, 1),
         indexOfRefraction: Float = 1.5,
+        specularAnisotropy: Float = 0,
         clearcoat: Float = 0,
+        clearcoatColor: SIMD3<Float> = SIMD3<Float>(1, 1, 1),
+        clearcoatAttenuationColor: SIMD3<Float>? = nil,
+        clearcoatThickness: Float = 0,
         clearcoatRoughness: Float = 0.1,
         clearcoatIndexOfRefraction: Float = 1.5,
+        sheen: Float = 0,
+        sheenColor: SIMD3<Float> = SIMD3<Float>(1, 1, 1),
+        sheenRoughness: Float = 0.5,
         opacity: Float = 1,
+        transmission: Float = 0,
+        transmissionColor: SIMD3<Float>? = nil,
+        transmissionRoughness: Float? = nil,
+        transmissionIndexOfRefraction: Float? = nil,
+        transmissionAbsorptionColor: SIMD3<Float> = SIMD3<Float>(1, 1, 1),
+        transmissionAbsorptionDistance: Float = 0,
+        thinWalled: Bool = false,
         baseColorTexture: Texture2D? = nil,
         normalMap: Texture2D? = nil
     ) {
@@ -81,10 +137,24 @@ public struct Material: Sendable {
         self.specular = specular
         self.specularColor = specularColor
         self.indexOfRefraction = indexOfRefraction
+        self.specularAnisotropy = specularAnisotropy
         self.clearcoat = clearcoat
+        self.clearcoatColor = clearcoatColor
+        self.clearcoatAttenuationColor = clearcoatAttenuationColor
+        self.clearcoatThickness = clearcoatThickness
         self.clearcoatRoughness = clearcoatRoughness
         self.clearcoatIndexOfRefraction = clearcoatIndexOfRefraction
+        self.sheen = sheen
+        self.sheenColor = sheenColor
+        self.sheenRoughness = sheenRoughness
         self.opacity = opacity
+        self.transmission = transmission
+        self.transmissionColor = transmissionColor ?? baseColor
+        self.transmissionRoughness = transmissionRoughness ?? roughness
+        self.transmissionIndexOfRefraction = transmissionIndexOfRefraction ?? indexOfRefraction
+        self.transmissionAbsorptionColor = transmissionAbsorptionColor
+        self.transmissionAbsorptionDistance = transmissionAbsorptionDistance
+        self.thinWalled = thinWalled
         self.baseColorTexture = baseColorTexture
         self.normalMap = normalMap
     }
@@ -92,7 +162,7 @@ public struct Material: Sendable {
     func gpuMaterial(baseColorTextureIndex: Int? = nil, normalMapIndex: Int? = nil) -> GPUMaterial {
         GPUMaterial(
             baseColor: SIMD4<Float>(baseColor, opacity),
-            emission: SIMD4<Float>(emission * emissionStrength, 0),
+            emission: SIMD4<Float>(emission * emissionStrength, transmission),
             parameters: SIMD4<Float>(
                 roughness,
                 metallic,
@@ -105,7 +175,24 @@ public struct Material: Sendable {
                 clearcoat,
                 clearcoatRoughness
             ),
-            specularColor: SIMD4<Float>(specularColor, clearcoatIndexOfRefraction)
+            specularColor: SIMD4<Float>(specularColor, clearcoatIndexOfRefraction),
+            sheenColor: SIMD4<Float>(sheenColor, sheen),
+            transmissionColor: SIMD4<Float>(transmissionColor, thinWalled ? 1 : 0),
+            parameters3: SIMD4<Float>(
+                sheenRoughness,
+                transmissionRoughness,
+                transmissionIndexOfRefraction,
+                specularAnisotropy
+            ),
+            clearcoatColor: SIMD4<Float>(clearcoatColor, 0),
+            clearcoatAttenuation: SIMD4<Float>(
+                clearcoatAttenuationColor ?? clearcoatColor,
+                clearcoatThickness
+            ),
+            transmissionAbsorption: SIMD4<Float>(
+                transmissionAbsorptionColor,
+                transmissionAbsorptionDistance
+            )
         )
     }
 }

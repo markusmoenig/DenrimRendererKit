@@ -10,16 +10,34 @@ The current public `Material` supports:
 * `specular`
 * `specularColor`
 * `indexOfRefraction`
+* `specularAnisotropy`
 * `clearcoat`
+* `clearcoatColor`
+* `clearcoatAttenuationColor`
+* `clearcoatThickness`
 * `clearcoatRoughness`
 * `clearcoatIndexOfRefraction`
+* `sheen`
+* `sheenColor`
+* `sheenRoughness`
 * `emission`
 * `emissionStrength`
 * `opacity`
+* `transmission`
+* `transmissionColor`
+* `transmissionRoughness`
+* `transmissionIndexOfRefraction`
+* `transmissionAbsorptionColor`
+* `transmissionAbsorptionDistance`
+* `thinWalled`
 * `baseColorTexture`
 * `normalMap`
 
-`specular`, `specularColor`, and `indexOfRefraction` are active shader controls. They drive the dielectric Fresnel F0 used by the current GGX specular lobe; the default IOR of 1.5 and white specular color keep the earlier hard-coded 0.04 dielectric F0 behavior. `clearcoat`, `clearcoatRoughness`, and `clearcoatIndexOfRefraction` are active shader controls for a secondary GGX coating lobe that attenuates the base layer.
+`specular`, `specularColor`, `indexOfRefraction`, and `specularAnisotropy` are active shader controls. They drive the dielectric Fresnel F0 and anisotropic GGX base-specular lobe; the default IOR of 1.5, white specular color, and zero anisotropy keep the earlier hard-coded 0.04 isotropic dielectric F0 behavior. The anisotropic lobe uses mesh tangent / bitangent frames, including normal-map-adjusted frames, for direct lighting, MIS PDFs, and sampled indirect specular bounces. Specular and clearcoat bounce sampling use visible-normal GGX sampling, lobe-probability compensation, and GGX `BRDF * cos / PDF` weighting rather than Fresnel-only throughput. Sampled diffuse and base-specular indirect bounces apply the same Fresnel and clearcoat base-layer attenuation used by direct BRDF evaluation. `clearcoat`, `clearcoatColor`, `clearcoatAttenuationColor`, `clearcoatThickness`, `clearcoatRoughness`, and `clearcoatIndexOfRefraction` are active shader controls for a secondary isotropic GGX coating lobe that attenuates the base layer. `clearcoatColor` tints the coating Fresnel response. `clearcoatAttenuationColor` controls Beer-style attenuation through the coating depth and inherits `clearcoatColor` when omitted; thickness zero keeps the previous dielectric clearcoat behavior.
+
+`sheen`, `sheenColor`, and `sheenRoughness` are active shader controls for a MoonRay-inspired fuzz / fabric lobe. The implementation uses a grazing Charlie-style sheen response for direct lighting and folds sheen energy into the diffuse sampling path for indirect bounces. It is intended for cloth, velvet-like stylized surfaces, dusty clay, and soft edge highlights without introducing a separate production fabric material yet.
+
+`transmission`, `transmissionColor`, `transmissionRoughness`, `transmissionIndexOfRefraction`, `transmissionAbsorptionColor`, `transmissionAbsorptionDistance`, and `thinWalled` are active as dielectric transport controls. Transmissive solid surfaces sample reflection or refraction using exact dielectric Fresnel, independent roughness-driven GGX micro-normals, explicit transmission tint, independent transmission IOR, Beer-style exit absorption, and transparent direct-light shadow rays. Omitted transmission color, roughness, and IOR inherit from `baseColor`, `roughness`, and `indexOfRefraction` so existing materials keep their previous behavior. Absorption is disabled by default with distance zero; when enabled, `transmissionAbsorptionColor` is the remaining color after traveling `transmissionAbsorptionDistance` scene units through the solid. The same exit-distance absorption is applied to transparent direct-light shadow rays so tinted glass affects both visible paths and light visibility. `thinWalled` switches transmission to a zero-thickness sheet path that can reflect by Fresnel but transmits straight through without entering a refractive volume. This is suitable for glass validation assets such as the DiningRoom table and thin panes, leaves, or film-like sheets. It is not yet the final production dielectric stack: nested dielectric priority, caustic controls, dispersion, and semi-transparent blending are still future work.
 
 This is enough for the first reusable path tracing vertical slice, but it is not the intended final material system.
 
@@ -52,11 +70,11 @@ The next public material shape should become a Denrim Standard Surface that can 
 Recommended staged properties:
 
 * Base: base color, opacity / presence, roughness, metallic, normal map.
-* Specular: implemented first with specular weight, specular color, and IOR; later expand to anisotropy, anisotropy rotation, and model selection.
-* Transmission: transmission weight, transmission color, transmission roughness, transmission IOR.
-* Thin surfaces: thin-walled mode, diffuse transmission, shadow transparency.
-* Clearcoat: implemented first with clearcoat weight, clearcoat roughness, and clearcoat IOR; later expand to clearcoat tint, thickness, attenuation color, and independent clearcoat normals.
-* Sheen / fuzz: sheen weight, sheen color, sheen roughness.
+* Specular: implemented first with specular weight, specular color, IOR, and anisotropy; later expand to anisotropy rotation and model selection.
+* Transmission: implemented first with transmission weight, transmission color, transmission roughness, transmission IOR, and measured absorption; later expand to dispersion, nested dielectric priority, and caustic controls.
+* Thin surfaces: implemented first with thin-walled specular transmission; later expand to diffuse transmission and richer shadow transparency controls.
+* Clearcoat: implemented first with clearcoat weight, tint, independent attenuation color, thickness-based attenuation, roughness, and IOR; later expand to independent clearcoat normals.
+* Sheen / fuzz: implemented first with sheen weight, sheen color, and sheen roughness; later expand to independent normal input and richer fabric / velvet controls.
 * Subsurface: SSS weight, radius, color, scale, and model selection.
 * Emission: emission color, strength, and light-record integration.
 * Layering: material layering or coating as an explicit API rather than a large bag of unrelated fields.
@@ -85,10 +103,11 @@ The graph must be deterministic and serializable so scripted reference scenes ca
 
 Current built-in material reference scenes:
 
-* `RenderScene.materialReference()` covers diffuse, rough metallic, material-controlled specular tint / IOR, clearcoat shader control, and emissive baseline behavior.
-* `RenderScene.materialVariantReference(mesh:)` renders one caller-supplied mesh through matte, plastic, metallic, polished, and clearcoat variants for visual material validation. It is suitable for local benchmark assets such as a Stanford Dragon PLY or OBJ without requiring the package to redistribute that mesh.
+* `RenderScene.materialReference()` covers diffuse, rough metallic, material-controlled specular tint / IOR, sheen / fuzz shader control, clearcoat shader control, and emissive baseline behavior.
+* `RenderScene.materialVariantReference(mesh:)` renders one caller-supplied mesh through matte / sheen, plastic, anisotropic brushed metal, polished metal, and tinted-clearcoat variants for visual material validation. It is suitable for local benchmark assets such as a Stanford Dragon PLY or OBJ without requiring the package to redistribute that mesh.
 * `Examples/SceneScripts/MaterialVariants/material-variants.denrim` provides the same idea as a script template with reusable material includes, relative mesh paths, and checked-in rendered output.
+* `Examples/SceneScripts/MaterialVariants/glossy-metal-reference.denrim` is a self-contained glossy reflection target for polished, rough, and clearcoated silver. Bright, dark, and warm reflection cards make it useful for validating metal energy, Fresnel, and clearcoat behavior without tuning a large interior scene.
 * `Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim` applies the same material set to the Stanford Dragon after `./Examples/Tools/fetch-stanford-dragon.sh` downloads the benchmark mesh.
-* `RenderScene.transparentMaterialReference()` covers opacity planning, semi-transparent albedo alpha, fully transparent camera-ray cutout pass-through, and a rear visible surface for future transmission / refraction comparison.
+* `RenderScene.transparentMaterialReference()` covers opacity planning, semi-transparent albedo alpha, fully transparent camera-ray cutout pass-through, measured absorption setup, and a rear visible surface for transmission / refraction comparison.
 
-The transparent scene is intentionally a planning reference. Today it proves that opacity data reaches AOVs and that fully transparent cutouts reveal rear surfaces. Later it should become the first visual target for semi-transparent blending, shadow transparency, transmission, refraction, and layered material behavior.
+The transparent scene is intentionally a planning reference. Today it proves that opacity data reaches AOVs, fully transparent cutouts reveal rear surfaces, and transmissive materials exercise rough dielectric refraction with measured absorption parameters. It should keep growing into the first visual target for semi-transparent blending, nested dielectric priority, caustics behavior, and layered material behavior.

@@ -20,6 +20,9 @@ public final class RenderSession {
     private let commandQueue: MTLCommandQueue
     private let pipeline: MTLComputePipelineState
     private let hardwareRayTracingPipeline: MTLComputePipelineState?
+    private let simpleSpatialDenoisePipeline: MTLComputePipelineState?
+    private let svgfDepthNormalPipeline: MTLComputePipelineState?
+    private let svgfOutputCopyPipeline: MTLComputePipelineState?
     private let camera: GPUCamera
     private let previousCamera: GPUCamera
     private let triangleBuffer: MTLBuffer
@@ -30,6 +33,7 @@ public final class RenderSession {
     private let accelerationNodeBuffer: MTLBuffer?
     private let primitiveIndexBuffer: MTLBuffer?
     private let accumulationTexture: MTLTexture
+    private let denoisedBeautyTexture: MTLTexture?
     private let depthTexture: MTLTexture
     private let normalTexture: MTLTexture
     private let albedoTexture: MTLTexture
@@ -44,6 +48,11 @@ public final class RenderSession {
     private let accelerationNodeCount: Int
     private let metalRayTracingExperiment: MetalRayTracingExperiment?
     private let accelerationMode: RenderAccelerationMode
+    private let simpleSpatialDenoiser: SimpleSpatialDenoiser?
+    #if canImport(MetalPerformanceShaders)
+    private let appleSVGFDenoiser: AppleSVGFDenoiser?
+    #endif
+    private var denoisedBeautyIsCurrent = false
 
     var accelerationDebugInfo: (nodeCount: Int, hasNodeBuffer: Bool, hasPrimitiveIndexBuffer: Bool) {
         (
@@ -96,11 +105,28 @@ public final class RenderSession {
         )
     }
 
+    var denoisingDebugInfo: (
+        requested: RenderDenoiser,
+        hasSimpleSpatialPipeline: Bool,
+        hasAppleSVGFPipelines: Bool,
+        hasDenoisedBeautyTexture: Bool
+    ) {
+        (
+            requested: settings.denoise.denoiser,
+            hasSimpleSpatialPipeline: simpleSpatialDenoisePipeline != nil,
+            hasAppleSVGFPipelines: svgfDepthNormalPipeline != nil && svgfOutputCopyPipeline != nil,
+            hasDenoisedBeautyTexture: denoisedBeautyTexture != nil
+        )
+    }
+
     init(
         device: MTLDevice,
         commandQueue: MTLCommandQueue,
         pipeline: MTLComputePipelineState,
         hardwareRayTracingPipeline: MTLComputePipelineState?,
+        simpleSpatialDenoisePipeline: MTLComputePipelineState?,
+        svgfDepthNormalPipeline: MTLComputePipelineState?,
+        svgfOutputCopyPipeline: MTLComputePipelineState?,
         scene: RenderScene,
         settings: RenderSettings,
         accelerationMode: RenderAccelerationMode = .automatic
@@ -131,6 +157,9 @@ public final class RenderSession {
         self.commandQueue = commandQueue
         self.pipeline = pipeline
         self.hardwareRayTracingPipeline = hardwareRayTracingPipeline
+        self.simpleSpatialDenoisePipeline = simpleSpatialDenoisePipeline
+        self.svgfDepthNormalPipeline = svgfDepthNormalPipeline
+        self.svgfOutputCopyPipeline = svgfOutputCopyPipeline
         self.settings = settings
         self.accelerationMode = accelerationMode
         self.camera = scene.camera.gpuCamera(width: settings.width, height: settings.height)
@@ -181,6 +210,7 @@ public final class RenderSession {
             width: settings.width,
             height: settings.height
         )
+        let needsDenoisedBeautyTexture = settings.denoise.denoiser != .none
         guard let accumulationTexture = device.makeTexture(descriptor: textureDescriptor),
               let depthTexture = device.makeTexture(descriptor: textureDescriptor),
               let normalTexture = device.makeTexture(descriptor: textureDescriptor),
@@ -190,18 +220,58 @@ public final class RenderSession {
               let motionVectorTexture = device.makeTexture(descriptor: textureDescriptor) else {
             throw DenrimRendererError.invalidScene("Could not create render textures.")
         }
+        let denoisedBeautyTexture = needsDenoisedBeautyTexture
+            ? device.makeTexture(descriptor: textureDescriptor)
+            : nil
+        if needsDenoisedBeautyTexture && denoisedBeautyTexture == nil {
+            throw DenrimRendererError.invalidScene("Could not create denoised beauty texture.")
+        }
         self.accumulationTexture = accumulationTexture
+        self.denoisedBeautyTexture = denoisedBeautyTexture
         self.depthTexture = depthTexture
         self.normalTexture = normalTexture
         self.albedoTexture = albedoTexture
         self.materialIDTexture = materialIDTexture
         self.objectIDTexture = objectIDTexture
         self.motionVectorTexture = motionVectorTexture
+        switch settings.denoise.denoiser {
+        case .none:
+            self.simpleSpatialDenoiser = nil
+            #if canImport(MetalPerformanceShaders)
+            self.appleSVGFDenoiser = nil
+            #endif
+        case .simpleSpatial:
+            guard let simpleSpatialDenoisePipeline else {
+                throw DenrimRendererError.missingShaderFunction("simpleSpatialDenoiseKernel")
+            }
+            self.simpleSpatialDenoiser = SimpleSpatialDenoiser(pipeline: simpleSpatialDenoisePipeline)
+            #if canImport(MetalPerformanceShaders)
+            self.appleSVGFDenoiser = nil
+            #endif
+        case .appleSVGF:
+            self.simpleSpatialDenoiser = nil
+            #if canImport(MetalPerformanceShaders)
+            guard let svgfDepthNormalPipeline, let svgfOutputCopyPipeline else {
+                throw DenrimRendererError.missingShaderFunction("Apple SVGF support kernels")
+            }
+            self.appleSVGFDenoiser = AppleSVGFDenoiser(
+                device: device,
+                packDepthNormalPipeline: svgfDepthNormalPipeline,
+                copyOutputPipeline: svgfOutputCopyPipeline
+            )
+            #else
+            throw DenrimRendererError.invalidScene("Apple SVGF denoising is not available on this platform.")
+            #endif
+        }
     }
 
     /// Resets progressive accumulation to sample zero.
     public func resetAccumulation() {
         sampleCount = 0
+        denoisedBeautyIsCurrent = false
+        #if canImport(MetalPerformanceShaders)
+        appleSVGFDenoiser?.reset()
+        #endif
     }
 
     /// Renders one additional progressive sample.
@@ -222,7 +292,7 @@ public final class RenderSession {
             accelerationNodeCount: UInt32(accelerationNodeCount),
             transparentBackground: settings.transparentBackground ? 1 : 0,
             lightCount: UInt32(lightCount),
-            padding1: 0,
+            padding1: settings.denoise.denoiser == .none ? 0 : 1,
             padding2: 0
         )
         var camera = camera
@@ -271,6 +341,7 @@ public final class RenderSession {
         }
 
         sampleCount += 1
+        denoisedBeautyIsCurrent = false
     }
 
     /// Renders a fixed number of additional samples.
@@ -317,23 +388,83 @@ public final class RenderSession {
         )
     }
 
-    private func texture(for output: RenderOutput) -> MTLTexture {
+    private func texture(for output: RenderOutput) throws -> MTLTexture {
         switch output {
         case .beauty:
-            accumulationTexture
+            try ensureDenoisedBeautyIsCurrent()
+            if denoisedBeautyIsCurrent, let denoisedBeautyTexture {
+                return denoisedBeautyTexture
+            } else {
+                return accumulationTexture
+            }
         case .depth:
-            depthTexture
+            return depthTexture
         case .normal:
-            normalTexture
+            return normalTexture
         case .albedo:
-            albedoTexture
+            return albedoTexture
         case .materialID:
-            materialIDTexture
+            return materialIDTexture
         case .objectID:
-            objectIDTexture
+            return objectIDTexture
         case .motionVector:
-            motionVectorTexture
+            return motionVectorTexture
         }
+    }
+
+    private func ensureDenoisedBeautyIsCurrent() throws {
+        guard let denoisedBeautyTexture else {
+            return
+        }
+        guard !denoisedBeautyIsCurrent else {
+            return
+        }
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            throw DenrimRendererError.commandBufferFailed("Could not create denoise command buffer.")
+        }
+
+        switch settings.denoise.denoiser {
+        case .none:
+            return
+        case .simpleSpatial:
+            guard let simpleSpatialDenoiser else {
+                return
+            }
+            try simpleSpatialDenoiser.encode(
+                commandBuffer: commandBuffer,
+                source: accumulationTexture,
+                depth: depthTexture,
+                normal: normalTexture,
+                albedo: albedoTexture,
+                destination: denoisedBeautyTexture,
+                settings: settings.denoise
+            )
+        case .appleSVGF:
+            #if canImport(MetalPerformanceShaders)
+            guard let appleSVGFDenoiser else {
+                return
+            }
+            try appleSVGFDenoiser.encode(
+                commandBuffer: commandBuffer,
+                source: accumulationTexture,
+                depth: depthTexture,
+                normal: normalTexture,
+                motionVector: motionVectorTexture,
+                destination: denoisedBeautyTexture,
+                settings: settings.denoise
+            )
+            #else
+            throw DenrimRendererError.invalidScene("Apple SVGF denoising is not available on this platform.")
+            #endif
+        }
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        if let error = commandBuffer.error {
+            throw DenrimRendererError.commandBufferFailed(error.localizedDescription)
+        }
+        denoisedBeautyIsCurrent = true
     }
 
     private static func makeBuffer<T>(

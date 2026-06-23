@@ -29,11 +29,11 @@ Rectangular renders can be benchmarked with `--width` and `--height`:
 swift run -c release denrim-render-benchmark \
     script \
     1 \
-    160 \
+    320 \
     Examples/SceneScripts/Quality/DiningRoom/dining-room.denrim \
-    --width 160 \
-    --height 90 \
-    --output Examples/Benchmarks/dining-room-local-160x90-1spp.json
+    --width 320 \
+    --height 180 \
+    --output Examples/Benchmarks/dining-room-local-320x180-1spp.json
 ```
 
 The JSON records:
@@ -69,13 +69,17 @@ The Stanford Dragon example showed that session / acceleration build time can do
 * Identical mesh data is deduplicated into one mesh acceleration record shared by many instances.
 * Automatic Metal ray tracing sessions skip the large flat fallback BVH when the hardware TLAS path is available.
 * Automatic Metal ray tracing sessions also skip per-mesh local BVHs that are only needed by the CPU/flat fallback path.
-* Emissive triangle lights are compiled into GPU light records with precomputed area and normal data shared by the flat BVH and hardware TLAS direct-light kernels.
+* Emissive triangle lights are compiled into GPU light records with precomputed area, normal, and power-weighted selection CDF data shared by the flat BVH and hardware TLAS direct-light kernels.
+* Direct lighting samples one emissive triangle by power-weighted CDF instead of looping over every light each bounce, which bounds direct-light shader work for scenes with many emissive triangles.
+* BSDF-sampled emissive-hit MIS uses per-triangle light-record indices to compute light PDFs in constant time instead of scanning the full light list.
 * Direct light samples and BSDF-sampled emissive hits use first-pass MIS weights to reduce double counting and stabilize highlight energy.
+* Russian roulette terminates low-contribution paths after early bounces while compensating surviving throughput, reducing wasted deep-bounce work without the bias of a hard cutoff.
+* OBJ loading now uses a byte scanner instead of `String.split` tokenization, reducing large text-mesh import overhead.
 * Forced flat-BVH sessions still build the fallback acceleration buffers for parity testing and unsupported devices.
 
 On an Apple M1 Max, the `dragon-material-variants.denrim` benchmark at 64 px / 1 spp dropped from roughly 4.7 seconds of session creation to roughly 0.67 seconds.
 
-On the same device, the DiningRoom benchmark at 160x90 / 1 spp now reports roughly 5.34 seconds of scene loading, 0.04 seconds of renderer creation, 0.39 seconds of session creation, and 0.04 seconds of rendering. For this fixture, the current first-load bottleneck is OBJ / texture scene loading rather than BLAS / TLAS setup.
+On the same device, the DiningRoom benchmark at 320x180 / 1 spp dropped from roughly 5.39 seconds of scene loading with the older string-tokenizing OBJ importer to roughly 0.66 seconds with the byte-scanning OBJ importer. The same run reports roughly 0.04 seconds of renderer creation, 0.42 seconds of session creation, and 0.06 seconds of rendering.
 
 DiningRoom is the first manual heavy fixture. It is intentionally not part of normal correctness tests or `render-quality-examples.sh`; run it directly when measuring render quality or acceleration behavior:
 

@@ -32,6 +32,9 @@ public struct RenderSettings: Sendable {
     /// Whether primary camera rays that miss the scene should export with zero alpha.
     public var transparentBackground: Bool
 
+    /// Optional denoising applied to beauty output. Defaults to disabled.
+    public var denoise: DenoiseSettings
+
     /// Creates render settings.
     public init(
         width: Int = 512,
@@ -39,7 +42,8 @@ public struct RenderSettings: Sendable {
         maxBounces: Int = 4,
         quality: RenderQuality = .preview,
         previousCamera: Camera? = nil,
-        transparentBackground: Bool = false
+        transparentBackground: Bool = false,
+        denoise: DenoiseSettings = .none
     ) {
         self.width = width
         self.height = height
@@ -47,5 +51,6 @@ public struct RenderSettings: Sendable {
         self.quality = quality
         self.previousCamera = previousCamera
         self.transparentBackground = transparentBackground
+        self.denoise = denoise
     }
 }

@@ -425,11 +425,37 @@ public enum SceneScript {
                 }
                 material.indexOfRefraction = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
                 index += 2
+            case "anisotropy", "specularanisotropy":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.specularAnisotropy = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
             case "clearcoat":
                 guard index + 1 < tokens.count else {
                     throw SceneScriptError.invalidArgumentCount("material", line: line)
                 }
                 material.clearcoat = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "clearcoatcolor", "clearcoattint":
+                guard index + 3 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                let values = try floats(tokens[(index + 1)...(index + 3)], line: line)
+                material.clearcoatColor = SIMD3<Float>(values[0], values[1], values[2])
+                index += 4
+            case "clearcoatattenuationcolor", "clearcoatabsorptioncolor":
+                guard index + 3 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                let values = try floats(tokens[(index + 1)...(index + 3)], line: line)
+                material.clearcoatAttenuationColor = SIMD3<Float>(values[0], values[1], values[2])
+                index += 4
+            case "clearcoatthickness", "clearcoatdepth":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.clearcoatThickness = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
                 index += 2
             case "clearcoatroughness":
                 guard index + 1 < tokens.count else {
@@ -443,11 +469,74 @@ public enum SceneScript {
                 }
                 material.clearcoatIndexOfRefraction = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
                 index += 2
+            case "sheen", "fuzz":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.sheen = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "sheencolor", "fuzzcolor":
+                guard index + 3 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                let values = try floats(tokens[(index + 1)...(index + 3)], line: line)
+                material.sheenColor = SIMD3<Float>(values[0], values[1], values[2])
+                index += 4
+            case "sheenroughness", "fuzzroughness":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.sheenRoughness = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
             case "opacity":
                 guard index + 1 < tokens.count else {
                     throw SceneScriptError.invalidArgumentCount("material", line: line)
                 }
                 material.opacity = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "transmission", "spectrans", "spectraltransmission":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.transmission = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "transmissioncolor", "transmissiontint", "spectranscolor", "spectraltransmissioncolor":
+                guard index + 3 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                let values = try floats(tokens[(index + 1)...(index + 3)], line: line)
+                material.transmissionColor = SIMD3<Float>(values[0], values[1], values[2])
+                index += 4
+            case "transmissionroughness", "spectransroughness", "spectraltransmissionroughness":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.transmissionRoughness = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "transmissionior", "transmissionindexofrefraction":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.transmissionIndexOfRefraction = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "transmissionabsorptioncolor", "absorptioncolor", "attenuationcolor":
+                guard index + 3 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                let values = try floats(tokens[(index + 1)...(index + 3)], line: line)
+                material.transmissionAbsorptionColor = SIMD3<Float>(values[0], values[1], values[2])
+                index += 4
+            case "transmissionabsorptiondistance", "absorptiondistance", "attenuationdistance":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.transmissionAbsorptionDistance = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "thinwalled", "thinwall", "thin":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.thinWalled = try floats(tokens[(index + 1)...(index + 1)], line: line)[0] > 0
                 index += 2
             case "basecolortexture":
                 guard index + 1 < tokens.count else {
