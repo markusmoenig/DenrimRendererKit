@@ -72,6 +72,28 @@ final class TextureLoadingTests: XCTestCase {
         XCTAssertEqual(try Texture2D(contentsOf: url, samplingMode: .nearest).samplingMode, .nearest)
     }
 
+    func testDerivedNormalMapUsesTextureLuminanceGradient() {
+        let texture = Texture2D(
+            width: 3,
+            height: 1,
+            pixels: [
+                SIMD4<Float>(0, 0, 0, 1),
+                SIMD4<Float>(0.5, 0.5, 0.5, 1),
+                SIMD4<Float>(1, 1, 1, 1)
+            ],
+            samplingMode: .linear
+        )
+
+        let normalMap = texture.derivedNormalMap(strength: 1)
+
+        XCTAssertEqual(normalMap.width, 3)
+        XCTAssertEqual(normalMap.height, 1)
+        XCTAssertEqual(normalMap.samplingMode, .linear)
+        XCTAssertLessThan(normalMap.pixels[1].x, 0.5)
+        XCTAssertEqual(normalMap.pixels[1].y, 0.5, accuracy: 0.0001)
+        XCTAssertGreaterThan(normalMap.pixels[1].z, 0.8)
+    }
+
     func testMissingTextureThrows() {
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("DenrimRendererKit-missing-texture.png")

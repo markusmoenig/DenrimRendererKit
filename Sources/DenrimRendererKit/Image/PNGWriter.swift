@@ -20,7 +20,7 @@ enum PNGWriter {
                 bitsPerPixel: 32,
                 bytesPerRow: width * 4,
                 space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
                 provider: provider,
                 decode: nil,
                 shouldInterpolate: false,
@@ -158,7 +158,9 @@ enum PNGWriter {
     }
 
     private static func tonemap(_ linear: Float) -> UInt8 {
-        let mapped = linear / (1 + linear)
+        let exposed = max(0, linear) * 0.8
+        let mapped = (exposed * (2.51 * exposed + 0.03))
+            / (exposed * (2.43 * exposed + 0.59) + 0.14)
         let gamma = pow(max(0, min(1, mapped)), 1 / 2.2)
         return UInt8(max(0, min(255, gamma * 255)))
     }

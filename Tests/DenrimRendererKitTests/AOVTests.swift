@@ -158,6 +158,17 @@ final class AOVTests: XCTestCase {
     }
 
     func testPNGVisualizationUsesOutputSpecificEncoding() {
+        let beautyPixels = [
+            RenderOutputPixel(r: 0, g: 0, b: 0, a: 0.5),
+            RenderOutputPixel(r: 1, g: 1, b: 1, a: 1),
+            RenderOutputPixel(r: 16, g: 16, b: 16, a: 1)
+        ]
+        let beauty = PNGWriter.visualizedRGBA8Pixels(from: beautyPixels, output: .beauty)
+        XCTAssertEqual(Array(beauty[0..<4]), [0, 0, 0, 127])
+        XCTAssertGreaterThan(beauty[4], 200)
+        XCTAssertGreaterThan(beauty[8], beauty[4])
+        XCTAssertLessThanOrEqual(beauty[8], 255)
+
         let depthPixels = [
             RenderOutputPixel(r: 0, g: 0, b: 0, a: 0),
             RenderOutputPixel(r: 2, g: 2, b: 2, a: 1),

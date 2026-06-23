@@ -25,6 +25,8 @@ let positionalArguments = positionalValues(in: arguments)
 let sceneName = positionalArguments.count > 0 ? positionalArguments[0].lowercased() : "cornell"
 let samples = positionalArguments.count > 1 ? Int(positionalArguments[1]) ?? 16 : 16
 let size = positionalArguments.count > 2 ? Int(positionalArguments[2]) ?? 256 : 256
+let width = optionInt(named: "--width", in: arguments) ?? size
+let height = optionInt(named: "--height", in: arguments) ?? size
 let assetPath = positionalArguments.count > 3 ? positionalArguments[3] : nil
 let writeJSONToStdout = arguments.contains("--json")
 let outputPath = optionValue(named: "--output", in: arguments)
@@ -48,7 +50,7 @@ func positionalValues(in arguments: [String]) -> [String] {
         switch argument {
         case "--json":
             continue
-        case "--output":
+        case "--output", "--width", "--height":
             skipNext = true
             continue
         default:
@@ -56,6 +58,10 @@ func positionalValues(in arguments: [String]) -> [String] {
         }
     }
     return values
+}
+
+func optionInt(named name: String, in arguments: [String]) -> Int? {
+    optionValue(named: name, in: arguments).flatMap(Int.init)
 }
 
 func elapsed<T>(_ work: () throws -> T) rethrows -> (T, Double) {
@@ -96,14 +102,14 @@ let (renderer, rendererCreateSeconds) = try elapsed {
 let (session, sessionCreateSeconds) = try elapsed {
     try renderer.makeSession(
         scene: scene,
-        settings: RenderSettings(width: size, height: size, maxBounces: 4)
+        settings: RenderSettings(width: width, height: height, maxBounces: 4)
     )
 }
 let (_, renderSeconds) = try elapsed {
     try session.render(samples: samples)
 }
 
-let pixelSamples = Double(size * size * samples)
+let pixelSamples = Double(width * height * samples)
 let samplesPerSecond = renderSeconds > 0 ? Double(samples) / renderSeconds : 0
 let pixelSamplesPerSecond = renderSeconds > 0 ? pixelSamples / renderSeconds : 0
 let totalSeconds = sceneLoadSeconds
@@ -115,8 +121,8 @@ let result = BenchmarkResult(
     createdAt: ISO8601DateFormatter().string(from: Date()),
     sceneName: sceneName,
     assetPath: assetPath,
-    width: size,
-    height: size,
+    width: width,
+    height: height,
     samples: samples,
     maxBounces: 4,
     deviceName: renderer.device.name,

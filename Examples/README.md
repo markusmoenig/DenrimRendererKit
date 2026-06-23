@@ -33,3 +33,21 @@ If the dragon scene feels slow, benchmark it before changing renderer internals:
 ```sh
 swift run denrim-render-benchmark script 1 64 Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim
 ```
+
+## Manual Quality Scenes
+
+`SceneScripts/Quality/DiningRoom/dining-room.denrim` recreates the DiningRoom scene from `Examples/Assets/DiningRoom/diningroom.scene`. It is intentionally not part of the default example render script because the scene is large enough to expose OBJ import and acceleration setup costs.
+
+Run a tiny smoke render:
+
+```sh
+./Examples/Tools/render-dining-room-quality.sh
+```
+
+Run the manual benchmark:
+
+```sh
+./Examples/Tools/benchmark-dining-room.sh
+```
+
+The GLSL path tracer reference image is `Examples/Assets/DiningRoom/DiningRoom.jpg`; the current Denrim baseline is `Examples/Renders/dining-room-128spp.png`. Quick smoke renders default to `/tmp/denrim-dining-room.png` so `Examples/Renders` stays reserved for polished references.

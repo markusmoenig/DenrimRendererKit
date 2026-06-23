@@ -82,10 +82,12 @@ final class BVHFlattenerTests: XCTestCase {
         let build = try LinearTriangleAccelerationBackend().build(scene: scene)
 
         XCTAssertEqual(build.triangles.count, 4)
-        XCTAssertEqual(build.lightTriangleIndices, [2, 3])
-        XCTAssertTrue(build.lightTriangleIndices.allSatisfy { index in
-            build.materials[Int(build.triangles[Int(index)].materialID)].emission.x > 0
+        XCTAssertEqual(build.lights.map(\.triangleIndex), [2, 3])
+        XCTAssertTrue(build.lights.allSatisfy { light in
+            build.materials[Int(light.materialIndex)].emission.x > 0
         })
+        XCTAssertTrue(build.lights.allSatisfy { abs($0.area - 0.5) < 0.0001 })
+        XCTAssertTrue(build.lights.allSatisfy { $0.normal.y < -0.99 })
     }
 
     func testAccelerationBackendLeavesLightListEmptyWithoutEmission() throws {
@@ -102,7 +104,7 @@ final class BVHFlattenerTests: XCTestCase {
         let build = try LinearTriangleAccelerationBackend().build(scene: scene)
 
         XCTAssertEqual(build.triangles.count, 2)
-        XCTAssertTrue(build.lightTriangleIndices.isEmpty)
+        XCTAssertTrue(build.lights.isEmpty)
     }
 
     func testInstanceAccelerationBuildsTopLevelInstanceBounds() throws {
@@ -116,12 +118,47 @@ final class BVHFlattenerTests: XCTestCase {
         let acceleration = try InstanceAccelerationBuilder().build(scene: scene)
         let triangles = acceleration.materializedTriangles()
 
-        XCTAssertEqual(acceleration.meshes.count, 2)
+        XCTAssertEqual(acceleration.meshes.count, 1)
         XCTAssertEqual(acceleration.instances.count, 2)
         XCTAssertFalse(acceleration.meshes[0].localBVH.isEmpty)
         XCTAssertFalse(acceleration.topLevelBVH.isEmpty)
         XCTAssertEqual(acceleration.topLevelBVH.nodes[0].boundsMin.x, -2.5, accuracy: 0.0001)
         XCTAssertEqual(acceleration.topLevelBVH.nodes[0].boundsMax.x, 2.5, accuracy: 0.0001)
+        XCTAssertEqual(Set(triangles.map(\.objectID)), [0, 1])
+    }
+
+    func testInstanceAccelerationCanSkipLocalBVHForHardwarePath() throws {
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(1, 1, 1)))
+        let box = Mesh.box(size: SIMD3<Float>(1, 1, 1))
+
+        scene.add(mesh: box, material: material, transform: .translation(SIMD3<Float>(0, 0, 0)))
+
+        let acceleration = try InstanceAccelerationBuilder(buildsLocalBVH: false).build(scene: scene)
+        let triangles = acceleration.materializedTriangles()
+
+        XCTAssertEqual(acceleration.meshes.count, 1)
+        XCTAssertTrue(acceleration.meshes[0].localBVH.isEmpty)
+        XCTAssertFalse(acceleration.topLevelBVH.isEmpty)
+        XCTAssertEqual(triangles.count, 12)
+        XCTAssertEqual(Set(triangles.map(\.objectID)), [0])
+    }
+
+    func testInstanceAccelerationReusesIdenticalMeshRecords() throws {
+        var scene = RenderScene()
+        let red = scene.addMaterial(Material(baseColor: SIMD3<Float>(1, 0, 0)))
+        let blue = scene.addMaterial(Material(baseColor: SIMD3<Float>(0, 0, 1)))
+        let sharedMesh = Mesh.box(size: SIMD3<Float>(1, 1, 1))
+
+        scene.add(mesh: sharedMesh, material: red, transform: .translation(SIMD3<Float>(-1, 0, 0)))
+        scene.add(mesh: sharedMesh, material: blue, transform: .translation(SIMD3<Float>(1, 0, 0)))
+
+        let acceleration = try InstanceAccelerationBuilder().build(scene: scene)
+        let triangles = acceleration.materializedTriangles()
+
+        XCTAssertEqual(acceleration.meshes.count, 1)
+        XCTAssertEqual(acceleration.instances.count, 2)
+        XCTAssertEqual(Set(triangles.map(\.materialID)), [red.rawValue, blue.rawValue])
         XCTAssertEqual(Set(triangles.map(\.objectID)), [0, 1])
     }
 

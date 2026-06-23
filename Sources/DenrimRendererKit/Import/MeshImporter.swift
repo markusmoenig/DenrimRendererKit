@@ -70,12 +70,12 @@ private enum OBJMeshImporter {
 
         for (lineIndex, rawLine) in source.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
             let lineNumber = lineIndex + 1
-            let line = stripComment(String(rawLine)).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !line.isEmpty else {
-                continue
-            }
-
-            let tokens = line.split(whereSeparator: \.isWhitespace).map(String.init)
+            let uncommentedLine = rawLine.split(
+                separator: "#",
+                maxSplits: 1,
+                omittingEmptySubsequences: false
+            ).first ?? ""
+            let tokens = uncommentedLine.split(whereSeparator: \.isWhitespace)
             guard let command = tokens.first else {
                 continue
             }
@@ -137,14 +137,7 @@ private enum OBJMeshImporter {
         return Mesh(vertices: vertices, indices: indices, normals: normals, texcoords: texcoords)
     }
 
-    private static func stripComment(_ line: String) -> String {
-        guard let commentStart = line.firstIndex(of: "#") else {
-            return line
-        }
-        return String(line[..<commentStart])
-    }
-
-    private static func float(_ token: String, line: Int) throws -> Float {
+    private static func float(_ token: some StringProtocol, line: Int) throws -> Float {
         guard let value = Float(token) else {
             throw MeshLoadingError.invalidOBJ("invalid number '\(token)'", line: line)
         }
@@ -152,13 +145,13 @@ private enum OBJMeshImporter {
     }
 
     private static func parseFaceVertex(
-        _ token: String,
+        _ token: some StringProtocol,
         positions: Int,
         texcoords: Int,
         normals: Int,
         line: Int
     ) throws -> FaceVertex {
-        let parts = token.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        let parts = token.split(separator: "/", omittingEmptySubsequences: false)
         guard !parts.isEmpty, parts.count <= 3 else {
             throw MeshLoadingError.invalidOBJ("unsupported face vertex '\(token)'", line: line)
         }
@@ -174,14 +167,14 @@ private enum OBJMeshImporter {
         )
     }
 
-    private static func resolveIndex(_ token: String, count: Int, line: Int) throws -> Int {
+    private static func resolveIndex(_ token: some StringProtocol, count: Int, line: Int) throws -> Int {
         guard let rawIndex = Int(token), rawIndex != 0 else {
-            throw MeshLoadingError.invalidIndex(token, line: line)
+            throw MeshLoadingError.invalidIndex(String(token), line: line)
         }
 
         let index = rawIndex > 0 ? rawIndex - 1 : count + rawIndex
         guard index >= 0, index < count else {
-            throw MeshLoadingError.invalidIndex(token, line: line)
+            throw MeshLoadingError.invalidIndex(String(token), line: line)
         }
         return index
     }

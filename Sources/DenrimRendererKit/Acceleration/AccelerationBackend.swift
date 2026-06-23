@@ -6,7 +6,7 @@ struct AccelerationBuild {
     var materials: [GPUMaterial]
     var textureDescriptors: [GPUTextureDescriptor]
     var texturePixels: [SIMD4<Float>]
-    var lightTriangleIndices: [UInt32]
+    var lights: [GPULightRecord]
     var bvh: FlatBVH
     var instanceAcceleration: InstanceAcceleration
     var metalRayTracingExperiment: MetalRayTracingExperiment?
@@ -17,11 +17,16 @@ protocol AccelerationBackend {
 }
 
 struct LinearTriangleAccelerationBackend: AccelerationBackend {
+    var buildsFlatBVH: Bool = true
+
     func build(scene: RenderScene) throws -> AccelerationBuild {
-        let instanceAcceleration = try InstanceAccelerationBuilder().build(scene: scene)
+        let instanceAcceleration = try InstanceAccelerationBuilder(
+            buildsLocalBVH: buildsFlatBVH
+        ).build(scene: scene)
         let triangles = instanceAcceleration.materializedTriangles()
-        let bvh = BVHBuilder().build(triangles: triangles)
-        let flatBVH = BVHFlattener().flatten(bvh)
+        let flatBVH = buildsFlatBVH
+            ? BVHFlattener().flatten(BVHBuilder().build(triangles: triangles))
+            : FlatBVH(nodes: [], primitiveIndices: [])
         let materialResources = Self.gpuMaterialsAndTextures(scene: scene)
 
         return AccelerationBuild(
@@ -29,7 +34,7 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
             materials: materialResources.materials,
             textureDescriptors: materialResources.descriptors,
             texturePixels: materialResources.pixels,
-            lightTriangleIndices: Self.lightTriangleIndices(
+            lights: Self.lightRecords(
                 triangles: triangles,
                 materials: materialResources.materials
             ),
@@ -83,24 +88,31 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
         return (materials, descriptors, pixels)
     }
 
-    private static func lightTriangleIndices(
+    private static func lightRecords(
         triangles: [GPUTriangle],
         materials: [GPUMaterial]
-    ) -> [UInt32] {
+    ) -> [GPULightRecord] {
         guard !materials.isEmpty else {
             return []
         }
 
-        return triangles.enumerated().compactMap { index, triangle -> UInt32? in
+        return triangles.enumerated().compactMap { index, triangle -> GPULightRecord? in
             let materialIndex = min(Int(triangle.materialID), materials.count - 1)
             let material = materials[materialIndex]
             guard max(material.emission.x, material.emission.y, material.emission.z) > 0 else {
                 return nil
             }
-            guard triangleArea(triangle) > 0 else {
+            let area = triangleArea(triangle)
+            guard area > 0 else {
                 return nil
             }
-            return UInt32(index)
+            return GPULightRecord(
+                triangleIndex: UInt32(index),
+                materialIndex: UInt32(materialIndex),
+                area: area,
+                padding: 0,
+                normal: SIMD4<Float>(triangleNormal(triangle), 0)
+            )
         }
     }
 
@@ -108,5 +120,11 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
         let a = triangle.v1.xyz - triangle.v0.xyz
         let b = triangle.v2.xyz - triangle.v0.xyz
         return simd_length(simd_cross(a, b)) * 0.5
+    }
+
+    private static func triangleNormal(_ triangle: GPUTriangle) -> SIMD3<Float> {
+        let a = triangle.v1.xyz - triangle.v0.xyz
+        let b = triangle.v2.xyz - triangle.v0.xyz
+        return simd_normalize(simd_cross(a, b))
     }
 }

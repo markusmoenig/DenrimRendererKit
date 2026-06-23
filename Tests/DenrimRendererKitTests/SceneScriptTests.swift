@@ -112,6 +112,22 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(scene.materials[0].normalMap, .solid(SIMD4<Float>(1, 0.5, 0.5, 1)))
     }
 
+    func testSceneScriptCanDeriveNormalMapFromTexture() throws {
+        let source = """
+        texture height checker 0 0 0 1 1 1 1 1 linear
+        texture derived normalFrom height strength 0.8
+        material wood 1 1 1 baseColorTexture height normalMap derived
+        """
+
+        let scene = try SceneScript.parse(source)
+        let normalMap = try XCTUnwrap(scene.materials[0].normalMap)
+
+        XCTAssertEqual(normalMap.width, 2)
+        XCTAssertEqual(normalMap.height, 2)
+        XCTAssertEqual(normalMap.samplingMode, .linear)
+        XCTAssertNotEqual(normalMap.pixels[0], SIMD4<Float>(0.5, 0.5, 1, 1))
+    }
+
     func testSceneScriptLoadsImageTextureRelativeToBaseURL() throws {
         let baseURL = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("DenrimRendererKit-SceneScriptImageTexture", isDirectory: true)
@@ -142,6 +158,43 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(texture.pixels[1].w, Float(128) / 255, accuracy: 0.004)
     }
 
+    func testSceneScriptAssetCacheReusesDecodedImageTexturesUntilCleared() throws {
+        let baseURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("DenrimRendererKit-SceneScriptTextureCache", isDirectory: true)
+        try FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
+        let textureURL = baseURL.appendingPathComponent("albedo.png")
+        let cache = SceneAssetCache()
+        let source = """
+        texture albedo image albedo.png color linear sampler nearest
+        material textured 1 1 1 baseColorTexture albedo
+        """
+
+        _ = try writeFixturePNG(
+            url: textureURL,
+            width: 1,
+            height: 1,
+            rgba: [255, 0, 0, 255]
+        )
+        let firstScene = try SceneScript.parse(source, baseURL: baseURL, assetCache: cache)
+        let firstTexture = try XCTUnwrap(firstScene.materials[0].baseColorTexture)
+        XCTAssertEqual(firstTexture.pixels[0], SIMD4<Float>(1, 0, 0, 1))
+
+        _ = try writeFixturePNG(
+            url: textureURL,
+            width: 1,
+            height: 1,
+            rgba: [0, 0, 255, 255]
+        )
+        let cachedScene = try SceneScript.parse(source, baseURL: baseURL, assetCache: cache)
+        let cachedTexture = try XCTUnwrap(cachedScene.materials[0].baseColorTexture)
+        XCTAssertEqual(cachedTexture.pixels[0], SIMD4<Float>(1, 0, 0, 1))
+
+        cache.removeAll()
+        let reloadedScene = try SceneScript.parse(source, baseURL: baseURL, assetCache: cache)
+        let reloadedTexture = try XCTUnwrap(reloadedScene.materials[0].baseColorTexture)
+        XCTAssertEqual(reloadedTexture.pixels[0], SIMD4<Float>(0, 0, 1, 1))
+    }
+
     func testSceneScriptLoadsMeshRelativeToBaseURL() throws {
         let baseURL = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("DenrimRendererKit-SceneScriptMesh", isDirectory: true)
@@ -161,6 +214,31 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(scene.materials.count, 1)
         XCTAssertEqual(scene.meshInstances.count, 1)
         XCTAssertEqual(compiled.triangles.count, 2)
+    }
+
+    func testSceneScriptAssetCacheReusesDecodedMeshesUntilCleared() throws {
+        let baseURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("DenrimRendererKit-SceneScriptMeshCache", isDirectory: true)
+        try FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
+        let meshURL = baseURL.appendingPathComponent("fixture.ply")
+        let cache = SceneAssetCache()
+        let source = """
+        mesh fixture fixture.ply
+        material clay 0.8 0.7 0.6
+        instance fixture clay 0 0 0 1 1 1
+        """
+
+        try writeFixturePLY(url: meshURL, halfExtent: 0.5)
+        let firstScene = try SceneScript.parse(source, baseURL: baseURL, assetCache: cache)
+        XCTAssertEqual(firstScene.meshInstances[0].mesh.vertices[0].x, -0.5, accuracy: 0.0001)
+
+        try writeFixturePLY(url: meshURL, halfExtent: 2.0)
+        let cachedScene = try SceneScript.parse(source, baseURL: baseURL, assetCache: cache)
+        XCTAssertEqual(cachedScene.meshInstances[0].mesh.vertices[0].x, -0.5, accuracy: 0.0001)
+
+        cache.removeAll()
+        let reloadedScene = try SceneScript.parse(source, baseURL: baseURL, assetCache: cache)
+        XCTAssertEqual(reloadedScene.meshInstances[0].mesh.vertices[0].x, -2.0, accuracy: 0.0001)
     }
 
     func testSceneScriptTexturedSceneRendersAOVs() throws {
@@ -280,6 +358,36 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(scene.materials.count, 1)
         XCTAssertEqual(scene.meshInstances.count, 1)
         XCTAssertEqual(compiled.triangles.count, 2)
+    }
+
+    func testSceneScriptMeshCanFlipOBJTextureV() throws {
+        let baseURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("DenrimRendererKit-SceneScriptMeshFlipV", isDirectory: true)
+        try FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
+        try """
+        v -0.5 -0.5 0
+        v 0.5 -0.5 0
+        v 0.5 0.5 0
+        vt 0.25 0.2
+        vt 0.75 0.2
+        vt 0.75 0.8
+        f 1/1 2/2 3/3
+        """.write(to: baseURL.appendingPathComponent("fixture.obj"), atomically: true, encoding: .utf8)
+        try """
+        material clay 0.82 0.42 0.26 roughness 0.8
+        mesh fixture fixture.obj flipV
+        instance fixture clay 0 0 0 1 1 1
+        """.write(to: baseURL.appendingPathComponent("scene.denrim"), atomically: true, encoding: .utf8)
+
+        let scene = try SceneScript.parse(contentsOf: baseURL.appendingPathComponent("scene.denrim"))
+        let texcoords = try XCTUnwrap(scene.meshInstances.first?.mesh.texcoords)
+
+        XCTAssertEqual(texcoords[0].x, 0.25, accuracy: 0.0001)
+        XCTAssertEqual(texcoords[0].y, 0.8, accuracy: 0.0001)
+        XCTAssertEqual(texcoords[1].x, 0.75, accuracy: 0.0001)
+        XCTAssertEqual(texcoords[1].y, 0.8, accuracy: 0.0001)
+        XCTAssertEqual(texcoords[2].x, 0.75, accuracy: 0.0001)
+        XCTAssertEqual(texcoords[2].y, 0.2, accuracy: 0.0001)
     }
 
     func testSceneScriptFileParsingReportsIncludeCycles() throws {
@@ -402,7 +510,7 @@ final class SceneScriptTests: XCTestCase {
         return url
     }
 
-    private func writeFixturePLY(url: URL) throws {
+    private func writeFixturePLY(url: URL, halfExtent: Float = 0.5) throws {
         let source = """
         ply
         format ascii 1.0
@@ -413,10 +521,10 @@ final class SceneScriptTests: XCTestCase {
         element face 1
         property list uchar int vertex_indices
         end_header
-        -0.5 -0.5 0
-        0.5 -0.5 0
-        0.5 0.5 0
-        -0.5 0.5 0
+        -\(halfExtent) -\(halfExtent) 0
+        \(halfExtent) -\(halfExtent) 0
+        \(halfExtent) \(halfExtent) 0
+        -\(halfExtent) \(halfExtent) 0
         4 0 1 2 3
         """
         try source.write(to: url, atomically: true, encoding: .utf8)

@@ -90,6 +90,41 @@ final class HardwareTraversalParityTests: XCTestCase {
         }
     }
 
+    func testHardwareTraversalReusedMeshInstancesMatchFlatBVH() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+        guard device.supportsRaytracing else {
+            throw XCTSkip("Metal ray tracing is not supported on this device.")
+        }
+
+        let renderer = try DenrimRenderer(device: device)
+        let scene = reusedMeshInstanceScene()
+        let settings = RenderSettings(width: 40, height: 40, maxBounces: 1)
+        let flatSession = try renderer.makeSession(
+            scene: scene,
+            settings: settings,
+            accelerationMode: .flatBVH
+        )
+        let hardwareSession = try renderer.makeSession(
+            scene: scene,
+            settings: settings,
+            accelerationMode: .metalRayTracing
+        )
+
+        try flatSession.renderNextSample()
+        try hardwareSession.renderNextSample()
+
+        for output in [RenderOutput.depth, .normal, .albedo, .materialID, .objectID] {
+            assertPixelsMatch(
+                try flatSession.pixels(for: output),
+                try hardwareSession.pixels(for: output),
+                tolerance: 0.0005,
+                context: "reused mesh instances \(output)"
+            )
+        }
+    }
+
     func testHardwareTraversalBeautyMetricsMatchFlatBVH() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw XCTSkip("No Metal device available.")
@@ -145,6 +180,47 @@ final class HardwareTraversalParityTests: XCTestCase {
             SIMD3<Float>(1, 1, 0),
             SIMD3<Float>(-1, 1, 0)
         ), material: material)
+        return scene
+    }
+
+    private func reusedMeshInstanceScene() -> RenderScene {
+        var scene = RenderScene(
+            camera: Camera(
+                origin: SIMD3<Float>(0, 0.7, 3.8),
+                target: SIMD3<Float>(0, 0.35, 0),
+                verticalFieldOfViewDegrees: 42
+            )
+        )
+        let floor = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.45, 0.47, 0.48)))
+        let red = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.2, 0.12)))
+        let blue = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.16, 0.38, 0.9)))
+        let green = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.2, 0.8, 0.32)))
+        let subject = Mesh.box(size: SIMD3<Float>(0.55, 0.7, 0.45))
+
+        scene.add(mesh: .quad(
+            SIMD3<Float>(-2.2, 0, 2.0),
+            SIMD3<Float>(2.2, 0, 2.0),
+            SIMD3<Float>(2.2, 0, -1.5),
+            SIMD3<Float>(-2.2, 0, -1.5)
+        ), material: floor)
+        scene.add(
+            mesh: subject,
+            material: red,
+            transform: Transform.translation(SIMD3<Float>(-0.8, 0.35, 0))
+                * Transform.rotationY(radians: -0.25)
+        )
+        scene.add(
+            mesh: subject,
+            material: blue,
+            transform: Transform.translation(SIMD3<Float>(0, 0.35, 0.02))
+                * Transform.rotationY(radians: 0.12)
+        )
+        scene.add(
+            mesh: subject,
+            material: green,
+            transform: Transform.translation(SIMD3<Float>(0.8, 0.35, -0.04))
+                * Transform.rotationY(radians: 0.32)
+        )
         return scene
     }
 

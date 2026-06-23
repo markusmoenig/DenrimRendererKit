@@ -1,0 +1,17 @@
+{
+  "assetPath" : "Examples\/SceneScripts\/MaterialVariants\/dragon-material-variants.denrim",
+  "createdAt" : "2026-06-21T10:45:56Z",
+  "deviceName" : "Apple M1 Max",
+  "height" : 64,
+  "maxBounces" : 4,
+  "pixelSamplesPerSecond" : 2285772.9089941457,
+  "renderSeconds" : 0.0017919540405273438,
+  "rendererCreateSeconds" : 0.04898405075073242,
+  "samples" : 1,
+  "samplesPerSecond" : 558.0500266098989,
+  "sceneLoadSeconds" : 0.11962103843688965,
+  "sceneName" : "script",
+  "sessionCreateSeconds" : 0.6736049652099609,
+  "totalSeconds" : 0.8440020084381104,
+  "width" : 64
+}

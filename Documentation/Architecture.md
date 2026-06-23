@@ -83,7 +83,7 @@ The BVH is flattened into Metal-friendly buffers:
 
 `MetalRayTracingAccelerationBackend` currently wraps the flat BVH backend and, on devices where `supportsRaytracing` is true, creates per-mesh BLAS resources, a TLAS resource over scene instances, and shader-side local triangle / instance buffers. `MetalRayTracingTraversalProbe` can trace a single ray against that TLAS and compare the result with CPU intersection. `pathTraceHardwareKernel` now uses the TLAS for bounce and shadow intersections when `RenderSession` can bind the hardware resources; `pathTraceKernel` remains the flat BVH fallback. Tests can force either backend through an internal acceleration mode to compare deterministic primary AOVs.
 
-Scene compilation builds a compact emissive triangle index list for direct light sampling. Both the flat BVH and hardware TLAS kernels iterate that list instead of scanning every triangle in the scene and filtering non-emissive materials at shading time.
+Scene compilation builds compact emissive light records for direct light sampling. Each record stores the triangle index, material index, area, and geometric normal, so both the flat BVH and hardware TLAS kernels avoid scanning every triangle and avoid recomputing per-light area/normal data at each shading point.
 
 ## Current Lighting
 
@@ -98,7 +98,8 @@ The first path tracing kernel supports:
 * ImageIO texture asset loading with explicit sRGB or linear import into `Texture2D`.
 * Packed texture nearest and bilinear filtering shared by flat BVH and hardware TLAS kernels.
 * Emissive triangle lights.
-* Direct area-light sampling from a compiled emissive triangle light list for faster Cornell Box convergence.
+* Direct area-light sampling from compiled emissive light records for faster Cornell Box convergence.
+* First-pass MIS using power-heuristic weights between direct light samples and BSDF-sampled emissive hits.
 * Cosine-weighted diffuse bounce sampling for non-metallic energy.
 * Progressive accumulation.
 * Optional transparent background behavior for beauty output alpha and PNG export.
@@ -123,4 +124,4 @@ The albedo output preserves primary material opacity in alpha. Fully transparent
 
 They are used for tests, denoising/export groundwork, and public output readback.
 
-The public API exposes these outputs through `RenderOutput`. Applications can read exact floating-point pixels or export selected outputs to visualization PNGs. The PNG path uses output-specific encoding: beauty tonemapping with alpha preservation, display gamma and opacity alpha preservation for albedo, display gamma for normals, dynamic visible-depth normalization, deterministic palette colors for material/object IDs, and neutral-gray signed motion-vector visualization.
+The public API exposes these outputs through `RenderOutput`. Applications can read exact floating-point pixels or export selected outputs to visualization PNGs. The PNG path uses output-specific encoding: ACES-fitted beauty tonemapping with alpha preservation, display gamma and opacity alpha preservation for albedo, display gamma for normals, dynamic visible-depth normalization, deterministic palette colors for material/object IDs, and neutral-gray signed motion-vector visualization.

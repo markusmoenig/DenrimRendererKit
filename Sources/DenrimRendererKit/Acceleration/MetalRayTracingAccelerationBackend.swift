@@ -60,10 +60,16 @@ struct MetalRayTracingExperiment {
 struct MetalRayTracingAccelerationBackend: AccelerationBackend {
     var device: MTLDevice
     var commandQueue: MTLCommandQueue?
+    var buildsFlatBVH: Bool
 
-    init(device: MTLDevice, commandQueue: MTLCommandQueue? = nil) {
+    init(
+        device: MTLDevice,
+        commandQueue: MTLCommandQueue? = nil,
+        buildsFlatBVH: Bool = true
+    ) {
         self.device = device
         self.commandQueue = commandQueue ?? device.makeCommandQueue()
+        self.buildsFlatBVH = buildsFlatBVH
     }
 
     var supportsRayTracing: Bool {
@@ -71,7 +77,7 @@ struct MetalRayTracingAccelerationBackend: AccelerationBackend {
     }
 
     func build(scene: RenderScene) throws -> AccelerationBuild {
-        var build = try LinearTriangleAccelerationBackend().build(scene: scene)
+        var build = try LinearTriangleAccelerationBackend(buildsFlatBVH: buildsFlatBVH).build(scene: scene)
         build.metalRayTracingExperiment = try makeExperiment(
             instanceAcceleration: build.instanceAcceleration
         )
@@ -159,22 +165,23 @@ struct MetalRayTracingAccelerationBackend: AccelerationBackend {
                 (resource.meshIndex, blasIndex)
             }
         )
-        let instanceDescriptors = try instanceAcceleration.instances.map { instance in
+        let instanceDescriptors = try instanceAcceleration.instances.enumerated().map { instanceIndex, instance in
             guard let blasIndex = blasIndexByMeshIndex[instance.meshIndex] else {
                 throw DenrimRendererError.invalidScene("Instance references mesh without Metal ray tracing BLAS.")
             }
 
-            var descriptor = MTLAccelerationStructureInstanceDescriptor()
+            var descriptor = MTLAccelerationStructureUserIDInstanceDescriptor()
             descriptor.transformationMatrix = Self.packedFloat4x3(from: instance.transform.matrix)
             descriptor.options = .opaque
             descriptor.mask = 0xFF
             descriptor.intersectionFunctionTableOffset = 0
             descriptor.accelerationStructureIndex = UInt32(blasIndex)
+            descriptor.userID = UInt32(instanceIndex)
             return descriptor
         }
 
         let instanceDescriptorBufferLength =
-            MemoryLayout<MTLAccelerationStructureInstanceDescriptor>.stride * instanceDescriptors.count
+            MemoryLayout<MTLAccelerationStructureUserIDInstanceDescriptor>.stride * instanceDescriptors.count
         guard let instanceDescriptorBuffer = device.makeBuffer(
             bytes: instanceDescriptors,
             length: instanceDescriptorBufferLength,
@@ -185,7 +192,8 @@ struct MetalRayTracingAccelerationBackend: AccelerationBackend {
 
         let descriptor = MTLInstanceAccelerationStructureDescriptor()
         descriptor.instanceDescriptorBuffer = instanceDescriptorBuffer
-        descriptor.instanceDescriptorStride = MemoryLayout<MTLAccelerationStructureInstanceDescriptor>.stride
+        descriptor.instanceDescriptorStride = MemoryLayout<MTLAccelerationStructureUserIDInstanceDescriptor>.stride
+        descriptor.instanceDescriptorType = .userID
         descriptor.instanceCount = instanceDescriptors.count
         descriptor.instancedAccelerationStructures = blasResources.map(\.accelerationStructure)
         descriptor.usage = .preferFastBuild

@@ -3,6 +3,6 @@ material satinPlastic 0.18 0.45 0.95 roughness 0.32 specular 0.75 specularColor 
 material brushedMetal 0.86 0.72 0.46 roughness 0.42 metallic 1
 material polishedMetal 0.72 0.78 0.82 roughness 0.12 metallic 1
 material coatedGreen 0.22 0.72 0.38 roughness 0.46 specular 0.85 ior 1.52 clearcoat 0.55 clearcoatRoughness 0.05 clearcoatIOR 1.55
-material floor 0.58 0.58 0.54 roughness 0.85
-material back 0.34 0.37 0.43 roughness 0.75
-material light 1 1 1 emission 1 0.93 0.82 9
+material floor 0.26 0.28 0.30 roughness 0.9
+material back 0.26 0.28 0.30 roughness 0.9
+material light 1 1 1 emission 1 0.93 0.82 2

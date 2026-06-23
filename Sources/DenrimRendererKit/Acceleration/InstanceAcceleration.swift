@@ -69,8 +69,11 @@ struct InstanceAcceleration {
 }
 
 struct InstanceAccelerationBuilder {
+    var buildsLocalBVH: Bool = true
+
     func build(scene: RenderScene) throws -> InstanceAcceleration {
         var meshes: [MeshAccelerationRecord] = []
+        var meshIndexByKey: [MeshKey: Int] = [:]
         var instances: [SceneInstanceRecord] = []
 
         for (instanceIndex, instance) in scene.meshInstances.enumerated() {
@@ -79,26 +82,37 @@ struct InstanceAccelerationBuilder {
             }
 
             let objectID = UInt32(instanceIndex)
-            let localTriangles = instance.mesh.gpuTriangles(
-                material: instance.material,
-                transform: .identity,
-                objectID: objectID
-            )
-            let localBounds = Self.bounds(for: localTriangles)
-            let localBVH = BVHFlattener().flatten(BVHBuilder().build(triangles: localTriangles))
-            let meshIndex = meshes.count
-
-            meshes.append(MeshAccelerationRecord(
-                localTriangles: localTriangles,
-                localBounds: localBounds,
-                localBVH: localBVH
-            ))
+            let meshKey = MeshKey(mesh: instance.mesh)
+            let meshIndex: Int
+            if let existingMeshIndex = meshIndexByKey[meshKey] {
+                meshIndex = existingMeshIndex
+            } else {
+                let localTriangles = instance.mesh.gpuTriangles(
+                    material: MaterialID(rawValue: 0),
+                    transform: .identity,
+                    objectID: 0
+                )
+                let localBounds = Self.bounds(for: localTriangles)
+                let localBVH = buildsLocalBVH
+                    ? BVHFlattener().flatten(BVHBuilder().build(triangles: localTriangles))
+                    : FlatBVH(nodes: [], primitiveIndices: [])
+                meshIndex = meshes.count
+                meshIndexByKey[meshKey] = meshIndex
+                meshes.append(MeshAccelerationRecord(
+                    localTriangles: localTriangles,
+                    localBounds: localBounds,
+                    localBVH: localBVH
+                ))
+            }
             instances.append(SceneInstanceRecord(
                 meshIndex: meshIndex,
                 material: instance.material,
                 objectID: objectID,
                 transform: instance.transform,
-                worldBounds: Self.transformedBounds(localBounds, transform: instance.transform)
+                worldBounds: Self.transformedBounds(
+                    meshes[meshIndex].localBounds,
+                    transform: instance.transform
+                )
             ))
         }
 
@@ -133,6 +147,65 @@ struct InstanceAccelerationBuilder {
             }
         }
         return transformed
+    }
+}
+
+private struct MeshKey: Hashable {
+    private var vertices: [SIMD3<Float>]
+    private var indices: [UInt32]
+    private var normals: [SIMD3<Float>]
+    private var texcoords: [SIMD2<Float>]
+
+    init(mesh: Mesh) {
+        self.vertices = mesh.vertices
+        self.indices = mesh.indices
+        self.normals = mesh.normals
+        self.texcoords = mesh.texcoords
+    }
+
+    static func == (lhs: MeshKey, rhs: MeshKey) -> Bool {
+        lhs.vertices.elementsEqual(rhs.vertices, by: simdEqual)
+            && lhs.indices == rhs.indices
+            && lhs.normals.elementsEqual(rhs.normals, by: simdEqual)
+            && lhs.texcoords.elementsEqual(rhs.texcoords, by: simdEqual)
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(vertices.count)
+        for vertex in vertices {
+            combine(vertex, into: &hasher)
+        }
+        hasher.combine(indices)
+        hasher.combine(normals.count)
+        for normal in normals {
+            combine(normal, into: &hasher)
+        }
+        hasher.combine(texcoords.count)
+        for texcoord in texcoords {
+            combine(texcoord, into: &hasher)
+        }
+    }
+
+    private static func simdEqual(_ lhs: SIMD3<Float>, _ rhs: SIMD3<Float>) -> Bool {
+        lhs.x.bitPattern == rhs.x.bitPattern
+            && lhs.y.bitPattern == rhs.y.bitPattern
+            && lhs.z.bitPattern == rhs.z.bitPattern
+    }
+
+    private static func simdEqual(_ lhs: SIMD2<Float>, _ rhs: SIMD2<Float>) -> Bool {
+        lhs.x.bitPattern == rhs.x.bitPattern
+            && lhs.y.bitPattern == rhs.y.bitPattern
+    }
+
+    private func combine(_ value: SIMD3<Float>, into hasher: inout Hasher) {
+        hasher.combine(value.x.bitPattern)
+        hasher.combine(value.y.bitPattern)
+        hasher.combine(value.z.bitPattern)
+    }
+
+    private func combine(_ value: SIMD2<Float>, into hasher: inout Hasher) {
+        hasher.combine(value.x.bitPattern)
+        hasher.combine(value.y.bitPattern)
     }
 }
 

@@ -58,7 +58,7 @@ Recommended staged properties:
 * Clearcoat: implemented first with clearcoat weight, clearcoat roughness, and clearcoat IOR; later expand to clearcoat tint, thickness, attenuation color, and independent clearcoat normals.
 * Sheen / fuzz: sheen weight, sheen color, sheen roughness.
 * Subsurface: SSS weight, radius, color, scale, and model selection.
-* Emission: emission color, strength, and light-list integration.
+* Emission: emission color, strength, and light-record integration.
 * Layering: material layering or coating as an explicit API rather than a large bag of unrelated fields.
 * Diagnostics: material AOV labels and stable IDs.
 

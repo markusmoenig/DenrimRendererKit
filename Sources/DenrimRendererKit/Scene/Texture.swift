@@ -4,7 +4,7 @@ import ImageIO
 import simd
 
 /// Color encoding used when decoding image assets into linear texture pixels.
-public enum TextureColorEncoding: Sendable {
+public enum TextureColorEncoding: Sendable, Hashable {
     /// Treat source RGB bytes as already linear.
     case linear
 
@@ -13,7 +13,7 @@ public enum TextureColorEncoding: Sendable {
 }
 
 /// Texture sampling mode used by the current packed texture path.
-public enum TextureSamplingMode: UInt32, Sendable {
+public enum TextureSamplingMode: UInt32, Sendable, Hashable {
     /// Select the nearest texel.
     case nearest = 0
 
@@ -148,10 +148,59 @@ public struct Texture2D: Sendable, Equatable {
         try Texture2D(contentsOf: url, colorEncoding: colorEncoding, samplingMode: samplingMode)
     }
 
+    /// Derives a tangent-space normal map from the texture's luminance.
+    ///
+    /// This is useful for lightweight reference scenes that only have albedo
+    /// images but need subtle surface relief for visual validation.
+    public func derivedNormalMap(strength: Float = 1) -> Texture2D {
+        guard width > 0, height > 0, pixels.count == width * height else {
+            return Texture2D(width: width, height: height, pixels: pixels, samplingMode: samplingMode)
+        }
+
+        let clampedStrength = max(strength, 0)
+        var normalPixels: [SIMD4<Float>] = []
+        normalPixels.reserveCapacity(pixels.count)
+
+        for y in 0..<height {
+            for x in 0..<width {
+                let left = luminanceAt(x: x - 1, y: y)
+                let right = luminanceAt(x: x + 1, y: y)
+                let down = luminanceAt(x: x, y: y - 1)
+                let up = luminanceAt(x: x, y: y + 1)
+                let normal = simd_normalize(SIMD3<Float>(
+                    (left - right) * clampedStrength,
+                    (down - up) * clampedStrength,
+                    1
+                ))
+
+                normalPixels.append(SIMD4<Float>(
+                    normal.x * 0.5 + 0.5,
+                    normal.y * 0.5 + 0.5,
+                    normal.z * 0.5 + 0.5,
+                    1
+                ))
+            }
+        }
+
+        return Texture2D(
+            width: width,
+            height: height,
+            pixels: normalPixels,
+            samplingMode: samplingMode
+        )
+    }
+
     private static func sRGBToLinear(_ value: Float) -> Float {
         if value <= 0.04045 {
             return value / 12.92
         }
         return pow((value + 0.055) / 1.055, 2.4)
+    }
+
+    private func luminanceAt(x: Int, y: Int) -> Float {
+        let wrappedX = (x % width + width) % width
+        let clampedY = min(max(y, 0), height - 1)
+        let color = pixels[clampedY * width + wrappedX]
+        return color.x * 0.2126 + color.y * 0.7152 + color.z * 0.0722
     }
 }

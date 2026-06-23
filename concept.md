@@ -1072,7 +1072,8 @@ Implemented:
 * Scene script nearest/linear sampler selection for generated textures
 * Emissive triangle lights
 * Direct area-light sampling
-* Compiled emissive triangle light list shared by the flat BVH and hardware TLAS direct-light kernels
+* Compiled emissive triangle light records shared by the flat BVH and hardware TLAS direct-light kernels
+* First-pass MIS weights between direct light sampling and BSDF-sampled emissive hits
 * Built-in material reference scene for diffuse, GGX-style rough metallic, specular tint / IOR, clearcoat control, and emissive baseline checks
 * Material-variant reference scene for rendering one caller-supplied mesh with matte, plastic, metallic, polished, and clearcoat material variants
 * Bundled SceneScript material-variant template with reusable material include, self-contained PLY fixture, and checked-in rendered output for visual validation
@@ -1116,14 +1117,16 @@ Implemented:
 * Primary-hit camera motion vector AOV using previous-camera projection
 * Internal acceleration backend abstraction
 * Internal BLAS/TLAS-style instance acceleration model with local mesh BVHs, instance records, and top-level instance bounds
+* Deduplicated mesh acceleration records so repeated mesh instances share local BVH / BLAS setup
 * CPU BVH builder with bounds, centroid splitting, leaf nodes, and tests
 * Flattened GPU-friendly BVH node and primitive-index buffers
 * GPU BVH traversal in the Metal path tracing kernel
-* Emissive triangle light-list scene compilation with tests for emissive and non-emissive scenes
+* Emissive triangle light-record scene compilation with tests for emissive and non-emissive scenes
 * Materialized mesh instance transforms for the current flat-triangle Metal compute path
 * Experimental Metal ray tracing acceleration backend scaffold that detects `supportsRaytracing`, creates per-mesh BLAS resources, creates a TLAS resource over scene instances, records acceleration-structure and scratch-buffer sizes, and preserves the current BVH render path
 * Minimal Metal ray tracing traversal probe kernel that traces a ray against the TLAS and is tested against the CPU triangle intersector
 * Production Metal ray tracing path tracing kernel that traverses the TLAS for bounce and shadow intersections on supported devices, with flat BVH fallback still available
+* Automatic hardware traversal sessions skip unused flat fallback BVH construction when Metal ray tracing resources are available
 * Internal render acceleration mode selection for parity testing and fallback validation
 * First hardware-vs-flat-BVH parity render test comparing depth, normal, and albedo AOVs
 * Built-in Cornell Box and material reference hardware-vs-flat-BVH parity tests comparing depth, normal, albedo, material ID, and object ID outputs
@@ -1153,5 +1156,5 @@ Immediate next milestones:
 3. Add performance baselines for Cornell, material reference, material variants, and Stanford Dragon scenes by Apple device class and backend.
 4. Continue staging the Denrim Standard Surface API, then add semi-transparent blending, shadow transparency, transmission, refraction, and layered material behavior.
 5. Extend motion vectors to include object/instance deformation on top of instance records.
-6. Add importance sampling over the compiled emissive light list for scenes with many or unevenly sized lights.
+6. Improve MIS with importance sampling over compiled emissive light records for scenes with many or unevenly sized lights.
 7. Add stored metrics or image baselines for the transparent material reference scene once semi-transparent transport stabilizes.

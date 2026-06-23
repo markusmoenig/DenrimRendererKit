@@ -46,6 +46,14 @@ struct GPUTextureDescriptor {
     uint4 metadata;
 };
 
+struct GPULightRecord {
+    uint triangleIndex;
+    uint materialIndex;
+    float area;
+    float padding;
+    float4 normal;
+};
+
 struct GPURenderConstants {
     uint width;
     uint height;
@@ -84,6 +92,7 @@ struct Hit {
     float3 bitangent;
     uint materialID;
     uint objectID;
+    uint primitiveID;
 };
 
 static uint hash(uint value) {
@@ -204,6 +213,97 @@ static float3 evaluateMaterialBRDF(
     float3 diffuse = clearcoatAttenuation * (float3(1.0f) - fresnel) * (1.0f - metallic) * baseColor * inversePi;
 
     return diffuse + clearcoatAttenuation * specular + clearcoatSpecular * clearcoat;
+}
+
+static float powerHeuristic(float pdfA, float pdfB) {
+    float a2 = pdfA * pdfA;
+    float b2 = pdfB * pdfB;
+    return a2 / max(a2 + b2, 1e-8f);
+}
+
+static void materialLobeProbabilities(
+    GPUMaterial material,
+    thread float &diffuseProbability,
+    thread float &specularProbability,
+    thread float &clearcoatProbability
+) {
+    float metallic = clamp(material.parameters.y, 0.0f, 1.0f);
+    float3 baseColor = material.baseColor.xyz;
+    float3 f0 = materialF0(material);
+    float clearcoat = materialClearcoat(material);
+    float clearcoatF0 = materialClearcoatF0(material);
+    float diffuseWeight = luminance(baseColor * (1.0f - metallic));
+    float specularWeight = luminance(f0);
+    float clearcoatWeight = clearcoat * max(clearcoatF0, 0.0f);
+    float totalLobeWeight = max(diffuseWeight + specularWeight + clearcoatWeight, 1e-5f);
+
+    clearcoatProbability = clearcoatWeight > 1e-5f
+        ? clamp(clearcoatWeight / totalLobeWeight, 0.02f, 0.35f)
+        : 0.0f;
+    specularProbability = specularWeight > 1e-5f
+        ? clamp(specularWeight / totalLobeWeight, 0.08f, 0.92f - clearcoatProbability)
+        : 0.0f;
+    diffuseProbability = max(0.0f, 1.0f - specularProbability - clearcoatProbability);
+}
+
+static float ggxReflectionPDF(float3 normal, float3 viewDirection, float3 lightDirection, float roughness) {
+    float3 halfVector = normalize(viewDirection + lightDirection);
+    float nDotH = max(dot(normal, halfVector), 0.0f);
+    float vDotH = max(dot(viewDirection, halfVector), 0.0f);
+    if (nDotH <= 0.0f || vDotH <= 0.0f) {
+        return 0.0f;
+    }
+    return distributionGGX(nDotH, roughness) * nDotH / max(4.0f * vDotH, 1e-5f);
+}
+
+static float materialBSDFPDF(
+    GPUMaterial material,
+    float3 normal,
+    float3 viewDirection,
+    float3 lightDirection
+) {
+    constexpr float inversePi = 0.31830988618f;
+    float nDotL = max(dot(normal, lightDirection), 0.0f);
+    float nDotV = max(dot(normal, viewDirection), 0.0f);
+    if (nDotL <= 0.0f || nDotV <= 0.0f) {
+        return 0.0f;
+    }
+
+    float diffuseProbability;
+    float specularProbability;
+    float clearcoatProbability;
+    materialLobeProbabilities(material, diffuseProbability, specularProbability, clearcoatProbability);
+
+    float roughness = clamp(material.parameters.x, 0.02f, 1.0f);
+    float clearcoatRoughness = materialClearcoatRoughness(material);
+    float diffusePDF = nDotL * inversePi;
+    float specularPDF = ggxReflectionPDF(normal, viewDirection, lightDirection, roughness);
+    float clearcoatPDF = ggxReflectionPDF(normal, viewDirection, lightDirection, clearcoatRoughness);
+    return diffuseProbability * diffusePDF
+        + specularProbability * specularPDF
+        + clearcoatProbability * clearcoatPDF;
+}
+
+static float lightSolidAnglePDF(float distanceSquared, float cosLight, float area) {
+    return distanceSquared / max(cosLight * area, 1e-6f);
+}
+
+static float lightPDFForHit(Hit hit, float3 incomingDirection, constant GPULightRecord *lights, uint lightCount) {
+    for (uint index = 0; index < lightCount; ++index) {
+        constant GPULightRecord &light = lights[index];
+        if (light.triangleIndex != hit.primitiveID || light.area <= 0.0f) {
+            continue;
+        }
+
+        float cosLight = max(0.0f, dot(light.normal.xyz, -incomingDirection));
+        if (cosLight <= 0.0f) {
+            return 0.0f;
+        }
+
+        return lightSolidAnglePDF(hit.t * hit.t, cosLight, light.area);
+    }
+
+    return 0.0f;
 }
 
 static float3 sampleGGXHalfVector(float2 u, float3 normal, float roughness) {
@@ -341,6 +441,7 @@ static Hit emptyHit() {
     closest.bitangent = float3(0, 0, 1);
     closest.materialID = 0;
     closest.objectID = 0;
+    closest.primitiveID = 0;
     return closest;
 }
 
@@ -362,6 +463,7 @@ static Hit intersectSceneLinear(Ray ray, constant GPURenderConstants &constants,
             closest.bitangent = bitangent;
             closest.materialID = triangles[index].materialID;
             closest.objectID = triangles[index].objectID;
+            closest.primitiveID = index;
         }
     }
 
@@ -420,6 +522,7 @@ static Hit intersectScene(
                     closest.bitangent = bitangent;
                     closest.materialID = triangles[triangleIndex].materialID;
                     closest.objectID = triangles[triangleIndex].objectID;
+                    closest.primitiveID = triangleIndex;
                 }
             }
         } else {
@@ -487,6 +590,7 @@ static Hit intersectSceneHardware(
     hit.bitangent = transformRayTracingNormal(instance, triangle.bitangent.xyz);
     hit.materialID = instance.metadata.y;
     hit.objectID = instance.metadata.z;
+    hit.primitiveID = triangleIndex;
     return hit;
 }
 
@@ -592,22 +696,23 @@ static float3 sampleDirectLighting(
     constant GPUMaterial *materials,
     constant GPUAccelerationNode *nodes,
     constant uint *primitiveIndices,
-    constant uint *lightIndices,
+    constant GPULightRecord *lights,
     thread uint &state
 ) {
     float3 direct = float3(0);
 
     for (uint index = 0; index < constants.lightCount; ++index) {
-        uint lightTriangleIndex = lightIndices[index];
+        constant GPULightRecord &light = lights[index];
+        uint lightTriangleIndex = light.triangleIndex;
         if (lightTriangleIndex >= constants.triangleCount) {
             continue;
         }
 
         constant GPUTriangle &lightTriangle = triangles[lightTriangleIndex];
-        GPUMaterial lightMaterial = materials[min(lightTriangle.materialID, constants.materialCount - 1u)];
+        GPUMaterial lightMaterial = materials[min(light.materialIndex, constants.materialCount - 1u)];
         float3 emission = lightMaterial.emission.xyz;
 
-        float area = triangleArea(lightTriangle);
+        float area = light.area;
         if (area <= 0.0f) {
             continue;
         }
@@ -618,12 +723,16 @@ static float3 sampleDirectLighting(
         float distanceToLight = sqrt(distanceSquared);
         float3 lightDirection = toLight / distanceToLight;
         float cosSurface = max(0.0f, dot(hit.normal, lightDirection));
-        float3 lightNormal = triangleNormal(lightTriangle);
+        float3 lightNormal = light.normal.xyz;
         float cosLight = max(0.0f, dot(lightNormal, -lightDirection));
 
         if (cosSurface <= 0.0f || cosLight <= 0.0f) {
             continue;
         }
+
+        float lightPDF = lightSolidAnglePDF(distanceSquared, cosLight, area);
+        float bsdfPDF = materialBSDFPDF(surfaceMaterial, hit.normal, viewDirection, lightDirection);
+        float misWeight = powerHeuristic(lightPDF, bsdfPDF);
 
         Ray shadowRay;
         shadowRay.origin = hit.position + hit.normal * 0.001f;
@@ -636,7 +745,7 @@ static float3 sampleDirectLighting(
 
         float geometryTerm = cosSurface * cosLight * area / max(distanceSquared, 1e-6f);
         float3 brdf = evaluateMaterialBRDF(surfaceMaterial, hit.normal, viewDirection, lightDirection);
-        direct += brdf * emission * geometryTerm;
+        direct += brdf * emission * geometryTerm * misWeight;
     }
 
     return direct;
@@ -652,22 +761,23 @@ static float3 sampleDirectLightingHardware(
     acceleration_structure<instancing> scene,
     constant GPUTriangle *localTriangles,
     constant GPURayTracingInstance *rtInstances,
-    constant uint *lightIndices,
+    constant GPULightRecord *lights,
     thread uint &state
 ) {
     float3 direct = float3(0);
 
     for (uint index = 0; index < constants.lightCount; ++index) {
-        uint lightTriangleIndex = lightIndices[index];
+        constant GPULightRecord &light = lights[index];
+        uint lightTriangleIndex = light.triangleIndex;
         if (lightTriangleIndex >= constants.triangleCount) {
             continue;
         }
 
         constant GPUTriangle &lightTriangle = triangles[lightTriangleIndex];
-        GPUMaterial lightMaterial = materials[min(lightTriangle.materialID, constants.materialCount - 1u)];
+        GPUMaterial lightMaterial = materials[min(light.materialIndex, constants.materialCount - 1u)];
         float3 emission = lightMaterial.emission.xyz;
 
-        float area = triangleArea(lightTriangle);
+        float area = light.area;
         if (area <= 0.0f) {
             continue;
         }
@@ -678,12 +788,16 @@ static float3 sampleDirectLightingHardware(
         float distanceToLight = sqrt(distanceSquared);
         float3 lightDirection = toLight / distanceToLight;
         float cosSurface = max(0.0f, dot(hit.normal, lightDirection));
-        float3 lightNormal = triangleNormal(lightTriangle);
+        float3 lightNormal = light.normal.xyz;
         float cosLight = max(0.0f, dot(lightNormal, -lightDirection));
 
         if (cosSurface <= 0.0f || cosLight <= 0.0f) {
             continue;
         }
+
+        float lightPDF = lightSolidAnglePDF(distanceSquared, cosLight, area);
+        float bsdfPDF = materialBSDFPDF(surfaceMaterial, hit.normal, viewDirection, lightDirection);
+        float misWeight = powerHeuristic(lightPDF, bsdfPDF);
 
         Ray shadowRay;
         shadowRay.origin = hit.position + hit.normal * 0.001f;
@@ -696,7 +810,7 @@ static float3 sampleDirectLightingHardware(
 
         float geometryTerm = cosSurface * cosLight * area / max(distanceSquared, 1e-6f);
         float3 brdf = evaluateMaterialBRDF(surfaceMaterial, hit.normal, viewDirection, lightDirection);
-        direct += brdf * emission * geometryTerm;
+        direct += brdf * emission * geometryTerm * misWeight;
     }
 
     return direct;
@@ -719,7 +833,7 @@ kernel void pathTraceKernel(
     constant GPUCamera &previousCamera [[buffer(6)]],
     constant GPUTextureDescriptor *textureDescriptors [[buffer(10)]],
     constant float4 *texturePixels [[buffer(11)]],
-    constant uint *lightIndices [[buffer(12)]],
+    constant GPULightRecord *lights [[buffer(12)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     if (gid.x >= constants.width || gid.y >= constants.height) {
@@ -742,6 +856,7 @@ kernel void pathTraceKernel(
     float3 radiance = float3(0);
     float3 throughput = float3(1);
     float outputAlpha = 1.0f;
+    float previousBSDFPDF = 0.0f;
 
     Hit primaryHit = emptyHit();
     GPUMaterial primaryMaterial;
@@ -777,8 +892,13 @@ kernel void pathTraceKernel(
             primaryMaterial = material;
         }
 
-        radiance += throughput * material.emission.xyz;
         if (maxComponent(material.emission.xyz) > 0.0f) {
+            float emissionWeight = 1.0f;
+            if (bounce > 0u && previousBSDFPDF > 0.0f) {
+                float lightPDF = lightPDFForHit(hit, ray.direction, lights, constants.lightCount);
+                emissionWeight = powerHeuristic(previousBSDFPDF, lightPDF);
+            }
+            radiance += throughput * material.emission.xyz * emissionWeight;
             break;
         }
 
@@ -791,7 +911,7 @@ kernel void pathTraceKernel(
             materials,
             nodes,
             primitiveIndices,
-            lightIndices,
+            lights,
             state
         );
         float roughness = clamp(material.parameters.x, 0.02f, 1.0f);
@@ -813,9 +933,9 @@ kernel void pathTraceKernel(
         float3 diffuseDirection = orientHemisphere(localDirection, hit.normal);
         float3 nextDirection;
         float lobeSample = randomFloat(state);
+        float3 viewDirection = -ray.direction;
 
         if (lobeSample < clearcoatProbability) {
-            float3 viewDirection = -ray.direction;
             float3 halfVector = sampleGGXHalfVector(float2(randomFloat(state), randomFloat(state)), hit.normal, clearcoatRoughness);
             nextDirection = normalize(reflect(ray.direction, halfVector));
             if (dot(nextDirection, hit.normal) <= 0.0f) {
@@ -823,7 +943,6 @@ kernel void pathTraceKernel(
             }
             throughput *= clearcoat * fresnelSchlick(max(dot(viewDirection, halfVector), 0.0f), float3(clearcoatF0));
         } else if (lobeSample < clearcoatProbability + specularProbability) {
-            float3 viewDirection = -ray.direction;
             float3 halfVector = sampleGGXHalfVector(float2(randomFloat(state), randomFloat(state)), hit.normal, roughness);
             nextDirection = normalize(reflect(ray.direction, halfVector));
             if (dot(nextDirection, hit.normal) <= 0.0f) {
@@ -836,6 +955,7 @@ kernel void pathTraceKernel(
             throughput *= baseColor * (1.0f - metallic);
         }
 
+        previousBSDFPDF = materialBSDFPDF(material, hit.normal, viewDirection, nextDirection);
         ray.origin = hit.position + hit.normal * 0.001f;
         ray.direction = nextDirection;
 
@@ -899,7 +1019,7 @@ kernel void pathTraceHardwareKernel(
     constant GPURayTracingInstance *rtInstances [[buffer(9)]],
     constant GPUTextureDescriptor *textureDescriptors [[buffer(10)]],
     constant float4 *texturePixels [[buffer(11)]],
-    constant uint *lightIndices [[buffer(12)]],
+    constant GPULightRecord *lights [[buffer(12)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     (void)nodes;
@@ -925,6 +1045,7 @@ kernel void pathTraceHardwareKernel(
     float3 radiance = float3(0);
     float3 throughput = float3(1);
     float outputAlpha = 1.0f;
+    float previousBSDFPDF = 0.0f;
 
     Hit primaryHit = emptyHit();
     GPUMaterial primaryMaterial;
@@ -960,8 +1081,13 @@ kernel void pathTraceHardwareKernel(
             primaryMaterial = material;
         }
 
-        radiance += throughput * material.emission.xyz;
         if (maxComponent(material.emission.xyz) > 0.0f) {
+            float emissionWeight = 1.0f;
+            if (bounce > 0u && previousBSDFPDF > 0.0f) {
+                float lightPDF = lightPDFForHit(hit, ray.direction, lights, constants.lightCount);
+                emissionWeight = powerHeuristic(previousBSDFPDF, lightPDF);
+            }
+            radiance += throughput * material.emission.xyz * emissionWeight;
             break;
         }
 
@@ -975,7 +1101,7 @@ kernel void pathTraceHardwareKernel(
             scene,
             localTriangles,
             rtInstances,
-            lightIndices,
+            lights,
             state
         );
         float roughness = clamp(material.parameters.x, 0.02f, 1.0f);
@@ -997,9 +1123,9 @@ kernel void pathTraceHardwareKernel(
         float3 diffuseDirection = orientHemisphere(localDirection, hit.normal);
         float3 nextDirection;
         float lobeSample = randomFloat(state);
+        float3 viewDirection = -ray.direction;
 
         if (lobeSample < clearcoatProbability) {
-            float3 viewDirection = -ray.direction;
             float3 halfVector = sampleGGXHalfVector(float2(randomFloat(state), randomFloat(state)), hit.normal, clearcoatRoughness);
             nextDirection = normalize(reflect(ray.direction, halfVector));
             if (dot(nextDirection, hit.normal) <= 0.0f) {
@@ -1007,7 +1133,6 @@ kernel void pathTraceHardwareKernel(
             }
             throughput *= clearcoat * fresnelSchlick(max(dot(viewDirection, halfVector), 0.0f), float3(clearcoatF0));
         } else if (lobeSample < clearcoatProbability + specularProbability) {
-            float3 viewDirection = -ray.direction;
             float3 halfVector = sampleGGXHalfVector(float2(randomFloat(state), randomFloat(state)), hit.normal, roughness);
             nextDirection = normalize(reflect(ray.direction, halfVector));
             if (dot(nextDirection, hit.normal) <= 0.0f) {
@@ -1020,6 +1145,7 @@ kernel void pathTraceHardwareKernel(
             throughput *= baseColor * (1.0f - metallic);
         }
 
+        previousBSDFPDF = materialBSDFPDF(material, hit.normal, viewDirection, nextDirection);
         ray.origin = hit.position + hit.normal * 0.001f;
         ray.direction = nextDirection;
 

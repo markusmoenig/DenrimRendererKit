@@ -44,6 +44,7 @@ Initial public types:
 * `Camera`
 * `Transform`
 * `SceneScript`
+* `SceneAssetCache`
 * `Ray`
 * `SurfaceHit`
 * `Mesh`
@@ -57,6 +58,8 @@ Initial public types:
 * `TextureLoadingError`
 
 This API is intentionally small. The next steps are to add DocC comments to each public type, stabilize the scene-building API, and introduce internal renderer abstractions without exposing GPU implementation details.
+
+`Texture2D.derivedNormalMap(strength:)` can create a lightweight tangent-space normal map from an existing texture's luminance. It is intended for examples and albedo-only validation assets, not as a replacement for authored material maps.
 
 ## Scene Construction
 
@@ -163,7 +166,7 @@ Motion vectors use `RenderSettings.previousCamera` and store previous-screen min
 
 Fully transparent material surfaces currently act as camera-ray cutouts, allowing primary rays to continue to the next visible surface. Semi-transparent blending, shadow transparency, and refractive transmission are future material transport work.
 
-PNG export is visualization-oriented. Beauty output is tonemapped with alpha preservation, albedo output is gamma encoded with material opacity alpha preservation, normal output is gamma encoded for display, depth output is normalized across visible primary-hit depth values, material/object ID outputs use deterministic palette colors, and motion vectors are visualized around neutral gray. Use `pixels(for:)` when exact floating-point AOV values are needed.
+PNG export is visualization-oriented. Beauty output uses an ACES-fitted filmic tonemap with alpha preservation, albedo output is gamma encoded with material opacity alpha preservation, normal output is gamma encoded for display, depth output is normalized across visible primary-hit depth values, material/object ID outputs use deterministic palette colors, and motion vectors are visualized around neutral gray. Use `pixels(for:)` when exact floating-point AOV values are needed.
 
 ## Built-In Reference Scenes
 
@@ -187,6 +190,16 @@ let session = try renderer.makeSession(scene: scene)
 
 The first script version supports comments, includes, camera, solid/checker/image texture definitions, OBJ/PLY mesh definitions, material texture bindings, quad, box, and imported mesh instance commands. Geometry commands support readable named groups such as `origin(0, 1.4, 4)`, `a(-2, 0, 2)`, `position(0, 0, 0)`, `scale(1, 1, 1)`, and `rotationY(0.25)` while keeping older positional forms for compatibility. Image texture and mesh paths can be resolved relative to a caller-provided `baseURL`, with explicit sRGB/linear color decoding and nearest/linear sampler selection for images. It is intended for reference tests, examples, and future Denrim Render automation.
 Reusable script fragments can be composed with `include` commands by using `SceneScript.parse(contentsOf:)` for file-based scripts or by passing an include resolver closure to `SceneScript.parse`.
+
+Interactive products can keep decoded meshes and image textures warm across repeated parses with `SceneAssetCache`:
+
+```swift
+let assetCache = SceneAssetCache()
+let scene = try SceneScript.parse(contentsOf: sceneURL, assetCache: assetCache)
+assetCache.removeAll()
+```
+
+The cache keeps assets stable until cleared, which is useful for render previews and benchmarks where only camera, material, or sampling settings are changing.
 
 The preview CLI can render script files directly:
 

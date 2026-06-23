@@ -51,6 +51,7 @@ public enum SceneScript {
     public static func parse(
         _ source: String,
         baseURL: URL? = nil,
+        assetCache: SceneAssetCache? = nil,
         includeResolver: IncludeResolver? = nil
     ) throws -> RenderScene {
         var scene = RenderScene()
@@ -66,6 +67,7 @@ public enum SceneScript {
             textures: &textures,
             meshes: &meshes,
             baseURL: baseURL,
+            assetCache: assetCache,
             includeResolver: includeResolver,
             includeStack: &includeStack
         )
@@ -74,12 +76,13 @@ public enum SceneScript {
     }
 
     /// Parses a scene script file, resolving relative assets and includes beside that file.
-    public static func parse(contentsOf url: URL) throws -> RenderScene {
+    public static func parse(contentsOf url: URL, assetCache: SceneAssetCache? = nil) throws -> RenderScene {
         let source = try String(contentsOf: url, encoding: .utf8)
         let baseURL = url.deletingLastPathComponent()
         return try parse(
             source,
             baseURL: baseURL,
+            assetCache: assetCache,
             includeResolver: { includeName in
                 try String(
                     contentsOf: assetURL(path: includeName, baseURL: baseURL),
@@ -96,6 +99,7 @@ public enum SceneScript {
         textures: inout [String: Texture2D],
         meshes: inout [String: Mesh],
         baseURL: URL?,
+        assetCache: SceneAssetCache?,
         includeResolver: IncludeResolver?,
         includeStack: inout [String]
     ) throws {
@@ -130,6 +134,7 @@ public enum SceneScript {
                     textures: &textures,
                     meshes: &meshes,
                     baseURL: baseURL,
+                    assetCache: assetCache,
                     includeResolver: includeResolver,
                     includeStack: &includeStack
                 )
@@ -137,10 +142,21 @@ public enum SceneScript {
             case "camera":
                 scene.camera = try parseCamera(tokens, line: lineNumber)
             case "texture":
-                let parsed = try parseTexture(tokens, line: lineNumber, baseURL: baseURL)
+                let parsed = try parseTexture(
+                    tokens,
+                    line: lineNumber,
+                    baseURL: baseURL,
+                    textures: textures,
+                    assetCache: assetCache
+                )
                 textures[parsed.name] = parsed.texture
             case "mesh":
-                let parsed = try parseMeshAsset(tokens, line: lineNumber, baseURL: baseURL)
+                let parsed = try parseMeshAsset(
+                    tokens,
+                    line: lineNumber,
+                    baseURL: baseURL,
+                    assetCache: assetCache
+                )
                 meshes[parsed.name] = parsed.mesh
             case "material":
                 let parsed = try parseMaterial(tokens, line: lineNumber, textures: textures)
@@ -232,7 +248,9 @@ public enum SceneScript {
     private static func parseTexture(
         _ tokens: [String],
         line: Int,
-        baseURL: URL?
+        baseURL: URL?,
+        textures: [String: Texture2D],
+        assetCache: SceneAssetCache?
     ) throws -> (name: String, texture: Texture2D) {
         guard tokens.count >= 4 else {
             throw SceneScriptError.invalidArgumentCount("texture", line: line)
@@ -261,19 +279,41 @@ public enum SceneScript {
                 throw SceneScriptError.invalidArgumentCount("texture", line: line)
             }
             let options = try imageTextureOptions(tokens.dropFirst(4), line: line)
+            let url = assetURL(path: tokens[3], baseURL: baseURL)
             do {
                 return (
                     name,
-                    try Texture2D(
-                        contentsOf: assetURL(path: tokens[3], baseURL: baseURL),
+                    try assetCache?.texture(
+                        contentsOf: url,
                         colorEncoding: options.colorEncoding,
                         samplingMode: options.samplingMode
-                    )
+                    ) ?? Texture2D(
+                            contentsOf: url,
+                            colorEncoding: options.colorEncoding,
+                            samplingMode: options.samplingMode
+                        )
                 )
             } catch {
                 throw SceneScriptError.textureLoadFailed(tokens[3], line: line)
             }
         default:
+            if kind == "normalfrom" || kind == "normalfromtexture" {
+                guard tokens.count == 4 || tokens.count == 6 else {
+                    throw SceneScriptError.invalidArgumentCount("texture", line: line)
+                }
+
+                var strength: Float = 1
+                if tokens.count == 6 {
+                    guard tokens[4].lowercased() == "strength" else {
+                        throw SceneScriptError.invalidArgumentCount("texture", line: line)
+                    }
+                    strength = try floats([tokens[5]], line: line)[0]
+                }
+
+                let sourceTexture = try texture(named: tokens[3], line: line, textures: textures)
+                return (name, sourceTexture.derivedNormalMap(strength: strength))
+            }
+
             throw SceneScriptError.invalidArgumentCount("texture", line: line)
         }
     }
@@ -281,17 +321,39 @@ public enum SceneScript {
     private static func parseMeshAsset(
         _ tokens: [String],
         line: Int,
-        baseURL: URL?
+        baseURL: URL?,
+        assetCache: SceneAssetCache?
     ) throws -> (name: String, mesh: Mesh) {
-        guard tokens.count == 3 else {
+        guard tokens.count == 3 || tokens.count == 4 else {
             throw SceneScriptError.invalidArgumentCount("mesh", line: line)
         }
 
+        var flipsV = false
+        if tokens.count == 4 {
+            guard tokens[3].lowercased() == "flipv" else {
+                throw SceneScriptError.invalidArgumentCount("mesh", line: line)
+            }
+            flipsV = true
+        }
+
+        let url = assetURL(path: tokens[2], baseURL: baseURL)
         do {
-            return (tokens[1], try Mesh(contentsOf: assetURL(path: tokens[2], baseURL: baseURL)))
+            return (
+                tokens[1],
+                try assetCache?.mesh(contentsOf: url, flipsV: flipsV)
+                    ?? loadMesh(contentsOf: url, flipsV: flipsV)
+            )
         } catch {
             throw SceneScriptError.meshLoadFailed(tokens[2], line: line)
         }
+    }
+
+    private static func loadMesh(contentsOf url: URL, flipsV: Bool) throws -> Mesh {
+        var mesh = try Mesh(contentsOf: url)
+        if flipsV {
+            mesh.flipTexcoordV()
+        }
+        return mesh
     }
 
     private static func parseMaterial(

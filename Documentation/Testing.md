@@ -57,11 +57,12 @@ Current test foundation:
 * CPU intersector tests provide deterministic triangle-hit reference behavior.
 * Transform tests validate point transforms, normal transforms, materialized instance transforms, and top-level instance bounds during scene compilation.
 * BVH builder tests validate empty builds, leaf construction, primitive remapping, bounds, and leaf size limits.
-* BVH flattener tests validate GPU node metadata, primitive index buffers, emissive triangle light-list compilation, instance acceleration records, top-level instance bounds, acceleration backend output, and guarded Metal ray tracing BLAS/TLAS resource builds.
+* BVH flattener tests validate GPU node metadata, primitive index buffers, emissive light-record compilation, instance acceleration records, top-level instance bounds, acceleration backend output, and guarded Metal ray tracing BLAS/TLAS resource builds.
 * Metal ray tracing traversal probe tests compare hardware TLAS traversal against the CPU triangle intersector on supported devices.
 * Render session tests validate that Metal sessions prepare acceleration buffers and select the production hardware traversal path on supported devices.
 * Hardware traversal parity tests force both hardware TLAS and flat BVH backends, then compare primary depth, normal, albedo, material ID, and object ID AOVs for simple, Cornell Box, and material reference scenes.
 * Beauty parity metrics compare average and maximum RGB differences between hardware TLAS and flat BVH reference-scene renders.
+* Reference render metrics cover the MIS-adjusted energy distribution for Cornell Box and material scenes.
 * AOV tests validate that depth, normal, albedo, material ID, object ID, and motion vector textures exist, receive primary-surface data, preserve material opacity in albedo alpha, can be read through the public output API, can be exported as PNGs, and use output-specific PNG visualization encoding.
 * Opacity transport tests validate that fully transparent primary surfaces reveal rear albedo and emission instead of behaving like opaque blockers.
 * Texture loading tests validate PNG dimensions, alpha, missing-file errors, and explicit sRGB versus linear import behavior.

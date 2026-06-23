@@ -1,0 +1,159 @@
+# DiningRoom quality/performance fixture translated from Examples/Assets/DiningRoom/diningroom.scene.
+# Reference image: Examples/Assets/DiningRoom/DiningRoom.jpg rendered in glsl_pathtracer.
+# Current limitations: spectrans/glass are approximated with glossy dielectric settings.
+# The source fov(60) is treated as horizontal FOV at 1280x720; Denrim uses vertical FOV.
+camera origin(-4.5, 1.6, 0.0) target(0.0, 0.8, 0.0) fov(36)
+
+texture WoodenFloorTexture image ../../../Assets/DiningRoom/diningroom/textures/floor.jpg color srgb sampler linear
+texture WoodenBoxTexture image ../../../Assets/DiningRoom/diningroom/textures/box.jpg color srgb sampler linear
+texture WoodenBoxNormal normalFrom WoodenBoxTexture strength 0.4
+texture PaintingTexture image ../../../Assets/DiningRoom/diningroom/textures/painting.jpg color srgb sampler linear
+texture ShelfBookCover1Texture image ../../../Assets/DiningRoom/diningroom/textures/shelfbook1.jpg color srgb sampler linear
+texture ShelfBookCover2Texture image ../../../Assets/DiningRoom/diningroom/textures/shelfbook2.jpg color srgb sampler linear
+texture Book1Texture image ../../../Assets/DiningRoom/diningroom/textures/book1.jpg color srgb sampler linear
+texture Book2Texture image ../../../Assets/DiningRoom/diningroom/textures/book2.jpg color srgb sampler linear
+texture Book3Texture image ../../../Assets/DiningRoom/diningroom/textures/book3.jpg color srgb sampler linear
+texture Book4Texture image ../../../Assets/DiningRoom/diningroom/textures/book4.jpg color srgb sampler linear
+texture Book6Texture image ../../../Assets/DiningRoom/diningroom/textures/book6.jpg color srgb sampler linear
+texture Book7Texture image ../../../Assets/DiningRoom/diningroom/textures/book7.jpg color srgb sampler linear
+texture Book8Texture image ../../../Assets/DiningRoom/diningroom/textures/book8.jpg color srgb sampler linear
+texture Book9Texture image ../../../Assets/DiningRoom/diningroom/textures/book9.jpg color srgb sampler linear
+texture Book10Texture image ../../../Assets/DiningRoom/diningroom/textures/book10.jpg color srgb sampler linear
+texture Book11Texture image ../../../Assets/DiningRoom/diningroom/textures/book11.jpg color srgb sampler linear
+texture Book14Texture image ../../../Assets/DiningRoom/diningroom/textures/book14.jpg color srgb sampler linear
+texture Book15Texture image ../../../Assets/DiningRoom/diningroom/textures/book15.jpg color srgb sampler linear
+texture Book16Texture image ../../../Assets/DiningRoom/diningroom/textures/book16.jpg color srgb sampler linear
+texture Book17Texture image ../../../Assets/DiningRoom/diningroom/textures/book17.jpg color srgb sampler linear
+texture Book18Texture image ../../../Assets/DiningRoom/diningroom/textures/book18.jpg color srgb sampler linear
+
+material BlackPlastic 0.005 0.005 0.005 roughness 0.2 specular 0.55
+material StainlessSteel 0.82 0.82 0.78 roughness 0.02 metallic 1
+material Aluminium 1.0 1.0 1.0 roughness 0.15 metallic 1
+material Glass 0.713 0.8 0.8 roughness 0.01 specular 1 ior 1.45 clearcoat 1 clearcoatRoughness 0.02
+material Ceramic 0.787 0.758 0.737 roughness 0.03 specular 0.8 clearcoat 1 clearcoatRoughness 0.03
+material WoodenFloor 1 1 1 roughness 0.05 specular 0.4 baseColorTexture WoodenFloorTexture
+material WoodenBox 1 1 1 roughness 0.18 specular 0.3 baseColorTexture WoodenBoxTexture normalMap WoodenBoxNormal
+material Painting 1 1 1 roughness 0.55 baseColorTexture PaintingTexture
+material Walls 0.842 0.842 0.842 roughness 0.2
+material Green 0.016 0.047 0.002 roughness 0.2
+material DarkGlossy 0.009 0.009 0.009 roughness 0.05 specular 0.8 clearcoat 1 clearcoatRoughness 0.04
+material ShelfBookCover1 1 1 1 roughness 0.45 baseColorTexture ShelfBookCover1Texture
+material ShelfBookCover2 1 1 1 roughness 0.45 baseColorTexture ShelfBookCover2Texture
+material Book1 1 1 1 roughness 0.5 baseColorTexture Book1Texture
+material Book2 1 1 1 roughness 0.5 baseColorTexture Book2Texture
+material Book3 1 1 1 roughness 0.5 baseColorTexture Book3Texture
+material Book4 1 1 1 roughness 0.5 baseColorTexture Book4Texture
+material Book6 1 1 1 roughness 0.5 baseColorTexture Book6Texture
+material Book7 1 1 1 roughness 0.5 baseColorTexture Book7Texture
+material Book8 1 1 1 roughness 0.5 baseColorTexture Book8Texture
+material Book9 1 1 1 roughness 0.5 baseColorTexture Book9Texture
+material Book10 1 1 1 roughness 0.5 baseColorTexture Book10Texture
+material Book11 1 1 1 roughness 0.5 baseColorTexture Book11Texture
+material Book14 1 1 1 roughness 0.5 baseColorTexture Book14Texture
+material Book15 1 1 1 roughness 0.5 baseColorTexture Book15Texture
+material Book16 1 1 1 roughness 0.5 baseColorTexture Book16Texture
+material Book17 1 1 1 roughness 0.5 baseColorTexture Book17Texture
+material Book18 1 1 1 roughness 0.5 baseColorTexture Book18Texture
+material TopLight 1 1 1 emission 1 1 1 1
+material ShelfLight1 1 1 1 emission 4 4.5 5 1
+material ShelfLight2 1 1 1 emission 4 4.5 5 1
+material ShelfLight3 1 1 1 emission 4 4.5 5 1
+material WindowLight 1 1 1 emission 0.8 0.75 0.7 1
+material FrontLight 1 1 1 emission 1.0 0.77 0.65 1
+
+mesh bucket1 ../../../Assets/DiningRoom/diningroom/bucket1.obj flipV
+mesh bucket2 ../../../Assets/DiningRoom/diningroom/bucket2.obj flipV
+mesh bucket3 ../../../Assets/DiningRoom/diningroom/bucket3.obj flipV
+mesh bucket4 ../../../Assets/DiningRoom/diningroom/bucket4.obj flipV
+mesh chair_legs ../../../Assets/DiningRoom/diningroom/chair_legs.obj
+mesh chair_nuts ../../../Assets/DiningRoom/diningroom/chair_nuts.obj
+mesh chair_rubber_pegs ../../../Assets/DiningRoom/diningroom/chair_rubber_pegs.obj
+mesh chair_seats ../../../Assets/DiningRoom/diningroom/chair_seats.obj
+mesh cupboards ../../../Assets/DiningRoom/diningroom/cupboards.obj
+mesh floor ../../../Assets/DiningRoom/diningroom/floor.obj
+mesh floor_frame ../../../Assets/DiningRoom/diningroom/floor_frame.obj
+mesh frame1 ../../../Assets/DiningRoom/diningroom/frame1.obj
+mesh frame2 ../../../Assets/DiningRoom/diningroom/frame2.obj
+mesh left_front_wall ../../../Assets/DiningRoom/diningroom/left_front_wall.obj
+mesh rightwall ../../../Assets/DiningRoom/diningroom/rightwall.obj
+mesh picture1 ../../../Assets/DiningRoom/diningroom/picture1.obj
+mesh picture2 ../../../Assets/DiningRoom/diningroom/picture2.obj
+mesh plant ../../../Assets/DiningRoom/diningroom/plant.obj
+mesh shelf ../../../Assets/DiningRoom/diningroom/shelf.obj
+mesh table_glass ../../../Assets/DiningRoom/diningroom/table_glass.obj
+mesh table_legs ../../../Assets/DiningRoom/diningroom/table_legs.obj
+mesh vase ../../../Assets/DiningRoom/diningroom/vase.obj
+mesh shelf_book1 ../../../Assets/DiningRoom/diningroom/shelf_book1.obj
+mesh shelf_book2 ../../../Assets/DiningRoom/diningroom/shelf_book2.obj
+mesh shelf_objects ../../../Assets/DiningRoom/diningroom/shelf_objects.obj
+mesh shelf_object2 ../../../Assets/DiningRoom/diningroom/shelf_object2.obj
+mesh book1 ../../../Assets/DiningRoom/diningroom/book1.obj
+mesh book2 ../../../Assets/DiningRoom/diningroom/book2.obj
+mesh book3 ../../../Assets/DiningRoom/diningroom/book3.obj
+mesh book4 ../../../Assets/DiningRoom/diningroom/book4.obj
+mesh book5 ../../../Assets/DiningRoom/diningroom/book5.obj
+mesh book6 ../../../Assets/DiningRoom/diningroom/book6.obj
+mesh book7 ../../../Assets/DiningRoom/diningroom/book7.obj
+mesh book8 ../../../Assets/DiningRoom/diningroom/book8.obj
+mesh book9 ../../../Assets/DiningRoom/diningroom/book9.obj
+mesh book10 ../../../Assets/DiningRoom/diningroom/book10.obj
+mesh book11 ../../../Assets/DiningRoom/diningroom/book11.obj
+mesh book12 ../../../Assets/DiningRoom/diningroom/book12.obj
+mesh book13 ../../../Assets/DiningRoom/diningroom/book13.obj
+mesh book14 ../../../Assets/DiningRoom/diningroom/book14.obj
+mesh book15 ../../../Assets/DiningRoom/diningroom/book15.obj
+mesh book16 ../../../Assets/DiningRoom/diningroom/book16.obj
+mesh book17 ../../../Assets/DiningRoom/diningroom/book17.obj
+mesh book18 ../../../Assets/DiningRoom/diningroom/book18.obj
+
+quad TopLight a(-1.698293, 4.893044, 3.361581) b(-1.698293, 4.893044, -3.194531) c(1.917820, 4.893044, -3.194531) d(1.917820, 4.893044, 3.361581)
+quad ShelfLight1 a(-1.910558, 0.434611, -2.445509) b(-0.970558, 0.434611, -2.445509) c(-0.970558, 2.114611, -2.445509) d(-1.910558, 2.114611, -2.445509)
+quad ShelfLight2 a(-0.761083, 0.434611, -2.446883) b(0.178917, 0.434611, -2.446883) c(0.178917, 2.114611, -2.446883) d(-0.761083, 2.114611, -2.446883)
+quad ShelfLight3 a(0.398842, 0.434611, -2.450588) b(1.338842, 0.434611, -2.450588) c(1.338842, 2.114611, -2.450588) d(0.398842, 2.114611, -2.450588)
+quad WindowLight a(-4.376347, 3.258564, 3.033338) b(-4.991669, 0.122242, 3.033338) c(-4.991669, 0.122242, -2.822774) d(-4.376347, 3.258564, -2.822774)
+quad FrontLight a(-4.765844, -0.129837, -0.727901) b(-3.543804, -0.398520, -2.869122) c(-2.650505, 3.664437, -2.869122) d(-3.872545, 3.933120, -0.727901)
+
+instance bucket1 WoodenBox position(0, 0, 0) scale(1, 1, 1)
+instance bucket2 WoodenBox position(0, 0, 0) scale(1, 1, 1)
+instance bucket3 WoodenBox position(0, 0, 0) scale(1, 1, 1)
+instance bucket4 WoodenBox position(0, 0, 0) scale(1, 1, 1)
+instance chair_legs StainlessSteel position(0, 0, 0) scale(1, 1, 1)
+instance chair_nuts StainlessSteel position(0, 0, 0) scale(1, 1, 1)
+instance chair_rubber_pegs BlackPlastic position(0, 0, 0) scale(1, 1, 1)
+instance chair_seats BlackPlastic position(0, 0, 0) scale(1, 1, 1)
+instance cupboards DarkGlossy position(0, 0, 0) scale(1, 1, 1)
+instance floor WoodenFloor position(0, 0, 0) scale(1, 1, 1)
+instance floor_frame WoodenFloor position(0, 0, 0) scale(1, 1, 1)
+instance frame1 StainlessSteel position(0, 0, 0) scale(1, 1, 1)
+instance frame2 StainlessSteel position(0, 0, 0) scale(1, 1, 1)
+instance left_front_wall Walls position(0, 0, 0) scale(1, 1, 1)
+instance rightwall Green position(0, 0, 0) scale(1, 1, 1)
+instance picture1 Painting position(0, 0, 0) scale(1, 1, 1)
+instance picture2 Painting position(0, 0, 0) scale(1, 1, 1)
+instance plant DarkGlossy position(0, 0, 0) scale(1, 1, 1)
+instance shelf Walls position(0, 0, 0) scale(1, 1, 1)
+instance table_glass Glass position(0, 0, 0) scale(1, 1, 1)
+instance table_legs Aluminium position(0, 0, 0) scale(1, 1, 1)
+instance vase Ceramic position(0, 0, 0) scale(1, 1, 1)
+instance shelf_book1 ShelfBookCover1 position(0, 0, 0) scale(1, 1, 1)
+instance shelf_book2 ShelfBookCover2 position(0, 0, 0) scale(1, 1, 1)
+instance shelf_objects Aluminium position(0, 0, 0) scale(1, 1, 1)
+instance shelf_object2 DarkGlossy position(0, 0, 0) scale(1, 1, 1)
+instance book1 Book1 position(0, 0, 0) scale(1, 1, 1)
+instance book2 Book2 position(0, 0, 0) scale(1, 1, 1)
+instance book3 Book3 position(0, 0, 0) scale(1, 1, 1)
+instance book4 Book4 position(0, 0, 0) scale(1, 1, 1)
+instance book5 ShelfBookCover1 position(0, 0, 0) scale(1, 1, 1)
+instance book6 Book6 position(0, 0, 0) scale(1, 1, 1)
+instance book7 Book7 position(0, 0, 0) scale(1, 1, 1)
+instance book8 Book8 position(0, 0, 0) scale(1, 1, 1)
+instance book9 Book9 position(0, 0, 0) scale(1, 1, 1)
+instance book10 Book10 position(0, 0, 0) scale(1, 1, 1)
+instance book11 Book11 position(0, 0, 0) scale(1, 1, 1)
+instance book12 ShelfBookCover2 position(0, 0, 0) scale(1, 1, 1)
+instance book13 Book3 position(0, 0, 0) scale(1, 1, 1)
+instance book14 Book14 position(0, 0, 0) scale(1, 1, 1)
+instance book15 Book15 position(0, 0, 0) scale(1, 1, 1)
+instance book16 Book16 position(0, 0, 0) scale(1, 1, 1)
+instance book17 Book17 position(0, 0, 0) scale(1, 1, 1)
+instance book18 Book18 position(0, 0, 0) scale(1, 1, 1)

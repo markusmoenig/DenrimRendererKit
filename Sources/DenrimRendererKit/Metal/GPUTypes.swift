@@ -38,6 +38,14 @@ struct GPUTextureDescriptor {
     var metadata: SIMD4<UInt32>
 }
 
+struct GPULightRecord {
+    var triangleIndex: UInt32
+    var materialIndex: UInt32
+    var area: Float
+    var padding: Float
+    var normal: SIMD4<Float>
+}
+
 struct GPUAccelerationNode: Equatable {
     var boundsMin: SIMD4<Float>
     var boundsMax: SIMD4<Float>

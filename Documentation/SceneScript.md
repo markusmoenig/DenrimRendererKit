@@ -32,8 +32,12 @@ texture checker checker 1 0 0 1 0 0 1 1 linear
 # texture name image path [color srgb|linear] [sampler nearest|linear]
 texture loadedAlbedo image Textures/albedo.png color srgb sampler linear
 
-# mesh name path
+# texture name normalFrom sourceTexture [strength value]
+texture woodNormal normalFrom loadedAlbedo strength 0.65
+
+# mesh name path [flipV]
 mesh dragon Meshes/dragon.ply
+mesh objWithBottomLeftUVs Meshes/model.obj flipV
 
 # material name r g b emitR emitG emitB strength
 material light 1 1 1 1 0.9 0.7 8
@@ -68,6 +72,16 @@ let scene = try SceneScript.parse(contentsOf: sceneURL)
 let session = try renderer.makeSession(scene: scene)
 ```
 
+Interactive tools can reuse decoded image textures and meshes across parses:
+
+```swift
+let assetCache = SceneAssetCache()
+let scene = try SceneScript.parse(contentsOf: sceneURL, assetCache: assetCache)
+
+// Clear when the user asks to reload changed assets from disk.
+assetCache.removeAll()
+```
+
 Preview CLI usage:
 
 ```sh
@@ -78,7 +92,7 @@ The repository includes a self-contained material-variant script template at `Ex
 
 The Stanford Dragon example lives at `Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim`. Run `./Examples/Tools/render-quality-examples.sh` to fetch the mesh if needed and render persistent reference outputs into `Examples/Renders`.
 
-`SceneScript.parse(contentsOf:)` resolves relative image texture paths, mesh paths, and include paths beside the script file. `SceneScript.parse(_:baseURL:includeResolver:)` is still available for applications that want to provide script source and include policy themselves. If no base URL is passed, relative assets are resolved against the current process directory. Image textures default to `color srgb` and `sampler linear`; generated solid/checker textures default to nearest sampling. Mesh assets use `Mesh(contentsOf:)`, so the current script path supports OBJ and PLY files.
+`SceneScript.parse(contentsOf:)` resolves relative image texture paths, mesh paths, and include paths beside the script file. `SceneScript.parse(_:baseURL:assetCache:includeResolver:)` is still available for applications that want to provide script source, asset cache, and include policy themselves. If no base URL is passed, relative assets are resolved against the current process directory. Image textures default to `color srgb` and `sampler linear`; generated solid/checker textures default to nearest sampling. `normalFrom` derives a tangent-space normal map from an existing texture's luminance, which is useful for reference assets that ship only albedo images. Mesh assets use `Mesh(contentsOf:)`, so the current script path supports OBJ and PLY files. Add `flipV` to a `mesh` command when an imported asset's texture coordinates were authored for bottom-left image origin but the source images are decoded top-down.
 
 Grouped numeric arguments may use commas or whitespace inside parentheses. The older positional forms, such as `quad floor -2 0 2 ...` and `instance dragon clay 0 0 0 1 1 1`, remain supported for compatibility, but examples should prefer named groups because they are easier to read and review.
 

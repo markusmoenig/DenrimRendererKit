@@ -9,7 +9,7 @@
     "maxBrightness": 255.0,
     "uniqueColorEstimate": 68,
     "topCenterMaxBrightness": 255.0,
-    "bottomCenterMaxBrightness": 160.0
+    "bottomCenterMaxBrightness": 244.0
   },
   "tolerance": {
     "averageBrightness": 20.0,

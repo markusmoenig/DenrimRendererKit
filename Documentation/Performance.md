@@ -7,20 +7,33 @@ DenrimRendererKit needs performance evidence from day one. The renderer is allow
 Run the benchmark executable for quick local timing:
 
 ```sh
-swift run denrim-render-benchmark cornell 16 256
-swift run denrim-render-benchmark materials 16 256
-swift run denrim-render-benchmark script 1 64 Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim
+swift run -c release denrim-render-benchmark cornell 16 256
+swift run -c release denrim-render-benchmark materials 16 256
+swift run -c release denrim-render-benchmark script 1 64 Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim
 ```
 
 Write persistent JSON for future comparison:
 
 ```sh
-swift run denrim-render-benchmark \
+swift run -c release denrim-render-benchmark \
     script \
     1 \
     64 \
     Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim \
     --output Examples/Benchmarks/dragon-local-64px-1spp.json
+```
+
+Rectangular renders can be benchmarked with `--width` and `--height`:
+
+```sh
+swift run -c release denrim-render-benchmark \
+    script \
+    1 \
+    160 \
+    Examples/SceneScripts/Quality/DiningRoom/dining-room.denrim \
+    --width 160 \
+    --height 90 \
+    --output Examples/Benchmarks/dining-room-local-160x90-1spp.json
 ```
 
 The JSON records:
@@ -51,12 +64,35 @@ These tests should print timing data and verify that benchmark execution is heal
 
 ## Current Priorities
 
-The Stanford Dragon example currently shows that session / acceleration build time can dominate total runtime. That makes these near-term optimization targets:
+The Stanford Dragon example showed that session / acceleration build time can dominate total runtime. The first fix is now in place:
 
+* Identical mesh data is deduplicated into one mesh acceleration record shared by many instances.
+* Automatic Metal ray tracing sessions skip the large flat fallback BVH when the hardware TLAS path is available.
+* Automatic Metal ray tracing sessions also skip per-mesh local BVHs that are only needed by the CPU/flat fallback path.
+* Emissive triangle lights are compiled into GPU light records with precomputed area and normal data shared by the flat BVH and hardware TLAS direct-light kernels.
+* Direct light samples and BSDF-sampled emissive hits use first-pass MIS weights to reduce double counting and stabilize highlight energy.
+* Forced flat-BVH sessions still build the fallback acceleration buffers for parity testing and unsupported devices.
+
+On an Apple M1 Max, the `dragon-material-variants.denrim` benchmark at 64 px / 1 spp dropped from roughly 4.7 seconds of session creation to roughly 0.67 seconds.
+
+On the same device, the DiningRoom benchmark at 160x90 / 1 spp now reports roughly 5.34 seconds of scene loading, 0.04 seconds of renderer creation, 0.39 seconds of session creation, and 0.04 seconds of rendering. For this fixture, the current first-load bottleneck is OBJ / texture scene loading rather than BLAS / TLAS setup.
+
+DiningRoom is the first manual heavy fixture. It is intentionally not part of normal correctness tests or `render-quality-examples.sh`; run it directly when measuring render quality or acceleration behavior:
+
+```sh
+./Examples/Tools/render-dining-room-quality.sh
+./Examples/Tools/benchmark-dining-room.sh
+```
+
+The scene separates performance costs clearly: OBJ and texture loading, renderer creation, session / acceleration setup, and render sampling are all reported independently by the benchmark JSON.
+
+Remaining near-term optimization targets:
+
+* Use `SceneAssetCache` from Denrim products that repeatedly parse the same scene while changing camera, material, or sampling settings.
+* Cache parsed SceneScript structure where app lifetimes allow it.
 * Avoid rebuilding unchanged BLAS / TLAS data between sessions.
-* Cache loaded meshes and compiled acceleration data where app lifetimes allow it.
+* Cache compiled acceleration data once asset caching is in place.
 * Separate scene compilation time from sample rendering time in benchmarks.
 * Expose backend selection in benchmark output.
 * Add backend-specific baselines for flat BVH and Metal ray tracing paths.
 * Profile GPU occupancy and memory bandwidth in Xcode Instruments.
-

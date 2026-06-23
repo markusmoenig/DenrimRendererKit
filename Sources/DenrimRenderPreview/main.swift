@@ -3,22 +3,56 @@ import Foundation
 import simd
 
 let arguments = CommandLine.arguments
+let positionalArguments = positionalValues(in: arguments)
 let outputURL: URL
 
-if arguments.count > 1 {
-    outputURL = URL(fileURLWithPath: arguments[1])
+if positionalArguments.count > 0 {
+    outputURL = URL(fileURLWithPath: positionalArguments[0])
 } else {
     outputURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         .appendingPathComponent("CornellBox.png")
 }
 
-let samples = arguments.count > 2 ? Int(arguments[2]) ?? 32 : 32
-let size = arguments.count > 3 ? Int(arguments[3]) ?? 512 : 512
-let sceneName = arguments.count > 4 ? arguments[4].lowercased() : "cornell"
-let outputName = arguments.count > 5 ? arguments[5].lowercased() : "beauty"
-let assetPath = arguments.count > 6 ? arguments[6] : nil
+let samples = positionalArguments.count > 1 ? Int(positionalArguments[1]) ?? 32 : 32
+let size = positionalArguments.count > 2 ? Int(positionalArguments[2]) ?? 512 : 512
+let width = optionInt(named: "--width", in: arguments) ?? size
+let height = optionInt(named: "--height", in: arguments) ?? size
+let sceneName = positionalArguments.count > 3 ? positionalArguments[3].lowercased() : "cornell"
+let outputName = positionalArguments.count > 4 ? positionalArguments[4].lowercased() : "beauty"
+let assetPath = positionalArguments.count > 5 ? positionalArguments[5] : nil
 var scene: RenderScene
 let output: RenderOutput
+
+func optionValue(named name: String, in arguments: [String]) -> String? {
+    guard let index = arguments.firstIndex(of: name),
+          arguments.indices.contains(index + 1) else {
+        return nil
+    }
+    return arguments[index + 1]
+}
+
+func optionInt(named name: String, in arguments: [String]) -> Int? {
+    optionValue(named: name, in: arguments).flatMap(Int.init)
+}
+
+func positionalValues(in arguments: [String]) -> [String] {
+    var values: [String] = []
+    var skipNext = false
+    for argument in arguments.dropFirst() {
+        if skipNext {
+            skipNext = false
+            continue
+        }
+        switch argument {
+        case "--width", "--height":
+            skipNext = true
+            continue
+        default:
+            values.append(argument)
+        }
+    }
+    return values
+}
 
 switch sceneName {
 case "materials", "material-reference", "material":
@@ -73,7 +107,7 @@ let previousCamera: Camera? = output == .motionVector
 let renderer = try DenrimRenderer()
 let session = try renderer.makeSession(
     scene: scene,
-    settings: RenderSettings(width: size, height: size, maxBounces: 4, previousCamera: previousCamera)
+    settings: RenderSettings(width: width, height: height, maxBounces: 4, previousCamera: previousCamera)
 )
 
 try session.render(samples: samples)
