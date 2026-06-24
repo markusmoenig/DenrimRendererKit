@@ -2,10 +2,39 @@ import Foundation
 import Metal
 import simd
 
-enum RenderAccelerationMode {
-    case automatic
-    case flatBVH
-    case metalRayTracing
+/// Acceleration backend request for diagnostics, benchmarks, and parity testing.
+///
+/// Most applications should use `automatic`.
+public enum RenderAccelerationMode: String, Sendable {
+    /// Use the best supported backend for the current device.
+    case automatic = "automatic"
+
+    /// Force the software-built flat BVH Metal compute traversal path.
+    case flatBVH = "flat-bvh"
+
+    /// Request Metal ray tracing TLAS / BLAS traversal where available.
+    case metalRayTracing = "metal-ray-tracing"
+}
+
+/// Runtime acceleration backend state for a render session.
+public struct RenderAccelerationInfo: Sendable {
+    /// Backend requested when the session was created.
+    public var requestedMode: RenderAccelerationMode
+
+    /// Backend actively used by the path tracing kernel.
+    public var activeMode: RenderAccelerationMode
+
+    /// Whether the current Metal device reports ray tracing support.
+    public var supportsMetalRayTracing: Bool
+
+    /// Whether a Metal ray tracing TLAS was built.
+    public var hasMetalTLAS: Bool
+
+    /// Whether flat BVH fallback buffers were built.
+    public var hasFlatBVH: Bool
+
+    /// Number of flat BVH nodes, or zero when no flat BVH was built.
+    public var flatBVHNodeCount: Int
 }
 
 /// A progressive render session for one scene and settings snapshot.
@@ -75,7 +104,7 @@ public final class RenderSession {
         usesProductionHardwareTraversal: Bool
     ) {
         (
-            supportsRayTracing: metalRayTracingExperiment?.supportsRayTracing ?? false,
+            supportsRayTracing: device.supportsRaytracing,
             hasTLAS: metalRayTracingExperiment?.tlasResource != nil,
             hasSceneBuffers: metalRayTracingExperiment?.sceneBuffers != nil,
             usesProductionHardwareTraversal: canUseHardwareRayTracing
@@ -91,6 +120,18 @@ public final class RenderSession {
         case .flatBVH:
             false
         }
+    }
+
+    /// Runtime acceleration backend selected for this session.
+    public var accelerationInfo: RenderAccelerationInfo {
+        RenderAccelerationInfo(
+            requestedMode: accelerationMode,
+            activeMode: canUseHardwareRayTracing ? .metalRayTracing : .flatBVH,
+            supportsMetalRayTracing: device.supportsRaytracing,
+            hasMetalTLAS: metalRayTracingExperiment?.tlasResource != nil,
+            hasFlatBVH: accelerationNodeBuffer != nil && primitiveIndexBuffer != nil,
+            flatBVHNodeCount: accelerationNodeCount
+        )
     }
 
     var aovDebugInfo: (
@@ -312,8 +353,8 @@ public final class RenderSession {
             environmentIntensity: environmentIntensity,
             environmentRotationY: environmentRotationY,
             environmentMaxRadiance: environmentMaxRadiance,
-            padding1: settings.denoise.denoiser == .none ? 0 : 1,
-            padding2: 0
+            sampleRadianceClamp: settings.resolvedSampleRadianceClamp,
+            padding1: settings.denoise.denoiser == .none ? 0 : 1
         )
         var camera = camera
         var previousCamera = previousCamera

@@ -10,6 +10,14 @@ struct BenchmarkResult: Codable {
     var height: Int
     var samples: Int
     var maxBounces: Int
+    var quality: String
+    var sampleRadianceClamp: Float
+    var requestedBackend: String
+    var activeBackend: String
+    var supportsMetalRayTracing: Bool
+    var hasMetalTLAS: Bool
+    var hasFlatBVH: Bool
+    var flatBVHNodeCount: Int
     var deviceName: String
     var sceneLoadSeconds: Double
     var rendererCreateSeconds: Double
@@ -27,9 +35,18 @@ let samples = positionalArguments.count > 1 ? Int(positionalArguments[1]) ?? 16 
 let size = positionalArguments.count > 2 ? Int(positionalArguments[2]) ?? 256 : 256
 let width = optionInt(named: "--width", in: arguments) ?? size
 let height = optionInt(named: "--height", in: arguments) ?? size
+let qualityName = optionValue(named: "--quality", in: arguments)?.lowercased() ?? "preview"
+let quality = try renderQuality(named: qualityName)
+let maxBounces = max(1, optionInt(named: "--max-bounces", in: arguments) ?? defaultMaxBounces(for: quality))
+let backendName = optionValue(named: "--backend", in: arguments)?.lowercased() ?? "automatic"
+let accelerationMode = try renderAccelerationMode(named: backendName)
 let assetPath = positionalArguments.count > 3 ? positionalArguments[3] : nil
 let writeJSONToStdout = arguments.contains("--json")
 let outputPath = optionValue(named: "--output", in: arguments)
+let sampleRadianceClamp = optionFloat(named: "--sample-radiance-clamp", in: arguments)
+let resolvedSampleRadianceClamp = sampleRadianceClamp ?? quality.defaultSampleRadianceClamp
+let sampleRadianceClampDescription = sampleRadianceClamp.map { String($0) }
+    ?? "\(resolvedSampleRadianceClamp) (quality-default)"
 
 func optionValue(named name: String, in arguments: [String]) -> String? {
     guard let index = arguments.firstIndex(of: name),
@@ -50,7 +67,8 @@ func positionalValues(in arguments: [String]) -> [String] {
         switch argument {
         case "--json":
             continue
-        case "--output", "--width", "--height":
+        case "--output", "--width", "--height", "--quality", "--max-bounces", "--backend",
+             "--sample-radiance-clamp":
             skipNext = true
             continue
         default:
@@ -62,6 +80,51 @@ func positionalValues(in arguments: [String]) -> [String] {
 
 func optionInt(named name: String, in arguments: [String]) -> Int? {
     optionValue(named: name, in: arguments).flatMap(Int.init)
+}
+
+func optionFloat(named name: String, in arguments: [String]) -> Float? {
+    optionValue(named: name, in: arguments).flatMap(Float.init)
+}
+
+func renderQuality(named name: String) throws -> RenderQuality {
+    switch name {
+    case "preview", "fast":
+        return .preview
+    case "interactive", "viewport":
+        return .interactive
+    case "final", "export":
+        return .final
+    default:
+        throw DenrimRendererError.invalidScene(
+            "Unknown render quality: \(name). Available qualities: preview, interactive, final."
+        )
+    }
+}
+
+func defaultMaxBounces(for quality: RenderQuality) -> Int {
+    switch quality {
+    case .preview:
+        return 4
+    case .interactive:
+        return 5
+    case .final:
+        return 8
+    }
+}
+
+func renderAccelerationMode(named name: String) throws -> RenderAccelerationMode {
+    switch name {
+    case "automatic", "auto":
+        return .automatic
+    case "flat", "flat-bvh", "flatbvh":
+        return .flatBVH
+    case "metal", "metal-ray-tracing", "metalrt", "hardware", "hardware-ray-tracing":
+        return .metalRayTracing
+    default:
+        throw DenrimRendererError.invalidScene(
+            "Unknown acceleration backend: \(name). Available backends: automatic, flat-bvh, metal-ray-tracing."
+        )
+    }
 }
 
 func elapsed<T>(_ work: () throws -> T) rethrows -> (T, Double) {
@@ -102,7 +165,14 @@ let (renderer, rendererCreateSeconds) = try elapsed {
 let (session, sessionCreateSeconds) = try elapsed {
     try renderer.makeSession(
         scene: scene,
-        settings: RenderSettings(width: width, height: height, maxBounces: 4)
+        settings: RenderSettings(
+            width: width,
+            height: height,
+            maxBounces: maxBounces,
+            quality: quality,
+            sampleRadianceClamp: sampleRadianceClamp
+        ),
+        accelerationMode: accelerationMode
     )
 }
 let (_, renderSeconds) = try elapsed {
@@ -116,6 +186,7 @@ let totalSeconds = sceneLoadSeconds
     + rendererCreateSeconds
     + sessionCreateSeconds
     + renderSeconds
+let accelerationInfo = session.accelerationInfo
 
 let result = BenchmarkResult(
     createdAt: ISO8601DateFormatter().string(from: Date()),
@@ -124,7 +195,15 @@ let result = BenchmarkResult(
     width: width,
     height: height,
     samples: samples,
-    maxBounces: 4,
+    maxBounces: maxBounces,
+    quality: qualityName,
+    sampleRadianceClamp: resolvedSampleRadianceClamp,
+    requestedBackend: accelerationInfo.requestedMode.rawValue,
+    activeBackend: accelerationInfo.activeMode.rawValue,
+    supportsMetalRayTracing: accelerationInfo.supportsMetalRayTracing,
+    hasMetalTLAS: accelerationInfo.hasMetalTLAS,
+    hasFlatBVH: accelerationInfo.hasFlatBVH,
+    flatBVHNodeCount: accelerationInfo.flatBVHNodeCount,
     deviceName: renderer.device.name,
     sceneLoadSeconds: sceneLoadSeconds,
     rendererCreateSeconds: rendererCreateSeconds,
@@ -161,6 +240,12 @@ if let assetPath = result.assetPath {
 }
 print("Resolution: \(result.width)x\(result.height)")
 print("Samples: \(result.samples)")
+print("Quality: \(result.quality)")
+print("Max bounces: \(result.maxBounces)")
+print("Sample radiance clamp: \(sampleRadianceClampDescription)")
+print("Backend: requested \(result.requestedBackend), active \(result.activeBackend)")
+print("Metal RT: supported \(result.supportsMetalRayTracing), TLAS \(result.hasMetalTLAS)")
+print("Flat BVH: \(result.hasFlatBVH), nodes \(result.flatBVHNodeCount)")
 print(String(format: "Scene load: %.4fs", result.sceneLoadSeconds))
 print(String(format: "Renderer create: %.4fs", result.rendererCreateSeconds))
 print(String(format: "Session create: %.4fs", result.sessionCreateSeconds))

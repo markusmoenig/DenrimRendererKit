@@ -135,7 +135,12 @@ public final class DenrimRenderer {
         )
     }
 
-    func makeSession(
+    /// Creates a progressive render session while requesting a specific acceleration backend.
+    ///
+    /// This is primarily intended for diagnostics, benchmarks, and backend parity checks.
+    /// Application integrations should usually call `makeSession(scene:settings:)` and use
+    /// automatic backend selection.
+    public func makeSession(
         scene: RenderScene,
         settings: RenderSettings = RenderSettings(),
         accelerationMode: RenderAccelerationMode

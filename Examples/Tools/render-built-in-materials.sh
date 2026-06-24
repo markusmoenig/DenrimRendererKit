@@ -2,15 +2,16 @@
 set -eu
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-SAMPLES="${1:-128}"
+SAMPLES="${1:-1024}"
 SIZE="${2:-512}"
 OUTPUT_DIR="${3:-Examples/Renders/Materials}"
 PRESET_FILTER="${4:-${MATERIAL_PRESET:-}}"
+QUALITY="${MATERIAL_QUALITY:-final}"
 
 SCENE="Examples/SceneScripts/MaterialTestBall/material-testball.denrim"
 PREVIEW_INCLUDE="Examples/SceneScripts/MaterialTestBall/preview-material.denrim"
 PRESET_SOURCE="Sources/DenrimRendererKit/Scene/BuiltInMaterialLibrary.swift"
-RENDERER=".build/release/denrim-render-preview"
+RENDERER=".build/release/denrim"
 
 cd "$ROOT_DIR"
 mkdir -p "$OUTPUT_DIR"
@@ -80,7 +81,7 @@ interrupt() {
 trap cleanup EXIT
 trap interrupt HUP INT TERM
 
-swift build -c release --product denrim-render-preview
+swift build -c release --product denrim
 
 printf '%s\n' "$PRESETS" | while IFS= read -r preset; do
     [ -n "$preset" ] || continue
@@ -92,5 +93,5 @@ printf '%s\n' "$PRESETS" | while IFS= read -r preset; do
     } > "$PREVIEW_INCLUDE"
 
     echo "Rendering $preset -> $output"
-    "$RENDERER" "$output" "$SAMPLES" "$SIZE" script beauty "$SCENE"
+    "$RENDERER" "$SCENE" --output "$output" --samples "$SAMPLES" --size "$SIZE" --quality "$QUALITY"
 done

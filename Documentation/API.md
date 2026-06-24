@@ -36,6 +36,8 @@ Initial public types:
 * `DenrimRenderer`
 * `RenderSession`
 * `RenderSettings`
+* `RenderAccelerationMode`
+* `RenderAccelerationInfo`
 * `DenoiseSettings`
 * `RenderDenoiser`
 * `RenderQuality`
@@ -95,7 +97,7 @@ Scene compilation now builds an internal instance acceleration model with local 
 
 ## Materials and Textures
 
-`Material` currently exposes scalar base color, emission, roughness, metallic, dielectric specular weight/color/anisotropy, index of refraction, clearcoat weight/tint/attenuation/thickness/roughness/IOR, thin-film interference strength/thickness/IOR, sheen/fuzz weight/color/roughness, opacity, dielectric transmission weight/color/roughness/IOR/absorption/thin-wall mode, plus optional in-memory texture inputs:
+`Material` currently exposes scalar base color, emission, roughness, metallic, dielectric specular weight/color/anisotropy, index of refraction, clearcoat weight/tint/attenuation/thickness/roughness/IOR, thin-film interference strength/thickness/IOR, sheen/fuzz weight/color/roughness, random-walk subsurface weight/color/radius/scale/anisotropy, opacity, dielectric transmission weight/color/roughness/IOR/absorption/thin-wall mode, transmissive volume scattering controls, plus optional in-memory texture inputs:
 
 ```swift
 let checker = Texture2D.checker(
@@ -117,6 +119,10 @@ let material = Material(
     transmissionIndexOfRefraction: 1.45,
     transmissionAbsorptionColor: SIMD3<Float>(0.64, 0.82, 1.0),
     transmissionAbsorptionDistance: 0.8,
+    volumeScattering: 0.55,
+    volumeScatteringColor: SIMD3<Float>(0.9, 0.95, 1.0),
+    volumeScatteringDistance: 0.65,
+    volumeAnisotropy: 0.25,
     thinWalled: false,
     clearcoat: 0.25,
     clearcoatColor: SIMD3<Float>(0.82, 1.0, 0.9),
@@ -130,12 +136,17 @@ let material = Material(
     sheen: 0.35,
     sheenColor: SIMD3<Float>(0.9, 0.8, 1.0),
     sheenRoughness: 0.75,
+    subsurface: 0.7,
+    subsurfaceColor: SIMD3<Float>(0.95, 0.45, 0.28),
+    subsurfaceRadius: SIMD3<Float>(1.0, 0.42, 0.24),
+    subsurfaceScale: 0.35,
+    subsurfaceAnisotropy: 0.18,
     baseColorTexture: baseColor,
     normalMap: normalMap
 )
 ```
 
-`specular`, `specularColor`, `indexOfRefraction`, and `specularAnisotropy` drive dielectric Fresnel reflectance and anisotropic GGX shape for the current base specular lobe. `transmission`, `transmissionColor`, `transmissionRoughness`, `transmissionIndexOfRefraction`, `transmissionAbsorptionColor`, `transmissionAbsorptionDistance`, and `thinWalled` enable rough dielectric reflection/refraction with explicit tint, independent roughness/IOR, Beer-style exit absorption for solid visible paths and direct-light shadows, a straight-through thin-sheet mode, and transparent shadowing; omitted transmission controls inherit from base color, roughness, and surface IOR, while absorption is disabled when its distance is zero. `clearcoat`, `clearcoatColor`, `clearcoatAttenuationColor`, `clearcoatThickness`, `clearcoatRoughness`, and `clearcoatIndexOfRefraction` add a secondary tinted isotropic GGX coating lobe above the base material, with optional Beer-style base-layer attenuation through the coating depth. Omitted clearcoat attenuation color inherits the clearcoat tint. `thinFilm`, `thinFilmThicknessNanometers`, and `thinFilmIndexOfRefraction` add angle-dependent interference tint to reflective specular and clearcoat Fresnel terms; strength zero disables it. `sheen`, `sheenColor`, and `sheenRoughness` add an active grazing fuzz / fabric lobe for cloth, velvet-like stylized surfaces, and soft edge highlights. The default IOR of 1.5, white specular and clearcoat colors, zero clearcoat thickness, zero thin-film strength, and zero anisotropy preserve the earlier 0.04 isotropic dielectric F0 baseline.
+`specular`, `specularColor`, `indexOfRefraction`, and `specularAnisotropy` drive dielectric Fresnel reflectance and anisotropic GGX shape for the current base specular lobe. `subsurface`, `subsurfaceColor`, `subsurfaceRadius`, `subsurfaceScale`, and `subsurfaceAnisotropy` enable closed-surface random-walk subsurface scattering with RGB mean free paths and a Henyey-Greenstein phase function. `transmission`, `transmissionColor`, `transmissionRoughness`, `transmissionIndexOfRefraction`, `transmissionAbsorptionColor`, `transmissionAbsorptionDistance`, and `thinWalled` enable rough dielectric reflection/refraction with explicit tint, independent roughness/IOR, Beer-style absorption for solid visible paths and direct-light shadows, a straight-through thin-sheet mode, and transparent shadowing; omitted transmission controls inherit from base color, roughness, and surface IOR, while absorption is disabled when its distance is zero. `volumeScattering`, `volumeScatteringColor`, `volumeScatteringDistance`, and `volumeAnisotropy` add participating-medium random-walk scattering inside closed transmissive geometry for cloudy liquids and milky refractive materials. `clearcoat`, `clearcoatColor`, `clearcoatAttenuationColor`, `clearcoatThickness`, `clearcoatRoughness`, and `clearcoatIndexOfRefraction` add a secondary tinted isotropic GGX coating lobe above the base material, with optional Beer-style base-layer attenuation through the coating depth. Omitted clearcoat attenuation color inherits the clearcoat tint. `thinFilm`, `thinFilmThicknessNanometers`, and `thinFilmIndexOfRefraction` add angle-dependent interference tint to reflective specular and clearcoat Fresnel terms; strength zero disables it. `sheen`, `sheenColor`, and `sheenRoughness` add an active grazing fuzz / fabric lobe for cloth, velvet-like stylized surfaces, and soft edge highlights. The default IOR of 1.5, white specular and clearcoat colors, zero subsurface weight, zero volume scattering, zero clearcoat thickness, zero thin-film strength, and zero anisotropy preserve the earlier 0.04 isotropic dielectric F0 baseline.
 
 Textures are stored as linear RGBA `Float` pixels in row-major order. Image assets can be decoded through ImageIO with explicit `.sRGB` or `.linear` RGB handling; use `.sRGB` for ordinary color textures and `.linear` for data textures such as normal maps. Radiance `.hdr` files decode through the same `Texture2D` API as linear RGBE data. The first GPU implementation samples textures by mesh UVs inside both the flat BVH and hardware TLAS kernels, with nearest and bilinear sampling modes. Mipmapping and native Metal texture objects are future API work.
 
@@ -150,7 +161,7 @@ scene.environment = Environment(
 )
 ```
 
-The current material API is intentionally small. `Documentation/Materials.md` tracks the MoonRay-inspired direction for a future Denrim Standard Surface that grows from the current specular anisotropy, transmission, clearcoat, and sheen/fuzz controls toward subsurface, layering, and diagnostic controls.
+The current material API is intentionally small. `Documentation/Materials.md` tracks the MoonRay-inspired direction for a future Denrim Standard Surface that grows from the current specular anisotropy, random-walk subsurface scattering, transmissive volume scattering, transmission, clearcoat, and sheen/fuzz controls toward layering and diagnostic controls.
 
 Built-in material presets are available for product UIs, examples, and script authoring through `BuiltInMaterialLibrary`:
 
@@ -223,6 +234,26 @@ let session = try renderer.makeSession(
 )
 ```
 
+`RenderSettings.quality` communicates preview, interactive, or final-render intent to renderer integrations. Today it provides the default for `sampleRadianceClamp`; command-line tools also use it to choose a default path depth when `--max-bounces` is omitted. `RenderSettings.sampleRadianceClamp` limits the peak RGB value of a single Monte Carlo sample contribution before progressive accumulation. It is a biased but useful firefly control for glossy metals, clearcoat, glass, small bright emitters, and HDR environments. Leave it as `nil` to inherit the quality default (`preview` is stricter, `final` is gentler), set a positive value for reproducible review renders, or set `0` to disable contribution clamping when validating physically unbounded energy.
+
+```swift
+let cleanPreview = RenderSettings(
+    width: 512,
+    height: 512,
+    quality: .interactive,
+    sampleRadianceClamp: 18
+)
+
+let unclampedReference = RenderSettings(
+    width: 512,
+    height: 512,
+    quality: .final,
+    sampleRadianceClamp: 0
+)
+```
+
+`DenrimRenderer.makeSession(scene:settings:accelerationMode:)` can request `.automatic`, `.flatBVH`, or `.metalRayTracing` for diagnostics, benchmarks, and backend parity checks. Product integrations should usually use the default `makeSession(scene:settings:)` overload. After creation, `RenderSession.accelerationInfo` reports the requested backend, active backend, Metal ray tracing support, TLAS availability, and flat-BVH buffer state.
+
 For an explicit denoiser comparison pass, set `denoise: .appleSVGF` or `denoise: .simpleSpatial`.
 
 Fully transparent material surfaces act as camera-ray cutouts, allowing primary rays to continue to the next visible surface. Transmissive material surfaces sample dielectric reflection/refraction with roughness, measured exit absorption for solid visible paths and direct-light shadows, thin-walled straight-through transmission for sheet materials, and shadow transparency. Semi-transparent blending, nested dielectric priority, caustics behavior, and layered material behavior are future material transport work.
@@ -262,16 +293,25 @@ assetCache.removeAll()
 
 The cache keeps assets stable until cleared, which is useful for render previews and benchmarks where only camera, material, or sampling settings are changing.
 
-The preview CLI can render script files directly:
+The unified `denrim` CLI can render script files directly and prints benchmark timings after each render:
 
 ```sh
-swift run denrim-render-preview ./ScriptedScene.png 32 512 script beauty ./Scenes/scene.denrim
+swift run denrim -- ./Scenes/scene.denrim --output ./ScriptedScene.png --samples 32 --size 512
 ```
+
+If `--output` is omitted, `denrim` writes `./out.png` in the current directory.
 
 Raw beauty rendering is the CLI default. Denoising must be requested explicitly:
 
 ```bash
-swift run denrim-render-preview ./ScriptedScene.png 8 512 script beauty ./Scenes/scene.denrim --denoise apple-svgf
+swift run denrim -- ./Scenes/scene.denrim --output ./ScriptedScene.png --samples 8 --size 512 --denoise apple-svgf
 ```
 
-The preview CLI also accepts `--denoise experimental-simple` for the internal debug filter, plus `--denoise-radius`, `--denoise-iterations`, `--denoise-normal-sigma`, `--denoise-depth-sigma`, `--denoise-albedo-sigma`, and `--denoise-color-sigma` for quick filter tuning.
+Material previews can be rendered without editing `preview-material.denrim`:
+
+```sh
+swift run denrim -- material matte.clay --samples 64 --quality interactive
+swift run denrim -- material "0.8 0.05 0.02 roughness 0.18 clearcoat 0.65" --size 512
+```
+
+The CLI also accepts `--output-type beauty|depth|normal|albedo|material-id|object-id|motion-vector`, `--quality preview|interactive|final`, `--max-bounces 8`, `--backend automatic|flat-bvh|metal-ray-tracing`, `--sample-radiance-clamp 18` for glossy firefly control, `--sample-radiance-clamp 0` for unclamped reference renders, `--report-output report.json`, `--json`, `--denoise experimental-simple` for the internal debug filter, plus `--denoise-radius`, `--denoise-iterations`, `--denoise-normal-sigma`, `--denoise-depth-sigma`, `--denoise-albedo-sigma`, and `--denoise-color-sigma` for quick filter tuning. Run `swift run denrim help render` or `swift run denrim help material` for the full option reference.

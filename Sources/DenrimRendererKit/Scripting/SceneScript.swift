@@ -615,6 +615,38 @@ public enum SceneScript {
                 }
                 material.sheenRoughness = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
                 index += 2
+            case "subsurface", "subsurfaceweight", "sss":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.subsurface = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "subsurfacecolor", "subsurfacetint", "ssscolor", "scatteringcolor":
+                guard index + 3 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                let values = try floats(tokens[(index + 1)...(index + 3)], line: line)
+                material.subsurfaceColor = SIMD3<Float>(values[0], values[1], values[2])
+                index += 4
+            case "subsurfaceradius", "subsurfaceradiuscolor", "sssradius", "scatteringradius":
+                guard index + 3 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                let values = try floats(tokens[(index + 1)...(index + 3)], line: line)
+                material.subsurfaceRadius = SIMD3<Float>(values[0], values[1], values[2])
+                index += 4
+            case "subsurfacescale", "sssscale", "scatteringscale":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.subsurfaceScale = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "subsurfaceanisotropy", "sssanisotropy", "scatteringanisotropy":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.subsurfaceAnisotropy = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
             case "opacity":
                 guard index + 1 < tokens.count else {
                     throw SceneScriptError.invalidArgumentCount("material", line: line)
@@ -664,6 +696,31 @@ public enum SceneScript {
                     throw SceneScriptError.invalidArgumentCount("material", line: line)
                 }
                 material.thinWalled = try floats(tokens[(index + 1)...(index + 1)], line: line)[0] > 0
+                index += 2
+            case "volumescattering", "volumescatter", "mediumscattering", "mediumscatter":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.volumeScattering = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "volumescatteringcolor", "volumescattercolor", "mediumscatteringcolor", "mediumscattercolor":
+                guard index + 3 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                let values = try floats(tokens[(index + 1)...(index + 3)], line: line)
+                material.volumeScatteringColor = SIMD3<Float>(values[0], values[1], values[2])
+                index += 4
+            case "volumescatteringdistance", "volumescatterdistance", "mediumscatteringdistance", "mediumscatterdistance":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.volumeScatteringDistance = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "volumeanisotropy", "mediumanisotropy":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                material.volumeAnisotropy = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
                 index += 2
             case "basecolortexture":
                 guard index + 1 < tokens.count else {

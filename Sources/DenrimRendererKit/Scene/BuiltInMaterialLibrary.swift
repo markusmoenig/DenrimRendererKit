@@ -6,6 +6,7 @@ public enum BuiltInMaterialCategory: String, CaseIterable, Sendable {
     case diffuse
     case plastic
     case fabric
+    case subsurface
     case metal
     case coating
     case glass
@@ -112,6 +113,81 @@ public enum BuiltInMaterialLibrary {
             .fabric,
             "Rough blue fabric with a gentle grazing sheen.",
             Material(baseColor: SIMD3<Float>(0.055, 0.12, 0.26), roughness: 0.88, specular: 0.16, sheen: 0.3, sheenColor: SIMD3<Float>(0.35, 0.5, 0.78), sheenRoughness: 0.9)
+        ),
+        preset(
+            "subsurface.skin-warm",
+            "Warm Skin",
+            .subsurface,
+            "Warm organic random-walk subsurface scattering.",
+            Material(
+                baseColor: SIMD3<Float>(0.82, 0.52, 0.38),
+                roughness: 0.56,
+                specular: 0.38,
+                indexOfRefraction: 1.38,
+                subsurface: 0.82,
+                subsurfaceColor: SIMD3<Float>(0.95, 0.48, 0.32),
+                subsurfaceRadius: SIMD3<Float>(1.0, 0.42, 0.24),
+                subsurfaceScale: 0.34,
+                subsurfaceAnisotropy: 0.18
+            )
+        ),
+        preset(
+            "subsurface.wax-cream",
+            "Cream Wax",
+            .subsurface,
+            "Soft creamy wax with broad internal scattering.",
+            Material(
+                baseColor: SIMD3<Float>(0.94, 0.82, 0.58),
+                roughness: 0.48,
+                specular: 0.42,
+                indexOfRefraction: 1.44,
+                subsurface: 0.88,
+                subsurfaceColor: SIMD3<Float>(0.98, 0.82, 0.48),
+                subsurfaceRadius: SIMD3<Float>(1.3, 0.88, 0.42),
+                subsurfaceScale: 0.48,
+                subsurfaceAnisotropy: 0.0
+            )
+        ),
+        preset(
+            "liquid.milk",
+            "Milk",
+            .liquid,
+            "Cloudy refractive liquid with absorption and volume scattering.",
+            Material(
+                baseColor: SIMD3<Float>(0.98, 0.96, 0.88),
+                roughness: 0.68,
+                specular: 0.18,
+                indexOfRefraction: 1.35,
+                transmission: 0.46,
+                transmissionColor: SIMD3<Float>(0.99, 0.985, 0.94),
+                transmissionRoughness: 0.58,
+                transmissionIndexOfRefraction: 1.35,
+                transmissionAbsorptionColor: SIMD3<Float>(0.7, 0.72, 0.58),
+                transmissionAbsorptionDistance: 0.62,
+                volumeScattering: 0.76,
+                volumeScatteringColor: SIMD3<Float>(0.98, 0.97, 0.9),
+                volumeScatteringDistance: 0.5,
+                volumeAnisotropy: 0.25
+            )
+        ),
+        preset(
+            "subsurface.jade-green",
+            "Green Jade",
+            .subsurface,
+            "Dense green stone with colored multiple scattering.",
+            Material(
+                baseColor: SIMD3<Float>(0.28, 0.62, 0.48),
+                roughness: 0.42,
+                specular: 0.48,
+                indexOfRefraction: 1.56,
+                clearcoat: 0.14,
+                clearcoatRoughness: 0.16,
+                subsurface: 0.7,
+                subsurfaceColor: SIMD3<Float>(0.38, 0.86, 0.58),
+                subsurfaceRadius: SIMD3<Float>(0.38, 0.9, 0.52),
+                subsurfaceScale: 0.24,
+                subsurfaceAnisotropy: 0.08
+            )
         ),
         preset(
             "metal.chrome",

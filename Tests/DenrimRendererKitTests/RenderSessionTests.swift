@@ -16,8 +16,14 @@ final class RenderSessionTests: XCTestCase {
         )
 
         XCTAssertEqual(session.metalRayTracingDebugInfo.supportsRayTracing, device.supportsRaytracing)
+        XCTAssertEqual(session.accelerationInfo.requestedMode, .automatic)
+        XCTAssertEqual(session.accelerationInfo.supportsMetalRayTracing, device.supportsRaytracing)
 
         if device.supportsRaytracing {
+            XCTAssertEqual(session.accelerationInfo.activeMode, .metalRayTracing)
+            XCTAssertTrue(session.accelerationInfo.hasMetalTLAS)
+            XCTAssertFalse(session.accelerationInfo.hasFlatBVH)
+            XCTAssertEqual(session.accelerationInfo.flatBVHNodeCount, 0)
             XCTAssertEqual(session.accelerationDebugInfo.nodeCount, 0)
             XCTAssertFalse(session.accelerationDebugInfo.hasNodeBuffer)
             XCTAssertFalse(session.accelerationDebugInfo.hasPrimitiveIndexBuffer)
@@ -25,6 +31,10 @@ final class RenderSessionTests: XCTestCase {
             XCTAssertTrue(session.metalRayTracingDebugInfo.hasSceneBuffers)
             XCTAssertTrue(session.metalRayTracingDebugInfo.usesProductionHardwareTraversal)
         } else {
+            XCTAssertEqual(session.accelerationInfo.activeMode, .flatBVH)
+            XCTAssertFalse(session.accelerationInfo.hasMetalTLAS)
+            XCTAssertTrue(session.accelerationInfo.hasFlatBVH)
+            XCTAssertGreaterThan(session.accelerationInfo.flatBVHNodeCount, 0)
             XCTAssertGreaterThan(session.accelerationDebugInfo.nodeCount, 0)
             XCTAssertTrue(session.accelerationDebugInfo.hasNodeBuffer)
             XCTAssertTrue(session.accelerationDebugInfo.hasPrimitiveIndexBuffer)
@@ -43,6 +53,11 @@ final class RenderSessionTests: XCTestCase {
             accelerationMode: .flatBVH
         )
 
+        XCTAssertEqual(session.accelerationInfo.requestedMode, .flatBVH)
+        XCTAssertEqual(session.accelerationInfo.activeMode, .flatBVH)
+        XCTAssertEqual(session.accelerationInfo.supportsMetalRayTracing, device.supportsRaytracing)
+        XCTAssertTrue(session.accelerationInfo.hasFlatBVH)
+        XCTAssertGreaterThan(session.accelerationInfo.flatBVHNodeCount, 0)
         XCTAssertGreaterThan(session.accelerationDebugInfo.nodeCount, 0)
         XCTAssertTrue(session.accelerationDebugInfo.hasNodeBuffer)
         XCTAssertTrue(session.accelerationDebugInfo.hasPrimitiveIndexBuffer)

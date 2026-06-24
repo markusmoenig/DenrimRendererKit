@@ -70,13 +70,22 @@ final class APITests: XCTestCase {
             sheen: 0.55,
             sheenColor: .init(0.3, 0.4, 0.5),
             sheenRoughness: 0.7,
+            subsurface: 0.8,
+            subsurfaceColor: .init(0.95, 0.42, 0.28),
+            subsurfaceRadius: .init(1.2, 0.45, 0.25),
+            subsurfaceScale: 0.32,
+            subsurfaceAnisotropy: 0.18,
             transmission: 0.75,
             transmissionColor: .init(0.2, 0.6, 0.9),
             transmissionRoughness: 0.18,
             transmissionIndexOfRefraction: 1.33,
             transmissionAbsorptionColor: .init(0.5, 0.75, 0.95),
             transmissionAbsorptionDistance: 1.25,
-            thinWalled: true
+            thinWalled: true,
+            volumeScattering: 0.7,
+            volumeScatteringColor: .init(0.8, 0.85, 0.9),
+            volumeScatteringDistance: 0.6,
+            volumeAnisotropy: 0.22
         )
         let gpu = material.gpuMaterial()
 
@@ -117,6 +126,21 @@ final class APITests: XCTestCase {
         XCTAssertEqual(gpu.thinFilm.x, 0.8, accuracy: 0.0001)
         XCTAssertEqual(gpu.thinFilm.y, 520, accuracy: 0.0001)
         XCTAssertEqual(gpu.thinFilm.z, 1.42, accuracy: 0.0001)
+        XCTAssertEqual(gpu.subsurfaceColor.x, 0.95, accuracy: 0.0001)
+        XCTAssertEqual(gpu.subsurfaceColor.y, 0.42, accuracy: 0.0001)
+        XCTAssertEqual(gpu.subsurfaceColor.z, 0.28, accuracy: 0.0001)
+        XCTAssertEqual(gpu.subsurfaceColor.w, 0.8, accuracy: 0.0001)
+        XCTAssertEqual(gpu.subsurfaceRadius.x, 1.2, accuracy: 0.0001)
+        XCTAssertEqual(gpu.subsurfaceRadius.y, 0.45, accuracy: 0.0001)
+        XCTAssertEqual(gpu.subsurfaceRadius.z, 0.25, accuracy: 0.0001)
+        XCTAssertEqual(gpu.subsurfaceRadius.w, 0.32, accuracy: 0.0001)
+        XCTAssertEqual(gpu.subsurfaceParameters.x, 0.18, accuracy: 0.0001)
+        XCTAssertEqual(gpu.volumeScattering.x, 0.8, accuracy: 0.0001)
+        XCTAssertEqual(gpu.volumeScattering.y, 0.85, accuracy: 0.0001)
+        XCTAssertEqual(gpu.volumeScattering.z, 0.9, accuracy: 0.0001)
+        XCTAssertEqual(gpu.volumeScattering.w, 0.7, accuracy: 0.0001)
+        XCTAssertEqual(gpu.volumeParameters.x, 0.6, accuracy: 0.0001)
+        XCTAssertEqual(gpu.volumeParameters.y, 0.22, accuracy: 0.0001)
         XCTAssertEqual(gpu.emission.w, 0.75, accuracy: 0.0001)
     }
 
@@ -139,6 +163,7 @@ final class APITests: XCTestCase {
     func testBuiltInMaterialLibraryCanBeQueriedByIdentifierAndCategory() throws {
         XCTAssertGreaterThan(BuiltInMaterialLibrary.presets.count, 12)
         XCTAssertTrue(BuiltInMaterialLibrary.identifiers.contains("glass.thin-pane"))
+        XCTAssertTrue(BuiltInMaterialLibrary.identifiers.contains("subsurface.skin-warm"))
         XCTAssertTrue(BuiltInMaterialLibrary.identifiers.contains("coating.iridescent-amber"))
         XCTAssertTrue(BuiltInMaterialLibrary.presets(in: .metal).contains { $0.identifier == "metal.brushed-aluminum" })
 
@@ -155,6 +180,17 @@ final class APITests: XCTestCase {
         XCTAssertEqual(iridescent.category, .coating)
         XCTAssertGreaterThan(iridescent.material.thinFilm, 0)
         XCTAssertGreaterThan(iridescent.material.clearcoat, 0)
+
+        let skin = try XCTUnwrap(BuiltInMaterialLibrary.preset(named: "subsurface.skin-warm"))
+        XCTAssertEqual(skin.category, .subsurface)
+        XCTAssertGreaterThan(skin.material.subsurface, 0)
+        XCTAssertGreaterThan(skin.material.subsurfaceRadius.x, skin.material.subsurfaceRadius.z)
+
+        let milk = try XCTUnwrap(BuiltInMaterialLibrary.preset(named: "liquid.milk"))
+        XCTAssertEqual(milk.category, .liquid)
+        XCTAssertGreaterThan(milk.material.transmission, 0)
+        XCTAssertGreaterThan(milk.material.volumeScattering, 0)
+        XCTAssertGreaterThan(milk.material.transmissionAbsorptionDistance, 0)
     }
 
     func testBuiltInMaterialPreviewManifestMatchesPresets() throws {
@@ -214,5 +250,19 @@ final class APITests: XCTestCase {
         XCTAssertEqual(settings.quality, .preview)
         XCTAssertFalse(settings.transparentBackground)
         XCTAssertEqual(settings.denoise.denoiser, .none)
+        XCTAssertNil(settings.sampleRadianceClamp)
+        XCTAssertEqual(settings.resolvedSampleRadianceClamp, RenderQuality.preview.defaultSampleRadianceClamp)
+    }
+
+    func testSettingsCanOverrideOrDisableSampleRadianceClamp() {
+        let finalSettings = RenderSettings(quality: .final)
+        let disabledSettings = RenderSettings(sampleRadianceClamp: 0)
+        let customSettings = RenderSettings(sampleRadianceClamp: 18)
+
+        XCTAssertEqual(RenderQuality.preview.defaultSampleRadianceClamp, 10)
+        XCTAssertEqual(RenderQuality.interactive.defaultSampleRadianceClamp, 24)
+        XCTAssertEqual(finalSettings.resolvedSampleRadianceClamp, 64)
+        XCTAssertEqual(disabledSettings.resolvedSampleRadianceClamp, 0)
+        XCTAssertEqual(customSettings.resolvedSampleRadianceClamp, 18)
     }
 }

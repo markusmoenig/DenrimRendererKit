@@ -9,32 +9,51 @@ Run the benchmark executable for quick local timing:
 ```sh
 swift run -c release denrim-render-benchmark cornell 16 256
 swift run -c release denrim-render-benchmark materials 16 256
-swift run -c release denrim-render-benchmark script 1 64 Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim
+```
+
+For `.denrim` files, prefer the unified `denrim` CLI. It renders the PNG and prints scene-load, renderer-create, session-create, render, write, throughput, and backend timings:
+
+```sh
+swift run -c release denrim -- \
+    Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim \
+    --output /tmp/dragon-material-variants.png \
+    --samples 1 \
+    --size 64 \
+    --quality interactive
 ```
 
 Write persistent JSON for future comparison:
 
 ```sh
-swift run -c release denrim-render-benchmark \
-    script \
-    1 \
-    64 \
+swift run -c release denrim -- \
     Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim \
-    --output Examples/Benchmarks/dragon-local-64px-1spp.json
+    --output /tmp/dragon-material-variants.png \
+    --samples 1 \
+    --size 64 \
+    --quality interactive \
+    --backend automatic \
+    --sample-radiance-clamp 24 \
+    --report-output Examples/Benchmarks/dragon-local-64px-1spp.json
 ```
 
-Rectangular renders can be benchmarked with `--width` and `--height`:
+Rectangular `.denrim` renders can be benchmarked with `--width` and `--height`:
 
 ```sh
-swift run -c release denrim-render-benchmark \
-    script \
-    1 \
-    320 \
+swift run -c release denrim -- \
     Examples/SceneScripts/Quality/DiningRoom/dining-room.denrim \
+    --output /tmp/dining-room.png \
+    --samples 1 \
     --width 320 \
     --height 180 \
-    --output Examples/Benchmarks/dining-room-local-320x180-1spp.json
+    --quality interactive \
+    --backend automatic \
+    --sample-radiance-clamp 16 \
+    --report-output Examples/Benchmarks/dining-room-local-320x180-1spp.json
 ```
+
+Use `--max-bounces` when comparing a specific path depth instead of the quality default. The current tool defaults are 4 bounces for preview, 5 for interactive, and 8 for final.
+
+Use `--backend flat-bvh` or `--backend metal-ray-tracing` for backend-specific measurements. Benchmark JSON records both the requested backend and the active backend, so unsupported hardware requests are visible instead of being silently mixed into automatic numbers.
 
 The JSON records:
 
@@ -42,7 +61,11 @@ The JSON records:
 * scene name and optional asset path
 * resolution
 * sample count
+* quality intent
 * max bounces
+* sample radiance clamp used for glossy firefly control
+* requested acceleration backend and active acceleration backend
+* Metal ray tracing support / TLAS availability and flat BVH node count
 * Metal device name
 * scene/script load time
 * renderer creation time
@@ -73,6 +96,8 @@ The Stanford Dragon example showed that session / acceleration build time can do
 * Direct lighting samples one emissive triangle by power-weighted CDF instead of looping over every light each bounce, which bounds direct-light shader work for scenes with many emissive triangles.
 * BSDF-sampled emissive-hit MIS uses per-triangle light-record indices to compute light PDFs in constant time instead of scanning the full light list.
 * Direct light samples and BSDF-sampled emissive hits use first-pass MIS weights to reduce double counting and stabilize highlight energy.
+* Render quality now feeds a per-sample radiance clamp, exposed as `RenderSettings.sampleRadianceClamp`, `--quality`, and `--sample-radiance-clamp`, to reduce isolated glossy fireflies in low-sample material and interior preview renders.
+* Preview and benchmark tools expose `--backend automatic|flat-bvh|metal-ray-tracing`, and benchmark JSON records requested and active backend state for speed comparisons.
 * Russian roulette terminates low-contribution paths after early bounces while compensating surviving throughput, reducing wasted deep-bounce work without the bias of a hard cutoff.
 * OBJ loading now uses a byte scanner instead of `String.split` tokenization, reducing large text-mesh import overhead.
 * Forced flat-BVH sessions still build the fallback acceleration buffers for parity testing and unsupported devices.
@@ -97,6 +122,5 @@ Remaining near-term optimization targets:
 * Avoid rebuilding unchanged BLAS / TLAS data between sessions.
 * Cache compiled acceleration data once asset caching is in place.
 * Separate scene compilation time from sample rendering time in benchmarks.
-* Expose backend selection in benchmark output.
 * Add backend-specific baselines for flat BVH and Metal ray tracing paths.
 * Profile GPU occupancy and memory bandwidth in Xcode Instruments.

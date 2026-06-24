@@ -366,6 +366,73 @@ Maximum quality output.
 * Transparent background export
 * Optional macOS denoising
 
+Current Quality Direction
+
+DenrimRendererKit should keep quality controls explicit and testable rather than hiding every choice inside the shader.
+
+The current renderer already uses:
+
+* Progressive accumulation
+* Multiple-bounce path tracing
+* Direct-light MIS for emissive triangles
+* HDRI environment importance sampling
+* BSDF / light MIS for emissive hits and environment misses
+* Visible-normal GGX sampling for glossy specular and clearcoat bounces
+* Russian roulette for deep low-contribution paths
+* Optional denoising through raw AOV-guided outputs
+
+Glossy artifacts are a near-term quality target. Low-roughness metals, clearcoat, glass, small emitters, and bright HDR texels can produce isolated hot samples long before a preview has enough samples to converge.
+
+The first implemented mitigation is a per-sample radiance clamp exposed as `RenderSettings.sampleRadianceClamp` and the preview / benchmark `--quality` / `--sample-radiance-clamp` options. The setting defaults from `RenderQuality`: preview renders are stricter, interactive renders are moderate, and final renders preserve more high-energy samples. A value of `0` disables the clamp for physically stricter reference checks.
+
+This clamp is intentionally a preview and review stability tool, not a replacement for better sampling. Future quality work should reduce the need for clamping by improving:
+
+* Multiple importance sampling for all light paths
+* Environment sampling resolution and filtering
+* Rough dielectric transmission PDFs
+* Caustic strategy for glass and polished surfaces
+* Adaptive sampling / variance estimation
+* Material-specific roughness and normal anti-aliasing
+* Denoiser comparisons using stable AOV contracts
+
+Material Quality Direction
+
+The material system should remain small but grow along a Denrim Standard Surface path inspired by MoonRay production categories.
+
+Current active material controls include base color, opacity, roughness, metallic, dielectric specular weight / color / IOR / anisotropy, clearcoat tint / thickness / attenuation / roughness / IOR, thin-film interference, sheen / fuzz, random-walk subsurface scattering, emission, rough transmission, measured absorption, thin-walled transmission, base color textures, and normal maps.
+
+The priority is not to expose many inert fields. Each material control should either affect rendering, be documented as planning metadata, or stay out of the public API until the renderer can honor it.
+
+Near-term material quality work:
+
+* Continue validating metals, coated plastics, glass, ceramics, fabrics, and emissive panels through built-in presets.
+* Improve low-roughness glossy stability without dulling polished material identity.
+* Add clearer material-browser metadata for Denrim product UIs.
+* Add normal-map anti-aliasing and authored normal strength.
+* Expand transparent material behavior toward semi-transparent blending, nested dielectric priority, and caustic controls.
+* Keep the material test ball, glossy metal reference, Dragon material variants, and DiningRoom fixture as manual visual review targets.
+
+Speed and Tooling Direction
+
+Performance should be measured as part of quality work, because quality regressions often arrive through slow scenes that no one wants to rerender.
+
+The current tooling direction is:
+
+* `denrim` is the main CLI for rendering `.denrim` files. It exports beauty and AOV outputs, defaults missing output paths to `./out.png`, accepts quality, bounce, backend, denoiser, transparency, and glossy-clamp options, writes optional benchmark JSON, and prints timing / throughput data after every render.
+* `denrim material <preset-or-definition>` renders the material testball by injecting `PreviewMaterial` through SceneScript include resolution, so presets like `matte.clay` can be previewed without editing files.
+* `denrim-render-preview` remains as a compatibility helper for built-in preview scenes.
+* `denrim-render-benchmark` records scene loading, renderer creation, session / acceleration build, sample render time, quality, requested / active backend, path depth, throughput, and clamp setting in JSON.
+* Example scripts render material variants, glossy-metal references, Dragon variants, DiningRoom quality images, and DiningRoom benchmarks with reproducible command lines.
+* DiningRoom remains the heavy manual fixture for OBJ loading, texture loading, glossy interiors, glass, and material-tuning work.
+
+Near-term speed work should focus on avoiding repeated work:
+
+* Reuse `SceneAssetCache` from Denrim apps and tools that repeatedly parse the same scene.
+* Cache parsed SceneScript structure where app lifetimes allow it.
+* Avoid rebuilding unchanged BLAS / TLAS data between sessions.
+* Separate scene compilation, acceleration build, and sample rendering timings everywhere.
+* Keep hardware TLAS traversal and flat BVH parity tests close enough that speed work does not fork visual behavior.
+
 Geometry Abstraction
 
 The most important architectural decision.

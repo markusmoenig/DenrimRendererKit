@@ -39,7 +39,7 @@ The package is currently at the first vertical slice:
 * SceneScript named/grouped geometry arguments such as `position(x, y, z)` and `quad ... a(x, y, z)` with comma support.
 * SceneScript OBJ/PLY mesh asset definitions and imported mesh instances.
 * SceneScript file loading with script-relative includes and asset paths.
-* Preview CLI rendering for SceneScript files with relative asset resolution.
+* Unified `denrim` CLI rendering for SceneScript files with relative asset resolution, full render options, and benchmark timing output.
 * Render-driven texture material tests for checker albedo and normal-map AOV output.
 * Render-driven SceneScript image texture test proving decoded assets can feed material albedo.
 * MoonRay-inspired material roadmap in `Documentation/Materials.md`.
@@ -67,28 +67,50 @@ swift test
 
 The render reference test creates a small Cornell Box PNG as a first visual smoke test.
 
-## Render Preview
+## Command Line Rendering
 
 ```sh
-swift run denrim-render-preview ./CornellBox.png 32 512
+swift run denrim -- Examples/SceneScripts/MaterialVariants/glossy-metal-reference.denrim \
+    --output ./GlossyMetal.png \
+    --samples 64 \
+    --quality interactive
 ```
 
-Arguments are output path, sample count, square image size, optional scene name, optional output name, and an optional asset path used by some scenes.
+`denrim` renders `.denrim` SceneScript files, resolves relative assets beside the script, writes a PNG, and prints benchmark timings to the terminal. If `--output` is omitted, the image is written to `./out.png` in the current directory.
 
 ```sh
-swift run denrim-render-preview ./MaterialReference.png 32 512 materials
+swift run denrim --help
+swift run denrim help render
+swift run denrim help material
 ```
 
-Render a local OBJ or PLY mesh through the material-variant reference scene:
+Useful render options include:
 
 ```sh
-swift run denrim-render-preview ./DragonMaterials.png 32 512 material-variants beauty ./Assets/dragon.ply
+swift run denrim -- Examples/SceneScripts/Quality/DiningRoom/dining-room.denrim \
+    --output /tmp/denrim-dining-room.png \
+    --width 320 \
+    --height 180 \
+    --samples 1 \
+    --quality interactive \
+    --backend automatic \
+    --sample-radiance-clamp 16
 ```
 
-Render a SceneScript file, resolving relative mesh and texture paths beside the script:
+Use `--output-type depth|normal|albedo|material-id|object-id|motion-vector` to export AOVs, `--denoise apple-svgf` or `--denoise simple` for denoiser comparisons, `--backend flat-bvh|metal-ray-tracing` for backend measurements, and `--report-output report.json` or `--json` for benchmark JSON.
+
+Material previews can be rendered directly through the built-in testball scene. Preset ids and inline material definitions accept the same render options:
 
 ```sh
-swift run denrim-render-preview ./ScriptedScene.png 32 512 script beauty ./Scenes/dragon-materials.denrim
+swift run denrim -- material matte.clay --samples 64 --quality interactive
+swift run denrim -- material "0.8 0.05 0.02 roughness 0.18 clearcoat 0.65" \
+    --output /tmp/custom-material.png
+```
+
+```sh
+swift run denrim -- Examples/SceneScripts/MaterialVariants/glossy-metal-reference.denrim \
+    --output /tmp/glossy.png \
+    --report-output /tmp/glossy-report.json
 ```
 
 A self-contained material-variant script template lives at `Examples/SceneScripts/MaterialVariants/material-variants.denrim`. It uses a tiny bundled PLY fixture so tests and examples remain portable. A rendered reference image is checked in at `Examples/Renders/material-variants.png`.
@@ -99,28 +121,15 @@ The Stanford Dragon example is `Examples/SceneScripts/MaterialVariants/dragon-ma
 ./Examples/Tools/render-quality-examples.sh
 ```
 
+The older compatibility executables still exist:
+
+```sh
+swift run denrim-render-preview ./CornellBox.png 32 512
+swift run denrim-render-benchmark cornell 16 256
+```
+
 Performance benchmarks are intentionally separate from normal tests:
 
 ```sh
-swift run denrim-render-benchmark cornell 16 256
-swift run denrim-render-benchmark script 1 64 Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim
 DENRIM_RUN_PERFORMANCE_TESTS=1 swift test --filter PerformanceBenchmarkTests
-```
-
-Benchmark JSON can be written into `Examples/Benchmarks` for later comparison:
-
-```sh
-swift run denrim-render-benchmark script 1 64 Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim --output Examples/Benchmarks/dragon-local-64px-1spp.json
-```
-
-```sh
-swift run denrim-render-preview ./TransparentMaterials.png 32 512 transparency
-```
-
-```sh
-swift run denrim-render-preview ./MaterialAlbedo.png 32 512 materials albedo
-```
-
-```sh
-swift run denrim-render-preview ./MaterialMotion.png 8 512 materials motion-vector
 ```

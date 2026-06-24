@@ -17,6 +17,11 @@ let samples = positionalArguments.count > 1 ? Int(positionalArguments[1]) ?? 32 
 let size = positionalArguments.count > 2 ? Int(positionalArguments[2]) ?? 512 : 512
 let width = optionInt(named: "--width", in: arguments) ?? size
 let height = optionInt(named: "--height", in: arguments) ?? size
+let qualityName = optionValue(named: "--quality", in: arguments)?.lowercased() ?? "preview"
+let quality = try renderQuality(named: qualityName)
+let maxBounces = max(1, optionInt(named: "--max-bounces", in: arguments) ?? defaultMaxBounces(for: quality))
+let backendName = optionValue(named: "--backend", in: arguments)?.lowercased() ?? "automatic"
+let accelerationMode = try renderAccelerationMode(named: backendName)
 let denoiseName = optionValue(named: "--denoise", in: arguments)?.lowercased() ?? "none"
 let denoiseRadius = optionInt(named: "--denoise-radius", in: arguments)
 let denoiseIterations = optionInt(named: "--denoise-iterations", in: arguments)
@@ -24,12 +29,16 @@ let denoiseNormalSigma = optionFloat(named: "--denoise-normal-sigma", in: argume
 let denoiseDepthSigma = optionFloat(named: "--denoise-depth-sigma", in: arguments)
 let denoiseAlbedoSigma = optionFloat(named: "--denoise-albedo-sigma", in: arguments)
 let denoiseColorSigma = optionFloat(named: "--denoise-color-sigma", in: arguments)
+let sampleRadianceClamp = optionFloat(named: "--sample-radiance-clamp", in: arguments)
 let sceneName = positionalArguments.count > 3 ? positionalArguments[3].lowercased() : "cornell"
 let outputName = positionalArguments.count > 4 ? positionalArguments[4].lowercased() : "beauty"
 let assetPath = positionalArguments.count > 5 ? positionalArguments[5] : nil
 var scene: RenderScene
 let output: RenderOutput
 var denoiseSettings: DenoiseSettings
+
+let sampleRadianceClampDescription = sampleRadianceClamp.map { String($0) }
+    ?? "\(quality.defaultSampleRadianceClamp) (quality-default)"
 
 func optionValue(named name: String, in arguments: [String]) -> String? {
     guard let index = arguments.firstIndex(of: name),
@@ -47,6 +56,47 @@ func optionFloat(named name: String, in arguments: [String]) -> Float? {
     optionValue(named: name, in: arguments).flatMap(Float.init)
 }
 
+func renderQuality(named name: String) throws -> RenderQuality {
+    switch name {
+    case "preview", "fast":
+        return .preview
+    case "interactive", "viewport":
+        return .interactive
+    case "final", "export":
+        return .final
+    default:
+        throw DenrimRendererError.invalidScene(
+            "Unknown render quality: \(name). Available qualities: preview, interactive, final."
+        )
+    }
+}
+
+func defaultMaxBounces(for quality: RenderQuality) -> Int {
+    switch quality {
+    case .preview:
+        return 4
+    case .interactive:
+        return 5
+    case .final:
+        return 8
+    }
+}
+
+func renderAccelerationMode(named name: String) throws -> RenderAccelerationMode {
+    switch name {
+    case "automatic", "auto":
+        return .automatic
+    case "flat", "flat-bvh", "flatbvh":
+        return .flatBVH
+    case "metal", "metal-ray-tracing", "metalrt", "hardware", "hardware-ray-tracing":
+        return .metalRayTracing
+    default:
+        throw DenrimRendererError.invalidScene(
+            "Unknown acceleration backend: \(name). Available backends: automatic, flat-bvh, metal-ray-tracing."
+        )
+    }
+}
+
 func positionalValues(in arguments: [String]) -> [String] {
     var values: [String] = []
     var skipNext = false
@@ -56,9 +106,11 @@ func positionalValues(in arguments: [String]) -> [String] {
             continue
         }
         switch argument {
-        case "--width", "--height", "--denoise", "--denoise-radius", "--denoise-iterations",
+        case "--width", "--height", "--quality", "--max-bounces", "--backend",
+             "--denoise", "--denoise-radius", "--denoise-iterations",
              "--denoise-normal-sigma", "--denoise-depth-sigma",
-             "--denoise-albedo-sigma", "--denoise-color-sigma":
+             "--denoise-albedo-sigma", "--denoise-color-sigma",
+             "--sample-radiance-clamp":
             skipNext = true
             continue
         default:
@@ -158,17 +210,23 @@ let session = try renderer.makeSession(
     settings: RenderSettings(
         width: width,
         height: height,
-        maxBounces: 4,
+        maxBounces: maxBounces,
+        quality: quality,
         previousCamera: previousCamera,
-        denoise: denoiseSettings
-    )
+        denoise: denoiseSettings,
+        sampleRadianceClamp: sampleRadianceClamp
+    ),
+    accelerationMode: accelerationMode
 )
 
 try session.render(samples: samples)
 try session.writePNG(output: output, to: outputURL)
 print(
     "Rendered \(session.sampleCount) samples of \(sceneName) \(outputName)"
-        + " (denoise: \(denoiseName), radius: \(denoiseSettings.radius),"
+        + " (quality: \(qualityName), maxBounces: \(maxBounces),"
+        + " backend: \(session.accelerationInfo.activeMode.rawValue),"
+        + " denoise: \(denoiseName), radius: \(denoiseSettings.radius),"
         + " iterations: \(denoiseSettings.iterations),"
-        + " colorSigma: \(denoiseSettings.colorSigma)) to \(outputURL.path)"
+        + " colorSigma: \(denoiseSettings.colorSigma),"
+        + " sampleRadianceClamp: \(sampleRadianceClampDescription)) to \(outputURL.path)"
 )

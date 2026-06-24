@@ -16,12 +16,19 @@ material PreviewMaterial 0.8 0.05 0.02 roughness 0.18 clearcoat 0.65 clearcoatRo
 
 Tools can also generate or replace that include file before calling `SceneScript.parse(contentsOf:)`, or use the parser's include resolver to inject a different `PreviewMaterial` definition without touching `material-testball.denrim`.
 
+The unified CLI exposes that include-injection path directly:
+
+```sh
+swift run denrim -- material matte.clay --samples 64 --quality interactive
+swift run denrim -- material "0.8 0.05 0.02 roughness 0.18 clearcoat 0.65" --output /tmp/custom-material.png
+```
+
 ## Test Render
 
 From the repository root:
 
 ```sh
-swift run -c release denrim-render-preview Examples/Renders/material-testball.png 64 720 script beauty Examples/SceneScripts/MaterialTestBall/material-testball.denrim --width 1280
+swift run -c release denrim -- Examples/SceneScripts/MaterialTestBall/material-testball.denrim --output Examples/Renders/material-testball.png --samples 64 --size 720 --width 1280
 ```
 
 To render all built-in material presets as square thumbnails:
@@ -29,5 +36,7 @@ To render all built-in material presets as square thumbnails:
 ```sh
 ./Examples/Tools/render-built-in-materials.sh
 ```
+
+The script defaults to 512x512, 1024 samples, and `--quality final`. Pass samples and size as the first two arguments for quicker local preview batches.
 
 Denoising is off by default. Keep preview renders raw unless you are explicitly comparing opt-in denoiser modes.

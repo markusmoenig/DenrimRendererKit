@@ -10,6 +10,18 @@ public enum RenderQuality: Sendable {
 
     /// Maximum quality rendering for exports.
     case final
+
+    /// Default per-sample radiance clamp used to reduce isolated glossy fireflies.
+    public var defaultSampleRadianceClamp: Float {
+        switch self {
+        case .preview:
+            return 10
+        case .interactive:
+            return 24
+        case .final:
+            return 64
+        }
+    }
 }
 
 /// User-facing settings for a render session.
@@ -35,6 +47,11 @@ public struct RenderSettings: Sendable {
     /// Optional denoising applied to beauty output. Defaults to disabled.
     public var denoise: DenoiseSettings
 
+    /// Maximum RGB channel value allowed for one Monte Carlo sample contribution.
+    ///
+    /// Use `nil` to inherit the value from `quality`, or `0` to disable clamping.
+    public var sampleRadianceClamp: Float?
+
     /// Creates render settings.
     public init(
         width: Int = 512,
@@ -43,7 +60,8 @@ public struct RenderSettings: Sendable {
         quality: RenderQuality = .preview,
         previousCamera: Camera? = nil,
         transparentBackground: Bool = false,
-        denoise: DenoiseSettings = .none
+        denoise: DenoiseSettings = .none,
+        sampleRadianceClamp: Float? = nil
     ) {
         self.width = width
         self.height = height
@@ -52,5 +70,10 @@ public struct RenderSettings: Sendable {
         self.previousCamera = previousCamera
         self.transparentBackground = transparentBackground
         self.denoise = denoise
+        self.sampleRadianceClamp = sampleRadianceClamp
+    }
+
+    var resolvedSampleRadianceClamp: Float {
+        sampleRadianceClamp ?? quality.defaultSampleRadianceClamp
     }
 }

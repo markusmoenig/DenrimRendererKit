@@ -77,6 +77,21 @@ public struct Material: Sendable {
     /// Grazing fabric / fuzz lobe roughness in the range 0...1.
     public var sheenRoughness: Float
 
+    /// Subsurface scattering weight in the range 0...1.
+    public var subsurface: Float
+
+    /// Multiple-scattering albedo tint for subsurface random walk.
+    public var subsurfaceColor: SIMD3<Float>
+
+    /// Per-channel mean free path radius in scene units.
+    public var subsurfaceRadius: SIMD3<Float>
+
+    /// Multiplier applied to `subsurfaceRadius`.
+    public var subsurfaceScale: Float
+
+    /// Henyey-Greenstein phase anisotropy in the range -0.95...0.95.
+    public var subsurfaceAnisotropy: Float
+
     /// Opacity in the range 0...1.
     public var opacity: Float
 
@@ -100,6 +115,18 @@ public struct Material: Sendable {
 
     /// Treats transmission as a zero-thickness surface with no volume refraction.
     public var thinWalled: Bool
+
+    /// Participating-medium scattering strength for solid transmissive materials.
+    public var volumeScattering: Float
+
+    /// Participating-medium scattering tint in linear RGB.
+    public var volumeScatteringColor: SIMD3<Float>
+
+    /// Mean free path distance for participating-medium scattering. Zero disables scattering.
+    public var volumeScatteringDistance: Float
+
+    /// Henyey-Greenstein phase anisotropy for participating-medium scattering.
+    public var volumeAnisotropy: Float
 
     /// Optional base color texture sampled by mesh UVs.
     public var baseColorTexture: Texture2D?
@@ -130,6 +157,11 @@ public struct Material: Sendable {
         sheen: Float = 0,
         sheenColor: SIMD3<Float> = SIMD3<Float>(1, 1, 1),
         sheenRoughness: Float = 0.5,
+        subsurface: Float = 0,
+        subsurfaceColor: SIMD3<Float>? = nil,
+        subsurfaceRadius: SIMD3<Float> = SIMD3<Float>(1, 1, 1),
+        subsurfaceScale: Float = 1,
+        subsurfaceAnisotropy: Float = 0,
         opacity: Float = 1,
         transmission: Float = 0,
         transmissionColor: SIMD3<Float>? = nil,
@@ -138,6 +170,10 @@ public struct Material: Sendable {
         transmissionAbsorptionColor: SIMD3<Float> = SIMD3<Float>(1, 1, 1),
         transmissionAbsorptionDistance: Float = 0,
         thinWalled: Bool = false,
+        volumeScattering: Float = 0,
+        volumeScatteringColor: SIMD3<Float>? = nil,
+        volumeScatteringDistance: Float = 1,
+        volumeAnisotropy: Float = 0,
         baseColorTexture: Texture2D? = nil,
         normalMap: Texture2D? = nil
     ) {
@@ -162,6 +198,11 @@ public struct Material: Sendable {
         self.sheen = sheen
         self.sheenColor = sheenColor
         self.sheenRoughness = sheenRoughness
+        self.subsurface = subsurface
+        self.subsurfaceColor = subsurfaceColor ?? baseColor
+        self.subsurfaceRadius = subsurfaceRadius
+        self.subsurfaceScale = subsurfaceScale
+        self.subsurfaceAnisotropy = subsurfaceAnisotropy
         self.opacity = opacity
         self.transmission = transmission
         self.transmissionColor = transmissionColor ?? baseColor
@@ -170,6 +211,10 @@ public struct Material: Sendable {
         self.transmissionAbsorptionColor = transmissionAbsorptionColor
         self.transmissionAbsorptionDistance = transmissionAbsorptionDistance
         self.thinWalled = thinWalled
+        self.volumeScattering = volumeScattering
+        self.volumeScatteringColor = volumeScatteringColor ?? transmissionColor ?? baseColor
+        self.volumeScatteringDistance = volumeScatteringDistance
+        self.volumeAnisotropy = volumeAnisotropy
         self.baseColorTexture = baseColorTexture
         self.normalMap = normalMap
     }
@@ -212,6 +257,27 @@ public struct Material: Sendable {
                 thinFilm,
                 thinFilmThicknessNanometers,
                 thinFilmIndexOfRefraction,
+                0
+            ),
+            subsurfaceColor: SIMD4<Float>(subsurfaceColor, subsurface),
+            subsurfaceRadius: SIMD4<Float>(
+                subsurfaceRadius,
+                subsurfaceScale
+            ),
+            subsurfaceParameters: SIMD4<Float>(
+                subsurfaceAnisotropy,
+                0,
+                0,
+                0
+            ),
+            volumeScattering: SIMD4<Float>(
+                volumeScatteringColor,
+                volumeScattering
+            ),
+            volumeParameters: SIMD4<Float>(
+                volumeScatteringDistance,
+                volumeAnisotropy,
+                0,
                 0
             )
         )

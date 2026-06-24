@@ -41,6 +41,11 @@ struct GPUMaterial {
     float4 clearcoatAttenuation;
     float4 transmissionAbsorption;
     float4 thinFilm;
+    float4 subsurfaceColor;
+    float4 subsurfaceRadius;
+    float4 subsurfaceParameters;
+    float4 volumeScattering;
+    float4 volumeParameters;
 };
 
 struct GPUAccelerationNode {
@@ -81,8 +86,8 @@ struct GPURenderConstants {
     float environmentIntensity;
     float environmentRotationY;
     float environmentMaxRadiance;
+    float sampleRadianceClamp;
     uint padding1;
-    uint padding2;
 };
 
 struct GPURayTracingInstance {
@@ -132,6 +137,13 @@ static float3 cosineHemisphere(float2 u) {
     return float3(r * cos(phi), r * sin(phi), sqrt(max(0.0f, 1.0f - u.x)));
 }
 
+static float3 uniformSphere(float2 u) {
+    float z = 1.0f - 2.0f * u.x;
+    float r = sqrt(max(0.0f, 1.0f - z * z));
+    float phi = 6.28318530718f * u.y;
+    return float3(r * cos(phi), r * sin(phi), z);
+}
+
 static float3 orientHemisphere(float3 localDirection, float3 normal) {
     float3 helper = fabs(normal.y) < 0.999f ? float3(0, 1, 0) : float3(1, 0, 0);
     float3 tangent = normalize(cross(helper, normal));
@@ -139,8 +151,48 @@ static float3 orientHemisphere(float3 localDirection, float3 normal) {
     return normalize(localDirection.x * tangent + localDirection.y * bitangent + localDirection.z * normal);
 }
 
+static float3 orientAroundDirection(float3 localDirection, float3 direction) {
+    float3 helper = fabs(direction.y) < 0.999f ? float3(0, 1, 0) : float3(1, 0, 0);
+    float3 tangent = normalize(cross(helper, direction));
+    float3 bitangent = cross(direction, tangent);
+    return normalize(localDirection.x * tangent + localDirection.y * bitangent + localDirection.z * direction);
+}
+
+static float3 sampleHenyeyGreenstein(float2 u, float3 direction, float anisotropy) {
+    float g = clamp(anisotropy, -0.95f, 0.95f);
+    if (fabs(g) < 1e-4f) {
+        return uniformSphere(u);
+    }
+
+    float oneMinusGSquared = 1.0f - g * g;
+    float denominator = 1.0f - g + 2.0f * g * u.x;
+    float cosTheta = (1.0f + g * g - (oneMinusGSquared / max(denominator, 1e-5f)) * (oneMinusGSquared / max(denominator, 1e-5f))) / (2.0f * g);
+    cosTheta = clamp(cosTheta, -1.0f, 1.0f);
+    float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
+    float phi = 6.28318530718f * u.y;
+    return orientAroundDirection(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta), direction);
+}
+
 static float maxComponent(float3 value) {
     return max(value.x, max(value.y, value.z));
+}
+
+static float3 clampSampleContribution(float3 contribution, constant GPURenderConstants &constants) {
+    if (!all(isfinite(contribution))) {
+        return float3(0.0f);
+    }
+
+    float clampValue = max(constants.sampleRadianceClamp, 0.0f);
+    if (clampValue <= 0.0f) {
+        return contribution;
+    }
+
+    float peak = maxComponent(contribution);
+    if (peak <= clampValue) {
+        return contribution;
+    }
+
+    return contribution * (clampValue / max(peak, 1e-5f));
 }
 
 static float luminance(float3 value) {
@@ -281,19 +333,81 @@ static float materialSheenRoughness(GPUMaterial material) {
     return clamp(material.parameters3.x, 0.02f, 1.0f);
 }
 
+static float materialSubsurface(GPUMaterial material) {
+    float metallic = clamp(material.parameters.y, 0.0f, 1.0f);
+    float transmission = materialTransmission(material);
+    return clamp(material.subsurfaceColor.w, 0.0f, 1.0f) * (1.0f - metallic) * (1.0f - transmission);
+}
+
+static float3 materialSubsurfaceColor(GPUMaterial material) {
+    return clamp(material.subsurfaceColor.xyz, float3(0.0f), float3(0.999f));
+}
+
+static float3 materialSubsurfaceRadius(GPUMaterial material) {
+    float scale = max(material.subsurfaceRadius.w, 0.0f);
+    return max(material.subsurfaceRadius.xyz * scale, float3(1e-4f));
+}
+
+static float materialSubsurfaceAnisotropy(GPUMaterial material) {
+    return clamp(material.subsurfaceParameters.x, -0.95f, 0.95f);
+}
+
 static float3 materialTransmissionTint(GPUMaterial material, float strength) {
     return mix(float3(1.0f), materialTransmissionColor(material), strength);
 }
 
-static float3 materialTransmissionAbsorption(GPUMaterial material, float distance, bool applies) {
+static float3 materialTransmissionAbsorptionCoefficient(GPUMaterial material) {
     float referenceDistance = material.transmissionAbsorption.w;
-    if (!applies || referenceDistance <= 1e-5f || distance <= 0.0f) {
-        return float3(1.0f);
+    if (referenceDistance <= 1e-5f) {
+        return float3(0.0f);
     }
 
     float3 referenceColor = clamp(material.transmissionAbsorption.xyz, float3(0.0001f), float3(1.0f));
-    float3 absorptionCoefficient = -log(referenceColor) / referenceDistance;
-    return exp(-absorptionCoefficient * distance);
+    return -log(referenceColor) / referenceDistance;
+}
+
+static float3 materialTransmissionAbsorption(GPUMaterial material, float distance, bool applies) {
+    if (!applies || distance <= 0.0f) {
+        return float3(1.0f);
+    }
+
+    return exp(-materialTransmissionAbsorptionCoefficient(material) * distance);
+}
+
+static float materialVolumeScattering(GPUMaterial material) {
+    return clamp(material.volumeScattering.w, 0.0f, 1.0f);
+}
+
+static float3 materialVolumeScatteringColor(GPUMaterial material) {
+    return clamp(material.volumeScattering.xyz, float3(0.0f), float3(1.0f));
+}
+
+static float materialVolumeScatteringDistance(GPUMaterial material) {
+    return max(material.volumeParameters.x, 1e-4f);
+}
+
+static float materialVolumeAnisotropy(GPUMaterial material) {
+    return clamp(material.volumeParameters.y, -0.95f, 0.95f);
+}
+
+static bool materialHasVolumeScattering(GPUMaterial material) {
+    return materialTransmission(material) > 0.0f
+        && !materialThinWalled(material)
+        && materialVolumeScattering(material) > 0.0f;
+}
+
+static float3 materialVolumeSigmaS(GPUMaterial material) {
+    return materialVolumeScatteringColor(material)
+        * materialVolumeScattering(material)
+        / materialVolumeScatteringDistance(material);
+}
+
+static float3 materialVolumeSigmaT(GPUMaterial material) {
+    return materialTransmissionAbsorptionCoefficient(material) + materialVolumeSigmaS(material);
+}
+
+static float3 materialVolumeTransmittance(GPUMaterial material, float distance) {
+    return exp(-materialVolumeSigmaT(material) * distance);
 }
 
 struct TangentFrame {
@@ -927,7 +1041,11 @@ static bool continueTransmissiveSurface(
         float grazing = 1.0f - abs(dot(viewDirection, hit.normal));
         float tintStrength = mix(0.35f, 0.95f, grazing * grazing);
         float transmissionWeight = (1.0f - fresnel) / max(1.0f - reflectProbability, 1e-5f);
-        float3 absorption = materialTransmissionAbsorption(material, hit.t, !hit.frontFacing);
+        float3 absorption = materialTransmissionAbsorption(
+            material,
+            hit.t,
+            !hit.frontFacing && !materialHasVolumeScattering(material)
+        );
         throughput *= materialTransmissionTint(material, tintStrength) * absorption * transmissionWeight;
     }
 
@@ -1167,6 +1285,204 @@ static Hit intersectSceneHardware(
     hit.objectID = instance.metadata.z;
     hit.primitiveID = triangleIndex;
     return hit;
+}
+
+static float3 subsurfaceSigmaT(GPUMaterial material) {
+    return 1.0f / materialSubsurfaceRadius(material);
+}
+
+static float sampleSubsurfaceFreeFlight(float3 sigmaT, float2 u) {
+    float sigma = sigmaT.z;
+    if (u.x < 0.33333333333f) {
+        sigma = sigmaT.x;
+    } else if (u.x < 0.66666666667f) {
+        sigma = sigmaT.y;
+    }
+
+    return -log(max(1.0f - u.y, 1e-6f)) / max(sigma, 1e-4f);
+}
+
+static float subsurfaceCollisionPDF(float3 sigmaT, float distance) {
+    float3 transmittance = exp(-sigmaT * distance);
+    return max((sigmaT.x * transmittance.x + sigmaT.y * transmittance.y + sigmaT.z * transmittance.z) * 0.33333333333f, 1e-6f);
+}
+
+static float subsurfaceBoundaryPDF(float3 sigmaT, float distance) {
+    float3 transmittance = exp(-sigmaT * distance);
+    return max((transmittance.x + transmittance.y + transmittance.z) * 0.33333333333f, 1e-6f);
+}
+
+static float3 subsurfaceCollisionWeight(float3 sigmaT, float3 scatteringAlbedo, float distance) {
+    float3 transmittance = exp(-sigmaT * distance);
+    return scatteringAlbedo * sigmaT * transmittance / subsurfaceCollisionPDF(sigmaT, distance);
+}
+
+static float3 subsurfaceBoundaryWeight(float3 sigmaT, float distance) {
+    float3 transmittance = exp(-sigmaT * distance);
+    return transmittance / subsurfaceBoundaryPDF(sigmaT, distance);
+}
+
+static bool continueSubsurfaceRandomWalk(
+    Hit entryHit,
+    GPUMaterial material,
+    constant GPURenderConstants &constants,
+    constant GPUTriangle *triangles,
+    constant GPUAccelerationNode *nodes,
+    constant uint *primitiveIndices,
+    thread Ray &ray,
+    thread float3 &throughput,
+    thread float &previousBSDFPDF,
+    thread uint &state
+) {
+    float subsurface = materialSubsurface(material);
+    if (subsurface <= 0.0f || !entryHit.frontFacing) {
+        return false;
+    }
+
+    float3 entryDirection = orientHemisphere(
+        cosineHemisphere(float2(randomFloat(state), randomFloat(state))),
+        -entryHit.normal
+    );
+    Ray mediumRay;
+    mediumRay.origin = entryHit.position + entryDirection * 0.001f;
+    mediumRay.direction = entryDirection;
+
+    float3 sigmaT = subsurfaceSigmaT(material);
+    float3 scatteringAlbedo = materialSubsurfaceColor(material);
+    float anisotropy = materialSubsurfaceAnisotropy(material);
+
+    for (uint step = 0u; step < 8u; ++step) {
+        Hit boundaryHit = intersectScene(mediumRay, constants, triangles, nodes, primitiveIndices);
+        if (!boundaryHit.hit) {
+            return false;
+        }
+
+        float freeFlight = sampleSubsurfaceFreeFlight(sigmaT, float2(randomFloat(state), randomFloat(state)));
+        if (freeFlight < boundaryHit.t) {
+            mediumRay.origin += mediumRay.direction * freeFlight;
+            mediumRay.direction = sampleHenyeyGreenstein(
+                float2(randomFloat(state), randomFloat(state)),
+                mediumRay.direction,
+                anisotropy
+            );
+            throughput *= subsurfaceCollisionWeight(sigmaT, scatteringAlbedo, freeFlight);
+            if (maxComponent(throughput) <= 1e-4f) {
+                return false;
+            }
+            continue;
+        }
+
+        float3 exitNormal = boundaryHit.frontFacing ? boundaryHit.normal : -boundaryHit.normal;
+        exitNormal = normalize(exitNormal);
+        float3 localDirection = cosineHemisphere(float2(randomFloat(state), randomFloat(state)));
+        ray.direction = orientHemisphere(localDirection, exitNormal);
+        ray.origin = boundaryHit.position + exitNormal * 0.001f;
+        throughput *= subsurfaceBoundaryWeight(sigmaT, boundaryHit.t);
+        previousBSDFPDF = max(dot(exitNormal, ray.direction), 0.0f) * 0.31830988618f;
+        return true;
+    }
+
+    return false;
+}
+
+static bool continueSubsurfaceRandomWalkHardware(
+    Hit entryHit,
+    GPUMaterial material,
+    acceleration_structure<instancing> scene,
+    constant GPUTriangle *localTriangles,
+    constant GPURayTracingInstance *rtInstances,
+    thread Ray &ray,
+    thread float3 &throughput,
+    thread float &previousBSDFPDF,
+    thread uint &state
+) {
+    float subsurface = materialSubsurface(material);
+    if (subsurface <= 0.0f || !entryHit.frontFacing) {
+        return false;
+    }
+
+    float3 entryDirection = orientHemisphere(
+        cosineHemisphere(float2(randomFloat(state), randomFloat(state))),
+        -entryHit.normal
+    );
+    Ray mediumRay;
+    mediumRay.origin = entryHit.position + entryDirection * 0.001f;
+    mediumRay.direction = entryDirection;
+
+    float3 sigmaT = subsurfaceSigmaT(material);
+    float3 scatteringAlbedo = materialSubsurfaceColor(material);
+    float anisotropy = materialSubsurfaceAnisotropy(material);
+
+    for (uint step = 0u; step < 8u; ++step) {
+        Hit boundaryHit = intersectSceneHardware(mediumRay, scene, localTriangles, rtInstances);
+        if (!boundaryHit.hit) {
+            return false;
+        }
+
+        float freeFlight = sampleSubsurfaceFreeFlight(sigmaT, float2(randomFloat(state), randomFloat(state)));
+        if (freeFlight < boundaryHit.t) {
+            mediumRay.origin += mediumRay.direction * freeFlight;
+            mediumRay.direction = sampleHenyeyGreenstein(
+                float2(randomFloat(state), randomFloat(state)),
+                mediumRay.direction,
+                anisotropy
+            );
+            throughput *= subsurfaceCollisionWeight(sigmaT, scatteringAlbedo, freeFlight);
+            if (maxComponent(throughput) <= 1e-4f) {
+                return false;
+            }
+            continue;
+        }
+
+        float3 exitNormal = boundaryHit.frontFacing ? boundaryHit.normal : -boundaryHit.normal;
+        exitNormal = normalize(exitNormal);
+        float3 localDirection = cosineHemisphere(float2(randomFloat(state), randomFloat(state)));
+        ray.direction = orientHemisphere(localDirection, exitNormal);
+        ray.origin = boundaryHit.position + exitNormal * 0.001f;
+        throughput *= subsurfaceBoundaryWeight(sigmaT, boundaryHit.t);
+        previousBSDFPDF = max(dot(exitNormal, ray.direction), 0.0f) * 0.31830988618f;
+        return true;
+    }
+
+    return false;
+}
+
+static bool continueTransmissionVolumeRandomWalk(
+    Hit boundaryHit,
+    GPUMaterial material,
+    thread Ray &ray,
+    thread float3 &throughput,
+    thread float &previousBSDFPDF,
+    thread uint &state
+) {
+    if (boundaryHit.frontFacing || !materialHasVolumeScattering(material)) {
+        return false;
+    }
+
+    float3 sigmaT = materialVolumeSigmaT(material);
+    float3 sigmaS = materialVolumeSigmaS(material);
+    if (maxComponent(sigmaT) <= 1e-5f || maxComponent(sigmaS) <= 1e-5f) {
+        return false;
+    }
+
+    float freeFlight = sampleSubsurfaceFreeFlight(sigmaT, float2(randomFloat(state), randomFloat(state)));
+    if (freeFlight >= boundaryHit.t) {
+        throughput *= materialVolumeTransmittance(material, boundaryHit.t)
+            / subsurfaceBoundaryPDF(sigmaT, boundaryHit.t);
+        return false;
+    }
+
+    float3 transmittance = exp(-sigmaT * freeFlight);
+    throughput *= sigmaS * transmittance / subsurfaceCollisionPDF(sigmaT, freeFlight);
+    ray.origin += ray.direction * freeFlight;
+    ray.direction = sampleHenyeyGreenstein(
+        float2(randomFloat(state), randomFloat(state)),
+        ray.direction,
+        materialVolumeAnisotropy(material)
+    );
+    ray.origin += ray.direction * 0.001f;
+    previousBSDFPDF = 0.0f;
+    return maxComponent(throughput) > 1e-4f;
 }
 
 static float4 sampleTexture(
@@ -1532,12 +1848,11 @@ static bool shadowOccluded(
             return true;
         }
 
-        float3 absorption = materialTransmissionAbsorption(
-            shadowMaterial,
-            shadowHit.t,
-            !shadowHit.frontFacing && !materialThinWalled(shadowMaterial)
-        );
-        transmittance *= materialTransmissionTint(shadowMaterial, 0.35f) * absorption * transmission;
+        bool insideSolid = !shadowHit.frontFacing && !materialThinWalled(shadowMaterial);
+        float3 mediumTransmittance = materialHasVolumeScattering(shadowMaterial) && insideSolid
+            ? materialVolumeTransmittance(shadowMaterial, shadowHit.t)
+            : materialTransmissionAbsorption(shadowMaterial, shadowHit.t, insideSolid);
+        transmittance *= materialTransmissionTint(shadowMaterial, 0.35f) * mediumTransmittance * transmission;
         if (maxComponent(transmittance) < 0.02f) {
             return true;
         }
@@ -1578,12 +1893,11 @@ static bool shadowOccludedHardware(
             return true;
         }
 
-        float3 absorption = materialTransmissionAbsorption(
-            shadowMaterial,
-            shadowHit.t,
-            !shadowHit.frontFacing && !materialThinWalled(shadowMaterial)
-        );
-        transmittance *= materialTransmissionTint(shadowMaterial, 0.35f) * absorption * transmission;
+        bool insideSolid = !shadowHit.frontFacing && !materialThinWalled(shadowMaterial);
+        float3 mediumTransmittance = materialHasVolumeScattering(shadowMaterial) && insideSolid
+            ? materialVolumeTransmittance(shadowMaterial, shadowHit.t)
+            : materialTransmissionAbsorption(shadowMaterial, shadowHit.t, insideSolid);
+        transmittance *= materialTransmissionTint(shadowMaterial, 0.35f) * mediumTransmittance * transmission;
         if (maxComponent(transmittance) < 0.02f) {
             return true;
         }
@@ -1933,6 +2247,11 @@ kernel void pathTraceKernel(
     primaryMaterial.clearcoatAttenuation = float4(0);
     primaryMaterial.transmissionAbsorption = float4(0);
     primaryMaterial.thinFilm = float4(0);
+    primaryMaterial.subsurfaceColor = float4(0);
+    primaryMaterial.subsurfaceRadius = float4(0);
+    primaryMaterial.subsurfaceParameters = float4(0);
+    primaryMaterial.volumeScattering = float4(0);
+    primaryMaterial.volumeParameters = float4(0);
 
     for (uint bounce = 0; bounce < constants.maxBounces; ++bounce) {
         Hit hit = intersectScene(ray, constants, triangles, nodes, primitiveIndices);
@@ -1952,12 +2271,13 @@ kernel void pathTraceKernel(
                     );
                     environmentWeight = powerHeuristic(previousBSDFPDF, environmentLightPDF);
                 }
-                radiance += throughput * sampleEnvironment(
+                float3 environmentContribution = throughput * sampleEnvironment(
                     ray.direction,
                     constants,
                     textureDescriptors,
                     texturePixels
                 ) * environmentWeight;
+                radiance += clampSampleContribution(environmentContribution, constants);
             }
             break;
         }
@@ -1972,6 +2292,34 @@ kernel void pathTraceKernel(
         if (!primaryHit.hit) {
             primaryHit = hit;
             primaryMaterial = material;
+        }
+
+        if (continueTransmissionVolumeRandomWalk(hit, material, ray, throughput, previousBSDFPDF, state)) {
+            if (terminatePathWithRussianRoulette(bounce, throughput, state)) {
+                break;
+            }
+            continue;
+        }
+
+        float subsurface = materialSubsurface(material);
+        if (subsurface > 0.0f && randomFloat(state) < subsurface) {
+            if (continueSubsurfaceRandomWalk(
+                hit,
+                material,
+                constants,
+                triangles,
+                nodes,
+                primitiveIndices,
+                ray,
+                throughput,
+                previousBSDFPDF,
+                state
+            )) {
+                if (terminatePathWithRussianRoulette(bounce, throughput, state)) {
+                    break;
+                }
+                continue;
+            }
         }
 
         if (continueTransmissiveSurface(hit, material, ray, throughput, previousBSDFPDF, state)) {
@@ -1994,11 +2342,12 @@ kernel void pathTraceKernel(
                 );
                 emissionWeight = powerHeuristic(previousBSDFPDF, lightPDF);
             }
-            radiance += throughput * material.emission.xyz * emissionWeight;
+            float3 emissionContribution = throughput * material.emission.xyz * emissionWeight;
+            radiance += clampSampleContribution(emissionContribution, constants);
             break;
         }
 
-        radiance += throughput * sampleDirectLighting(
+        float3 directContribution = throughput * sampleDirectLighting(
             hit,
             material,
             -ray.direction,
@@ -2013,6 +2362,7 @@ kernel void pathTraceKernel(
             texturePixels,
             state
         );
+        radiance += clampSampleContribution(directContribution, constants);
         float roughness = clamp(material.parameters.x, 0.02f, 1.0f);
         float anisotropy = materialSpecularAnisotropy(material);
         float3 f0 = materialF0(material);
@@ -2228,6 +2578,11 @@ kernel void pathTraceHardwareKernel(
     primaryMaterial.clearcoatAttenuation = float4(0);
     primaryMaterial.transmissionAbsorption = float4(0);
     primaryMaterial.thinFilm = float4(0);
+    primaryMaterial.subsurfaceColor = float4(0);
+    primaryMaterial.subsurfaceRadius = float4(0);
+    primaryMaterial.subsurfaceParameters = float4(0);
+    primaryMaterial.volumeScattering = float4(0);
+    primaryMaterial.volumeParameters = float4(0);
 
     for (uint bounce = 0; bounce < constants.maxBounces; ++bounce) {
         Hit hit = intersectSceneHardware(ray, scene, localTriangles, rtInstances);
@@ -2247,12 +2602,13 @@ kernel void pathTraceHardwareKernel(
                     );
                     environmentWeight = powerHeuristic(previousBSDFPDF, environmentLightPDF);
                 }
-                radiance += throughput * sampleEnvironment(
+                float3 environmentContribution = throughput * sampleEnvironment(
                     ray.direction,
                     constants,
                     textureDescriptors,
                     texturePixels
                 ) * environmentWeight;
+                radiance += clampSampleContribution(environmentContribution, constants);
             }
             break;
         }
@@ -2267,6 +2623,33 @@ kernel void pathTraceHardwareKernel(
         if (!primaryHit.hit) {
             primaryHit = hit;
             primaryMaterial = material;
+        }
+
+        if (continueTransmissionVolumeRandomWalk(hit, material, ray, throughput, previousBSDFPDF, state)) {
+            if (terminatePathWithRussianRoulette(bounce, throughput, state)) {
+                break;
+            }
+            continue;
+        }
+
+        float subsurface = materialSubsurface(material);
+        if (subsurface > 0.0f && randomFloat(state) < subsurface) {
+            if (continueSubsurfaceRandomWalkHardware(
+                hit,
+                material,
+                scene,
+                localTriangles,
+                rtInstances,
+                ray,
+                throughput,
+                previousBSDFPDF,
+                state
+            )) {
+                if (terminatePathWithRussianRoulette(bounce, throughput, state)) {
+                    break;
+                }
+                continue;
+            }
         }
 
         if (continueTransmissiveSurface(hit, material, ray, throughput, previousBSDFPDF, state)) {
@@ -2289,11 +2672,12 @@ kernel void pathTraceHardwareKernel(
                 );
                 emissionWeight = powerHeuristic(previousBSDFPDF, lightPDF);
             }
-            radiance += throughput * material.emission.xyz * emissionWeight;
+            float3 emissionContribution = throughput * material.emission.xyz * emissionWeight;
+            radiance += clampSampleContribution(emissionContribution, constants);
             break;
         }
 
-        radiance += throughput * sampleDirectLightingHardware(
+        float3 directContribution = throughput * sampleDirectLightingHardware(
             hit,
             material,
             -ray.direction,
@@ -2309,6 +2693,7 @@ kernel void pathTraceHardwareKernel(
             texturePixels,
             state
         );
+        radiance += clampSampleContribution(directContribution, constants);
         float roughness = clamp(material.parameters.x, 0.02f, 1.0f);
         float anisotropy = materialSpecularAnisotropy(material);
         float3 f0 = materialF0(material);

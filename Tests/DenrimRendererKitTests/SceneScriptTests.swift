@@ -76,8 +76,8 @@ final class SceneScriptTests: XCTestCase {
         material compact 0.8 0.7 0.5 roughness 0.22 metallic 1
         material brushed 0.8 0.7 0.5 roughness 0.22 metallic 1 opacity 0.9
         material glow 1 1 1 emission 1 0.8 0.4 6
-        material glassy 0.8 0.9 1 specular 0.7 specularColor 0.9 0.8 0.7 ior 1.62 anisotropy 0.55 transmission 0.85 transmissionColor 0.45 0.72 1 transmissionRoughness 0.12 transmissionIOR 1.38 absorptionColor 0.5 0.75 1 absorptionDistance 1.4 clearcoat 0.45 clearcoatColor 0.7 0.92 1 clearcoatAttenuationColor 0.62 0.78 0.94 clearcoatThickness 0.35 clearcoatRoughness 0.08 clearcoatIOR 1.58 thinFilm 0.7 thinFilmThickness 510 thinFilmIOR 1.42
-        material fabric 0.35 0.2 0.8 sheen 0.6 sheenColor 0.9 0.72 1 sheenRoughness 0.75
+        material glassy 0.8 0.9 1 specular 0.7 specularColor 0.9 0.8 0.7 ior 1.62 anisotropy 0.55 transmission 0.85 transmissionColor 0.45 0.72 1 transmissionRoughness 0.12 transmissionIOR 1.38 absorptionColor 0.5 0.75 1 absorptionDistance 1.4 volumeScattering 0.68 volumeScatteringColor 0.82 0.88 0.96 volumeScatteringDistance 0.45 volumeAnisotropy 0.25 clearcoat 0.45 clearcoatColor 0.7 0.92 1 clearcoatAttenuationColor 0.62 0.78 0.94 clearcoatThickness 0.35 clearcoatRoughness 0.08 clearcoatIOR 1.58 thinFilm 0.7 thinFilmThickness 510 thinFilmIOR 1.42
+        material fabric 0.35 0.2 0.8 sheen 0.6 sheenColor 0.9 0.72 1 sheenRoughness 0.75 subsurface 0.65 subsurfaceColor 0.9 0.35 0.22 subsurfaceRadius 1.0 0.42 0.18 subsurfaceScale 0.3 subsurfaceAnisotropy 0.12
         material sourceGlass 0.7 0.8 0.8 spectrans 1 thinWalled 1 fuzz 0.4 fuzzColor 0.7 0.8 0.9 fuzzRoughness 0.65
         """
 
@@ -104,6 +104,12 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(scene.materials[3].transmissionAbsorptionColor.y, 0.75, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[3].transmissionAbsorptionColor.z, 1, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[3].transmissionAbsorptionDistance, 1.4, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].volumeScattering, 0.68, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].volumeScatteringColor.x, 0.82, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].volumeScatteringColor.y, 0.88, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].volumeScatteringColor.z, 0.96, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].volumeScatteringDistance, 0.45, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[3].volumeAnisotropy, 0.25, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[3].clearcoat, 0.45, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[3].clearcoatColor.x, 0.7, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[3].clearcoatColor.y, 0.92, accuracy: 0.0001)
@@ -123,6 +129,15 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(scene.materials[4].sheenColor.y, 0.72, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[4].sheenColor.z, 1, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[4].sheenRoughness, 0.75, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[4].subsurface, 0.65, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[4].subsurfaceColor.x, 0.9, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[4].subsurfaceColor.y, 0.35, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[4].subsurfaceColor.z, 0.22, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[4].subsurfaceRadius.x, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[4].subsurfaceRadius.y, 0.42, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[4].subsurfaceRadius.z, 0.18, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[4].subsurfaceScale, 0.3, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[4].subsurfaceAnisotropy, 0.12, accuracy: 0.0001)
         XCTAssertEqual(scene.materials[5].transmission, 1, accuracy: 0.0001)
         XCTAssertTrue(scene.materials[5].thinWalled)
         XCTAssertEqual(scene.materials[5].sheen, 0.4, accuracy: 0.0001)

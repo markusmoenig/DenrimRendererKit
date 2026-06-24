@@ -39,6 +39,11 @@ struct GPUMaterial {
     var clearcoatAttenuation: SIMD4<Float>
     var transmissionAbsorption: SIMD4<Float>
     var thinFilm: SIMD4<Float>
+    var subsurfaceColor: SIMD4<Float>
+    var subsurfaceRadius: SIMD4<Float>
+    var subsurfaceParameters: SIMD4<Float>
+    var volumeScattering: SIMD4<Float>
+    var volumeParameters: SIMD4<Float>
 }
 
 struct GPUTextureDescriptor {
@@ -79,8 +84,8 @@ struct GPURenderConstants {
     var environmentIntensity: Float
     var environmentRotationY: Float
     var environmentMaxRadiance: Float
+    var sampleRadianceClamp: Float
     var padding1: UInt32
-    var padding2: UInt32
 }
 
 struct GPURayTracingInstance {

@@ -22,27 +22,27 @@ To render the checked-in examples at reference quality:
 ./Examples/Tools/render-quality-examples.sh
 ```
 
-The script renders 128 samples at 512 px by default. Override with `./Examples/Tools/render-quality-examples.sh 512 512` when you want a slower, cleaner render.
+The script renders 128 samples at 512 px with interactive quality, automatic backend selection, and a moderate glossy clamp by default. Override with `./Examples/Tools/render-quality-examples.sh 512 512 24 final automatic` when you want a slower, cleaner render.
 
 For a quick preview of the self-contained fixture scene:
 
 ```sh
-swift run denrim-render-preview Examples/Renders/material-variants.png 32 512 script beauty Examples/SceneScripts/MaterialVariants/material-variants.denrim
+swift run denrim -- Examples/SceneScripts/MaterialVariants/material-variants.denrim --output Examples/Renders/material-variants.png --samples 32 --size 512
 ```
 
 For a quick glossy-metal preview:
 
 ```sh
-swift run denrim-render-preview Examples/Renders/glossy-metal-reference.png 64 512 script beauty Examples/SceneScripts/MaterialVariants/glossy-metal-reference.denrim
+swift run denrim -- Examples/SceneScripts/MaterialVariants/glossy-metal-reference.denrim --output Examples/Renders/glossy-metal-reference.png --samples 64 --size 512 --quality interactive --backend automatic --sample-radiance-clamp 24
 ```
 
 For a public-domain material-test-ball preview:
 
 ```sh
-swift run denrim-render-preview Examples/Renders/material-testball.png 64 720 script beauty Examples/SceneScripts/MaterialTestBall/material-testball.denrim --width 1280
+swift run denrim -- Examples/SceneScripts/MaterialTestBall/material-testball.denrim --output Examples/Renders/material-testball.png --samples 64 --size 720 --width 1280
 ```
 
-To render one 512x512 preview for every built-in material preset at 128 spp:
+To render one 512x512 final-quality preview for every built-in material preset at 1024 spp:
 
 ```sh
 ./Examples/Tools/render-built-in-materials.sh
@@ -51,7 +51,7 @@ To render one 512x512 preview for every built-in material preset at 128 spp:
 Pass sample count, size, output directory, and an optional preset id when you only want to refresh one thumbnail:
 
 ```sh
-./Examples/Tools/render-built-in-materials.sh 512 512 Examples/Renders/Materials glass.clear
+./Examples/Tools/render-built-in-materials.sh 1024 512 Examples/Renders/Materials glass.clear
 ```
 
 The material previews are written to `Renders/Materials`. The script reads preset identifiers from `Sources/DenrimRendererKit/Scene/BuiltInMaterialLibrary.swift`, temporarily rewrites `SceneScripts/MaterialTestBall/preview-material.denrim` for each preset, and restores that include before exiting. Swift callers can query matching UI metadata and thumbnail paths with `BuiltInMaterialLibrary.previews`.
@@ -61,7 +61,7 @@ The material previews are written to `Renders/Materials`. The script reads prese
 If the dragon scene feels slow, benchmark it before changing renderer internals:
 
 ```sh
-swift run denrim-render-benchmark script 1 64 Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim
+swift run denrim -- Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim --output /tmp/dragon-material-variants.png --samples 1 --size 64 --quality interactive --backend automatic --sample-radiance-clamp 24
 ```
 
 ## Manual Quality Scenes

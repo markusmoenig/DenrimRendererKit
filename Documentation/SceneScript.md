@@ -55,16 +55,23 @@ material light 1 1 1 1 0.9 0.7 8
 #                    [transmissionColor r g b] [transmissionRoughness value] [transmissionIOR value]
 #                    [absorptionColor r g b] [absorptionDistance value]
 #                    [thinWalled 0|1]
+#                    [volumeScattering value] [volumeScatteringColor r g b]
+#                    [volumeScatteringDistance value] [volumeAnisotropy value]
 #                    [clearcoat value] [clearcoatColor r g b] [clearcoatTint r g b]
 #                    [clearcoatAttenuationColor r g b] [clearcoatThickness value]
 #                    [clearcoatRoughness value] [clearcoatIOR value]
 #                    [thinFilm value] [thinFilmThickness value] [thinFilmIOR value]
 #                    [sheen value] [sheenColor r g b] [sheenRoughness value]
+#                    [subsurface value] [subsurfaceColor r g b]
+#                    [subsurfaceRadius r g b] [subsurfaceScale value]
+#                    [subsurfaceAnisotropy value]
 #                    [emission r g b strength] [baseColorTexture name] [normalMap name]
 material brushedGold 0.95 0.78 0.35 roughness 0.18 metallic 1 specular 1 specularColor 1 0.86 0.7 ior 1.5 anisotropy 0.65 clearcoat 0.25 clearcoatColor 1 0.92 0.72 clearcoatAttenuationColor 0.95 0.78 0.48 clearcoatThickness 0.25 clearcoatRoughness 0.08 clearcoatIOR 1.5
 material amberFilm 0.95 0.28 0.035 roughness 0.22 specular 0.65 clearcoat 0.95 clearcoatColor 1 0.74 0.32 clearcoatRoughness 0.035 thinFilm 0.85 thinFilmThickness 430 thinFilmIOR 1.38
 material velvet 0.42 0.16 0.72 roughness 0.7 sheen 0.65 sheenColor 0.9 0.72 1 sheenRoughness 0.78
+material warmSkin 0.82 0.52 0.38 roughness 0.56 specular 0.38 subsurface 0.82 subsurfaceColor 0.95 0.48 0.32 subsurfaceRadius 1.0 0.42 0.24 subsurfaceScale 0.34 subsurfaceAnisotropy 0.18
 material glass 0.713 0.8 0.8 roughness 0.01 specular 1 ior 1.45 transmission 1 transmissionColor 0.72 0.86 1 transmissionRoughness 0.04 transmissionIOR 1.45 absorptionColor 0.64 0.82 1 absorptionDistance 0.8
+material milk 0.98 0.96 0.88 roughness 0.68 specular 0.18 ior 1.35 transmission 0.46 transmissionColor 0.99 0.985 0.94 transmissionRoughness 0.58 transmissionIOR 1.35 absorptionColor 0.7 0.72 0.58 absorptionDistance 0.62 volumeScattering 0.76 volumeScatteringColor 0.98 0.97 0.9 volumeScatteringDistance 0.5 volumeAnisotropy 0.25
 material thinPane 0.7 0.85 1 roughness 0.02 specular 1 transmission 1 transmissionColor 0.8 0.92 1 thinWalled 1
 material textured 1 1 1 baseColorTexture checker normalMap tangentRight
 
@@ -108,10 +115,10 @@ let scene = try SceneScript.parse(contentsOf: sceneURL, assetCache: assetCache)
 assetCache.removeAll()
 ```
 
-Preview CLI usage:
+CLI usage:
 
 ```sh
-swift run denrim-render-preview ./ScriptedScene.png 32 512 script beauty ./Scenes/scene.denrim
+swift run denrim -- ./Scenes/scene.denrim --output ./ScriptedScene.png --samples 32 --size 512
 ```
 
 Denoising is off by default. `--denoise apple-svgf` and `--denoise experimental-simple` are explicit opt-in comparison modes, not baseline output modes.
@@ -119,6 +126,15 @@ Denoising is off by default. `--denoise apple-svgf` and `--denoise experimental-
 The repository includes a self-contained material-variant script template at `Examples/SceneScripts/MaterialVariants/material-variants.denrim` and a rendered output at `Examples/Renders/material-variants.png`. It uses a bundled toy PLY mesh so tests can run without external assets.
 
 The Stanford Dragon example lives at `Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim`. Run `./Examples/Tools/render-quality-examples.sh` to fetch the mesh if needed and render persistent reference outputs into `Examples/Renders`.
+
+Render any `.denrim` file with the unified CLI:
+
+```sh
+swift run denrim -- Examples/SceneScripts/MaterialVariants/material-variants.denrim \
+    --output /tmp/material-variants.png \
+    --samples 32 \
+    --quality interactive
+```
 
 `SceneScript.parse(contentsOf:)` resolves relative environment image paths, image texture paths, mesh paths, and include paths beside the script file. `SceneScript.parse(_:baseURL:assetCache:includeResolver:)` is still available for applications that want to provide script source, asset cache, and include policy themselves. If no base URL is passed, relative assets are resolved against the current process directory. Environment images are linear equirectangular maps; Radiance `.hdr` files are supported for material-preview lighting. Use `maxRadiance` to clamp very bright HDR texels for preview renders until the renderer has environment importance sampling. Image textures default to `color srgb` and `sampler linear`; generated solid/checker textures default to nearest sampling. `normalFrom` derives a tangent-space normal map from an existing texture's luminance, which is useful for reference assets that ship only albedo images. Mesh assets use `Mesh(contentsOf:)`, so the current script path supports OBJ and PLY files. Add `flipV` to a `mesh` command when an imported asset's texture coordinates were authored for bottom-left image origin but the source images are decoded top-down.
 

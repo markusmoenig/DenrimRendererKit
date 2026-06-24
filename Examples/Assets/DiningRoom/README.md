@@ -39,13 +39,10 @@ Output:
 Equivalent explicit command:
 
 ```sh
-swift run -c release denrim-render-preview \
-    /tmp/denrim-dining-room.png \
-    1 \
-    320 \
-    script \
-    beauty \
+swift run -c release denrim -- \
     Examples/SceneScripts/Quality/DiningRoom/dining-room.denrim \
+    --output /tmp/denrim-dining-room.png \
+    --samples 1 \
     --width 320 \
     --height 180
 ```
@@ -61,13 +58,10 @@ The original `.scene` asks for `1280x720`. This is slow right now, but useful wh
 Equivalent explicit command:
 
 ```sh
-swift run -c release denrim-render-preview \
-    Examples/Renders/dining-room-256spp.png \
-    256 \
-    1280 \
-    script \
-    beauty \
+swift run -c release denrim -- \
     Examples/SceneScripts/Quality/DiningRoom/dining-room.denrim \
+    --output Examples/Renders/dining-room-256spp.png \
+    --samples 256 \
     --width 1280 \
     --height 720
 ```
@@ -83,14 +77,13 @@ This records scene loading, renderer creation, session / acceleration setup, and
 Equivalent explicit command:
 
 ```sh
-swift run -c release denrim-render-benchmark \
-    script \
-    1 \
-    320 \
+swift run -c release denrim -- \
     Examples/SceneScripts/Quality/DiningRoom/dining-room.denrim \
+    --output /tmp/denrim-dining-room-benchmark.png \
+    --samples 1 \
     --width 320 \
     --height 180 \
-    --output Examples/Benchmarks/dining-room-local-320x180-1spp.json
+    --report-output Examples/Benchmarks/dining-room-local-320x180-1spp.json
 ```
 
 ### Current Renderer Gaps

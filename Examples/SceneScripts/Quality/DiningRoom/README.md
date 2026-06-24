@@ -43,6 +43,8 @@ Higher quality render:
 ./Examples/Tools/render-dining-room-quality.sh 256 1280 720 Examples/Renders/dining-room-256spp.png
 ```
 
+The render and benchmark helpers accept optional sample radiance clamp, quality, and backend arguments after the output path. For example, append `16 final automatic` for a higher-depth final-quality run, `0 final automatic` for an unclamped comparison, or `16 interactive flat-bvh` for a forced fallback-backend timing.
+
 Performance benchmark:
 
 ```sh

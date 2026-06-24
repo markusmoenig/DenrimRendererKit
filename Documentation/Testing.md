@@ -59,7 +59,7 @@ Current test foundation:
 * BVH builder tests validate empty builds, leaf construction, primitive remapping, bounds, and leaf size limits.
 * BVH flattener tests validate GPU node metadata, primitive index buffers, emissive light-record compilation, HDRI environment importance distributions, instance acceleration records, top-level instance bounds, acceleration backend output, and guarded Metal ray tracing BLAS/TLAS resource builds.
 * Metal ray tracing traversal probe tests compare hardware TLAS traversal against the CPU triangle intersector on supported devices.
-* Render session tests validate that Metal sessions prepare acceleration buffers and select the production hardware traversal path on supported devices.
+* Render session tests validate that Metal sessions prepare acceleration buffers, expose public acceleration backend diagnostics, and select the production hardware traversal path on supported devices.
 * Hardware traversal parity tests force both hardware TLAS and flat BVH backends, then compare primary depth, normal, albedo, material ID, and object ID AOVs for simple, Cornell Box, and material reference scenes.
 * Beauty parity metrics compare average and maximum RGB differences between hardware TLAS and flat BVH reference-scene renders.
 * Reference render metrics cover the MIS-adjusted energy distribution for Cornell Box and material scenes.
@@ -99,21 +99,21 @@ Current benchmark entry points:
 ```sh
 swift run denrim-render-benchmark cornell 16 256
 swift run denrim-render-benchmark materials 16 256
-swift run denrim-render-benchmark script 16 256 Examples/SceneScripts/MaterialVariants/material-variants.denrim
+swift run denrim -- Examples/SceneScripts/MaterialVariants/material-variants.denrim --samples 16 --size 256 --output /tmp/material-variants.png
 DENRIM_RUN_PERFORMANCE_TESTS=1 swift test --filter PerformanceBenchmarkTests
 ```
 
 Benchmark results can be written as JSON:
 
 ```sh
-swift run denrim-render-benchmark script 1 64 Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim --output Examples/Benchmarks/dragon-local-64px-1spp.json
+swift run denrim -- Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim --samples 1 --size 64 --output /tmp/dragon-material-variants.png --report-output Examples/Benchmarks/dragon-local-64px-1spp.json
 ```
 
 Benchmarks should record:
 
 * Apple device and GPU name.
 * Scene name and asset source.
-* Resolution, samples, max bounces, and backend.
+* Resolution, samples, quality, max bounces, requested backend, and active backend.
 * Scene/script load time.
 * Acceleration/session build time.
 * Render time.

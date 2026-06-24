@@ -20,6 +20,10 @@ let package = Package(
         .executable(
             name: "denrim-render-benchmark",
             targets: ["DenrimRenderBenchmark"]
+        ),
+        .executable(
+            name: "denrim",
+            targets: ["DenrimCLI"]
         )
     ],
     targets: [
@@ -38,6 +42,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "DenrimRenderBenchmark",
+            dependencies: ["DenrimRendererKit"]
+        ),
+        .executableTarget(
+            name: "DenrimCLI",
             dependencies: ["DenrimRendererKit"]
         ),
         .testTarget(

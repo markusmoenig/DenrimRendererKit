@@ -23,6 +23,11 @@ The current public `Material` supports:
 * `sheen`
 * `sheenColor`
 * `sheenRoughness`
+* `subsurface`
+* `subsurfaceColor`
+* `subsurfaceRadius`
+* `subsurfaceScale`
+* `subsurfaceAnisotropy`
 * `emission`
 * `emissionStrength`
 * `opacity`
@@ -33,6 +38,10 @@ The current public `Material` supports:
 * `transmissionAbsorptionColor`
 * `transmissionAbsorptionDistance`
 * `thinWalled`
+* `volumeScattering`
+* `volumeScatteringColor`
+* `volumeScatteringDistance`
+* `volumeAnisotropy`
 * `baseColorTexture`
 * `normalMap`
 
@@ -40,7 +49,9 @@ The current public `Material` supports:
 
 `sheen`, `sheenColor`, and `sheenRoughness` are active shader controls for a MoonRay-inspired fuzz / fabric lobe. The implementation uses a grazing Charlie-style sheen response for direct lighting and folds sheen energy into the diffuse sampling path for indirect bounces. It is intended for cloth, velvet-like stylized surfaces, dusty clay, and soft edge highlights without introducing a separate production fabric material yet.
 
-`transmission`, `transmissionColor`, `transmissionRoughness`, `transmissionIndexOfRefraction`, `transmissionAbsorptionColor`, `transmissionAbsorptionDistance`, and `thinWalled` are active as dielectric transport controls. Transmissive solid surfaces sample reflection or refraction using exact dielectric Fresnel, independent roughness-driven GGX micro-normals, explicit transmission tint, independent transmission IOR, Beer-style exit absorption, and transparent direct-light shadow rays. Omitted transmission color, roughness, and IOR inherit from `baseColor`, `roughness`, and `indexOfRefraction` so existing materials keep their previous behavior. Absorption is disabled by default with distance zero; when enabled, `transmissionAbsorptionColor` is the remaining color after traveling `transmissionAbsorptionDistance` scene units through the solid. The same exit-distance absorption is applied to transparent direct-light shadow rays so tinted glass affects both visible paths and light visibility. `thinWalled` switches transmission to a zero-thickness sheet path that can reflect by Fresnel but transmits straight through without entering a refractive volume. This is suitable for glass validation assets such as the DiningRoom table and thin panes, leaves, or film-like sheets. It is not yet the final production dielectric stack: nested dielectric priority, caustic controls, dispersion, and semi-transparent blending are still future work.
+`subsurface`, `subsurfaceColor`, `subsurfaceRadius`, `subsurfaceScale`, and `subsurfaceAnisotropy` are active MoonRay-inspired random-walk subsurface controls for closed geometry. A subsurface event enters the surface, samples exponential free-flight distances from the per-channel mean-free-path radius, scatters by a Henyey-Greenstein phase function, and exits at the actual surface found by the active acceleration backend. `subsurface` is the lobe weight, `subsurfaceColor` is the multiple-scattering albedo tint, `subsurfaceRadius` controls RGB mean free path in scene units, `subsurfaceScale` scales that radius, and `subsurfaceAnisotropy` controls forward/back scattering. Open sheets and non-closed meshes should use diffuse, sheen, or thin-walled transmission instead; random-walk SSS relies on a meaningful interior volume.
+
+`transmission`, `transmissionColor`, `transmissionRoughness`, `transmissionIndexOfRefraction`, `transmissionAbsorptionColor`, `transmissionAbsorptionDistance`, and `thinWalled` are active as dielectric transport controls. Transmissive solid surfaces sample reflection or refraction using exact dielectric Fresnel, independent roughness-driven GGX micro-normals, explicit transmission tint, independent transmission IOR, Beer-style exit absorption, and transparent direct-light shadow rays. Omitted transmission color, roughness, and IOR inherit from `baseColor`, `roughness`, and `indexOfRefraction` so existing materials keep their previous behavior. Absorption is disabled by default with distance zero; when enabled, `transmissionAbsorptionColor` is the remaining color after traveling `transmissionAbsorptionDistance` scene units through the solid. `volumeScattering`, `volumeScatteringColor`, `volumeScatteringDistance`, and `volumeAnisotropy` add participating-medium scattering inside solid transmissive geometry. The renderer samples spectral free-flight distances through the current closed solid, scatters by a Henyey-Greenstein phase function, and uses absorption plus out-scattering as shadow-ray extinction. This path is intended for cloudy liquids, milky glass, resin, and other refractive media where Beer absorption alone is too clear. `thinWalled` switches transmission to a zero-thickness sheet path that can reflect by Fresnel but transmits straight through without entering a refractive volume. This is suitable for glass validation assets such as the DiningRoom table and thin panes, leaves, or film-like sheets. It is not yet the final production dielectric stack: nested dielectric priority, caustic controls, dispersion, direct volume next-event estimation, and semi-transparent blending are still future work.
 
 This is enough for the first reusable path tracing vertical slice, but it is not the intended final material system.
 
@@ -74,7 +85,7 @@ Recommended staged properties:
 
 * Base: base color, opacity / presence, roughness, metallic, normal map.
 * Specular: implemented first with specular weight, specular color, IOR, and anisotropy; later expand to anisotropy rotation and model selection.
-* Transmission: implemented first with transmission weight, transmission color, transmission roughness, transmission IOR, and measured absorption; later expand to dispersion, nested dielectric priority, and caustic controls.
+* Transmission: implemented first with transmission weight, transmission color, transmission roughness, transmission IOR, measured absorption, and homogeneous volume scattering; later expand to direct volume lighting, dispersion, nested dielectric priority, and caustic controls.
 * Thin surfaces: implemented first with thin-walled specular transmission; later expand to diffuse transmission and richer shadow transparency controls.
 * Clearcoat: implemented first with clearcoat weight, tint, independent attenuation color, thickness-based attenuation, roughness, IOR, and thin-film interference; later expand to independent clearcoat normals.
 * Sheen / fuzz: implemented first with sheen weight, sheen color, and sheen roughness; later expand to independent normal input and richer fabric / velvet controls.
