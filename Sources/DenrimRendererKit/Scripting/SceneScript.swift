@@ -145,6 +145,8 @@ public enum SceneScript {
                     includeStack: &includeStack
                 )
                 includeStack.removeLast()
+            case "render", "defaults", "renderdefaults":
+                scene.renderDefaults = try parseRenderDefaults(tokens, line: lineNumber, baseURL: baseURL, current: scene.renderDefaults)
             case "camera":
                 scene.camera = try parseCamera(tokens, line: lineNumber)
             case "environment":
@@ -210,6 +212,105 @@ public enum SceneScript {
             throw SceneScriptError.invalidArgumentCount("include", line: line)
         }
         return tokens[1]
+    }
+
+    private static func parseRenderDefaults(
+        _ tokens: [String],
+        line: Int,
+        baseURL: URL?,
+        current: RenderDefaults
+    ) throws -> RenderDefaults {
+        var defaults = current
+        var index = 1
+        if tokens.indices.contains(index) && tokens[index].lowercased() == "defaults" {
+            index += 1
+        }
+
+        while index < tokens.count {
+            let keyword = tokens[index].lowercased()
+            switch keyword {
+            case "output", "path":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("render", line: line)
+                }
+                defaults.outputPath = resolvedRenderDefaultPath(tokens[index + 1], baseURL: baseURL)
+                index += 2
+            case "outputtype", "output-type", "aov":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("render", line: line)
+                }
+                defaults.output = try renderOutput(named: tokens[index + 1], line: line)
+                index += 2
+            case "samples", "sample", "spp":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("render", line: line)
+                }
+                defaults.samples = max(0, try int(tokens[index + 1], line: line))
+                index += 2
+            case "size", "resolution":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("render", line: line)
+                }
+                let parsed = try renderSize(named: tokens[index + 1], line: line)
+                defaults.width = parsed.width
+                defaults.height = parsed.height
+                index += 2
+            case "width":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("render", line: line)
+                }
+                defaults.width = max(1, try int(tokens[index + 1], line: line))
+                index += 2
+            case "height":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("render", line: line)
+                }
+                defaults.height = max(1, try int(tokens[index + 1], line: line))
+                index += 2
+            case "quality":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("render", line: line)
+                }
+                defaults.quality = try renderQuality(named: tokens[index + 1], line: line)
+                index += 2
+            case "maxbounces", "max-bounces", "bounces":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("render", line: line)
+                }
+                defaults.maxBounces = max(1, try int(tokens[index + 1], line: line))
+                index += 2
+            case "backend", "acceleration":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("render", line: line)
+                }
+                defaults.accelerationMode = try renderAccelerationMode(named: tokens[index + 1], line: line)
+                index += 2
+            case "sampleradianceclamp", "sample-radiance-clamp", "clamp":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("render", line: line)
+                }
+                defaults.sampleRadianceClamp = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "transparentbackground", "transparent-background":
+                if index + 1 < tokens.count, !isRenderDefaultKeyword(tokens[index + 1]) {
+                    defaults.transparentBackground = try bool(tokens[index + 1], line: line)
+                    index += 2
+                } else {
+                    defaults.transparentBackground = true
+                    index += 1
+                }
+            case "denoise":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("render", line: line)
+                }
+                defaults.denoise = try denoiseSettings(named: tokens[index + 1], line: line)
+                index += 2
+            default:
+                throw SceneScriptError.invalidArgumentCount("render", line: line)
+            }
+        }
+
+        return defaults
     }
 
     private static func parseCamera(_ tokens: [String], line: Int) throws -> Camera {
@@ -1211,12 +1312,129 @@ public enum SceneScript {
             .appendingPathComponent(path)
     }
 
+    private static func resolvedRenderDefaultPath(_ path: String, baseURL: URL?) -> String {
+        if path.hasPrefix("/") {
+            return URL(fileURLWithPath: path).standardized.path
+        }
+
+        guard let baseURL else {
+            return path
+        }
+
+        return baseURL.appendingPathComponent(path).standardized.path
+    }
+
     private static func floats<S: Sequence>(_ tokens: S, line: Int) throws -> [Float] where S.Element == String {
         try tokens.map { token in
             guard let value = Float(token) else {
                 throw SceneScriptError.invalidNumber(token, line: line)
             }
             return value
+        }
+    }
+
+    private static func int(_ token: String, line: Int) throws -> Int {
+        guard let value = Int(token) else {
+            throw SceneScriptError.invalidNumber(token, line: line)
+        }
+        return value
+    }
+
+    private static func bool(_ token: String, line: Int) throws -> Bool {
+        switch token.lowercased() {
+        case "1", "true", "yes", "on":
+            return true
+        case "0", "false", "no", "off":
+            return false
+        default:
+            throw SceneScriptError.invalidNumber(token, line: line)
+        }
+    }
+
+    private static func isRenderDefaultKeyword(_ token: String) -> Bool {
+        switch token.lowercased() {
+        case "output", "path", "outputtype", "output-type", "aov",
+             "samples", "sample", "spp", "size", "resolution", "width", "height",
+             "quality", "maxbounces", "max-bounces", "bounces", "backend", "acceleration",
+             "sampleradianceclamp", "sample-radiance-clamp", "clamp",
+             "transparentbackground", "transparent-background", "denoise":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func renderSize(named name: String, line: Int) throws -> (width: Int, height: Int) {
+        switch name.lowercased() {
+        case "hd", "720p":
+            return (1280, 720)
+        case "fhd", "fullhd", "1080p":
+            return (1920, 1080)
+        case "uhd", "4k", "2160p":
+            return (3840, 2160)
+        default:
+            let size = max(1, try int(name, line: line))
+            return (size, size)
+        }
+    }
+
+    private static func renderOutput(named name: String, line: Int) throws -> RenderOutput {
+        switch name.lowercased() {
+        case "beauty":
+            return .beauty
+        case "depth":
+            return .depth
+        case "normal", "normals":
+            return .normal
+        case "albedo":
+            return .albedo
+        case "material-id", "materialid":
+            return .materialID
+        case "object-id", "objectid":
+            return .objectID
+        case "motion", "motion-vector", "motionvector":
+            return .motionVector
+        default:
+            throw SceneScriptError.invalidArgumentCount("render", line: line)
+        }
+    }
+
+    private static func renderQuality(named name: String, line: Int) throws -> RenderQuality {
+        switch name.lowercased() {
+        case "preview", "fast":
+            return .preview
+        case "interactive", "viewport":
+            return .interactive
+        case "final", "export":
+            return .final
+        default:
+            throw SceneScriptError.invalidArgumentCount("render", line: line)
+        }
+    }
+
+    private static func renderAccelerationMode(named name: String, line: Int) throws -> RenderAccelerationMode {
+        switch name.lowercased() {
+        case "automatic", "auto":
+            return .automatic
+        case "flat", "flat-bvh", "flatbvh":
+            return .flatBVH
+        case "metal", "metal-ray-tracing", "metalrt", "hardware", "hardware-ray-tracing":
+            return .metalRayTracing
+        default:
+            throw SceneScriptError.invalidArgumentCount("render", line: line)
+        }
+    }
+
+    private static func denoiseSettings(named name: String, line: Int) throws -> DenoiseSettings {
+        switch name.lowercased() {
+        case "none", "off", "false":
+            return .none
+        case "simple", "simple-spatial", "spatial", "experimental-simple":
+            return .simpleSpatial
+        case "apple", "mps", "svgf", "apple-svgf":
+            return .appleSVGF
+        default:
+            throw SceneScriptError.invalidArgumentCount("render", line: line)
         }
     }
 

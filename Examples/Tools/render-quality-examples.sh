@@ -7,13 +7,14 @@ SIZE="${2:-512}"
 SAMPLE_RADIANCE_CLAMP="${3:-24}"
 QUALITY="${4:-interactive}"
 BACKEND="${5:-automatic}"
+OUTPUT_DIR="${DENRIM_QUALITY_OUTPUT_DIR:-/tmp/denrim-quality-examples}"
 
 cd "$ROOT_DIR"
-mkdir -p Examples/Renders
+mkdir -p "$OUTPUT_DIR"
 
 swift run denrim -- \
     Examples/SceneScripts/MaterialVariants/material-variants.denrim \
-    --output Examples/Renders/material-variants.png \
+    --output "$OUTPUT_DIR/material-variants.png" \
     --samples "$SAMPLES" \
     --size "$SIZE" \
     --quality "$QUALITY" \
@@ -22,7 +23,7 @@ swift run denrim -- \
 
 swift run denrim -- \
     Examples/SceneScripts/MaterialVariants/glossy-metal-reference.denrim \
-    --output Examples/Renders/glossy-metal-reference.png \
+    --output "$OUTPUT_DIR/glossy-metal-reference.png" \
     --samples "$SAMPLES" \
     --size "$SIZE" \
     --quality "$QUALITY" \
@@ -35,7 +36,7 @@ fi
 
 swift run denrim -- \
     Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim \
-    --output Examples/Renders/dragon-material-variants.png \
+    --output "$OUTPUT_DIR/dragon-material-variants.png" \
     --samples "$SAMPLES" \
     --size "$SIZE" \
     --quality "$QUALITY" \

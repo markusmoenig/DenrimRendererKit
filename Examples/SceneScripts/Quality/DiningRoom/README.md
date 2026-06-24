@@ -31,19 +31,21 @@ Current visual-matching notes against the GLSL reference:
 * Table glass uses a light rough dielectric transmission material so the tabletop reads as transparent while retaining Fresnel edge reflections.
 * The wooden floor boxes still expose a broader renderer gap: without exposure control, richer environment/atmosphere, denoiser comparison scenes, and more mature glossy transport, their lighting can read more synthetic than the GLSL reference.
 
-Quick smoke render:
+Authored quality render:
 
 ```sh
 ./Examples/Tools/render-dining-room-quality.sh
 ```
 
-Higher quality render:
+The scene carries render defaults for `HD`, `512 spp`, `final` quality, automatic backend selection, and `Examples/Renders/DiningRoom.png`.
+
+Quick smoke render with explicit overrides:
 
 ```sh
-./Examples/Tools/render-dining-room-quality.sh 256 1280 720 Examples/Renders/dining-room-256spp.png
+./Examples/Tools/render-dining-room-quality.sh 1 320 180 /tmp/denrim-dining-room.png 16 interactive automatic
 ```
 
-The render and benchmark helpers accept optional sample radiance clamp, quality, and backend arguments after the output path. For example, append `16 final automatic` for a higher-depth final-quality run, `0 final automatic` for an unclamped comparison, or `16 interactive flat-bvh` for a forced fallback-backend timing.
+The render helper accepts optional overrides in this order: samples, width, height, output path, sample radiance clamp, quality, and backend.
 
 Performance benchmark:
 
@@ -54,6 +56,6 @@ Performance benchmark:
 The saved Denrim baseline is intentionally a cleaner manual render, while quick previews are written to `/tmp` by default:
 
 ```text
-Examples/Renders/dining-room-256spp.png
+Examples/Renders/DiningRoom.png
 Examples/Benchmarks/dining-room-local-320x180-1spp.json
 ```

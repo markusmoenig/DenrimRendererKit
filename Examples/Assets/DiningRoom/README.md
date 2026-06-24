@@ -47,23 +47,19 @@ swift run -c release denrim -- \
     --height 180
 ```
 
-### Source Resolution Render
+### Authored Quality Render
 
-The original `.scene` asks for `1280x720`. This is slow right now, but useful when checking image quality:
+The `.denrim` scene carries render defaults for `1280x720`, `512 spp`, final quality, and `Examples/Renders/DiningRoom.png`. This is slow right now, but useful when checking image quality:
 
 ```sh
-./Examples/Tools/render-dining-room-quality.sh 256 1280 720 Examples/Renders/dining-room-256spp.png
+./Examples/Tools/render-dining-room-quality.sh
 ```
 
 Equivalent explicit command:
 
 ```sh
 swift run -c release denrim -- \
-    Examples/SceneScripts/Quality/DiningRoom/dining-room.denrim \
-    --output Examples/Renders/dining-room-256spp.png \
-    --samples 256 \
-    --width 1280 \
-    --height 720
+    Examples/SceneScripts/Quality/DiningRoom/dining-room.denrim
 ```
 
 ### Benchmark

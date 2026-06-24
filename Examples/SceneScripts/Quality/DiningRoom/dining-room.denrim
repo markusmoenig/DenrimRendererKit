@@ -2,6 +2,7 @@
 # Reference image: Examples/Assets/DiningRoom/DiningRoom.jpg rendered in glsl_pathtracer.
 # Glass uses rough dielectric transmission for the source spectrans material.
 # The source fov(60) is treated as horizontal FOV at 1280x720; Denrim uses vertical FOV.
+render output ../../../Renders/DiningRoom.png size hd spp 512 quality final backend automatic
 camera origin(-4.5, 1.6, 0.0) target(0.0, 0.8, 0.0) fov(36)
 
 texture WoodenFloorTexture image ../../../Assets/DiningRoom/diningroom/textures/floor.jpg color srgb sampler linear

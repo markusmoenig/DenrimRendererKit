@@ -166,29 +166,46 @@ func performRender(
     defaultOutputPath: String,
     loadScene: () throws -> RenderScene
 ) throws {
+    let (scene, sceneLoadSeconds) = try elapsed(loadScene)
+    let renderDefaults = scene.renderDefaults
     let outputPath = optionValue(named: "--output", short: "-o", in: arguments)
+        ?? renderDefaults.outputPath
         ?? defaultOutputPath
     let outputURL = URL(fileURLWithPath: outputPath)
-    let output = try renderOutput(named: optionValue(named: "--output-type", in: arguments) ?? "beauty")
-    let samples = max(0, optionInt(named: "--samples", short: "-s", in: arguments) ?? 32)
+    let output = try optionValue(named: "--output-type", in: arguments)
+        .map(renderOutput(named:))
+        ?? renderDefaults.output
+        ?? .beauty
+    let samples = max(0, optionInt(named: "--samples", short: "-s", in: arguments) ?? renderDefaults.samples ?? 32)
     let size = max(1, optionInt(named: "--size", in: arguments) ?? 512)
-    let width = max(1, optionInt(named: "--width", in: arguments) ?? size)
-    let height = max(1, optionInt(named: "--height", in: arguments) ?? size)
-    let qualityName = (optionValue(named: "--quality", in: arguments) ?? "preview").lowercased()
-    let quality = try renderQuality(named: qualityName)
-    let maxBounces = max(1, optionInt(named: "--max-bounces", in: arguments) ?? defaultMaxBounces(for: quality))
-    let backendName = (optionValue(named: "--backend", in: arguments) ?? "automatic").lowercased()
-    let accelerationMode = try renderAccelerationMode(named: backendName)
+    let width = max(1, optionInt(named: "--width", in: arguments) ?? renderDefaults.width ?? size)
+    let height = max(1, optionInt(named: "--height", in: arguments) ?? renderDefaults.height ?? size)
+    let quality = try optionValue(named: "--quality", in: arguments)
+        .map { try renderQuality(named: $0.lowercased()) }
+        ?? renderDefaults.quality
+        ?? .preview
+    let qualityName = renderQualityName(quality)
+    let maxBounces = max(1, optionInt(named: "--max-bounces", in: arguments) ?? renderDefaults.maxBounces ?? defaultMaxBounces(for: quality))
+    let accelerationMode = try optionValue(named: "--backend", in: arguments)
+        .map { try renderAccelerationMode(named: $0.lowercased()) }
+        ?? renderDefaults.accelerationMode
+        ?? .automatic
     let sampleRadianceClamp = optionFloat(named: "--sample-radiance-clamp", in: arguments)
+        ?? renderDefaults.sampleRadianceClamp
     let resolvedSampleRadianceClamp = sampleRadianceClamp ?? quality.defaultSampleRadianceClamp
     let transparentBackground = optionBool(named: "--transparent-background", in: arguments)
-    let denoiseName = (optionValue(named: "--denoise", in: arguments) ?? "none").lowercased()
-    var denoiseSettings = try denoiseSettings(named: denoiseName)
-    applyDenoiseOverrides(arguments: arguments, settings: &denoiseSettings)
+        || (renderDefaults.transparentBackground ?? false)
+    let denoiseOption = optionValue(named: "--denoise", in: arguments)
+    var denoiseConfig = try denoiseOption
+        .map { try denoiseSettings(named: $0.lowercased()) }
+        ?? renderDefaults.denoise
+        ?? .none
+    let denoiseName = denoiseSettingsName(denoiseConfig)
+    applyDenoiseOverrides(arguments: arguments, settings: &denoiseConfig)
     let reportOutputPath = optionValue(named: "--report-output", in: arguments)
     let writesJSON = arguments.contains("--json")
+    let printsProgress = !writesJSON && samples > 0
 
-    let (scene, sceneLoadSeconds) = try elapsed(loadScene)
     let previousCamera: Camera? = output == .motionVector
         ? Camera(
             origin: scene.camera.origin + SIMD3<Float>(0.12, 0, 0),
@@ -210,14 +227,14 @@ func performRender(
                 quality: quality,
                 previousCamera: previousCamera,
                 transparentBackground: transparentBackground,
-                denoise: denoiseSettings,
+                denoise: denoiseConfig,
                 sampleRadianceClamp: sampleRadianceClamp
             ),
             accelerationMode: accelerationMode
         )
     }
     let (_, renderSeconds) = try elapsed {
-        try session.render(samples: samples)
+        try renderSamples(session: session, samples: samples, printsProgress: printsProgress)
     }
     let (_, writeSeconds) = try elapsed {
         try FileManager.default.createDirectory(
@@ -312,6 +329,62 @@ func printRenderReport(_ report: RenderReport) {
     print("Pixel-samples/s: \(Int(report.pixelSamplesPerSecond.rounded()))")
 }
 
+func renderSamples(session: RenderSession, samples: Int, printsProgress: Bool) throws {
+    guard samples >= 0 else {
+        throw CLIError(message: "Sample count must not be negative.")
+    }
+
+    guard printsProgress else {
+        try session.render(samples: samples)
+        return
+    }
+
+    let start = Date()
+    fputs("Render progress: 0/\(samples) samples (0.0%)\n", stderr)
+    for sample in 1...samples {
+        try session.renderNextSample()
+        printProgress(sample: sample, total: samples, start: start, width: session.settings.width, height: session.settings.height)
+    }
+}
+
+func printProgress(sample: Int, total: Int, start: Date, width: Int, height: Int) {
+    let elapsed = max(Date().timeIntervalSince(start), 1e-6)
+    let percent = total > 0 ? Double(sample) / Double(total) * 100 : 100
+    let samplesPerSecond = Double(sample) / elapsed
+    let remainingSamples = max(total - sample, 0)
+    let eta = samplesPerSecond > 0 ? Double(remainingSamples) / samplesPerSecond : 0
+    let pixelSamplesPerSecond = Double(width * height * sample) / elapsed
+    let elapsedText = formattedDuration(elapsed)
+    let etaText = formattedDuration(eta)
+    fputs(
+        String(
+            format: "Render progress: %d/%d samples (%.1f%%), elapsed %@, ETA %@, %.2f samples/s, %.0f pixel-samples/s\n",
+            sample,
+            total,
+            percent,
+            elapsedText,
+            etaText,
+            samplesPerSecond,
+            pixelSamplesPerSecond
+        ),
+        stderr
+    )
+}
+
+func formattedDuration(_ seconds: Double) -> String {
+    let rounded = max(0, Int(seconds.rounded()))
+    let hours = rounded / 3600
+    let minutes = (rounded % 3600) / 60
+    let secs = rounded % 60
+    if hours > 0 {
+        return String(format: "%dh%02dm%02ds", hours, minutes, secs)
+    }
+    if minutes > 0 {
+        return String(format: "%dm%02ds", minutes, secs)
+    }
+    return "\(secs)s"
+}
+
 func printGeneralHelp() {
     print(
         """
@@ -348,17 +421,24 @@ func printRenderHelp() {
           denrim <scene.denrim> [options]
 
         Output:
-          -o, --output <png>                 Output PNG path. Defaults to ./out.png.
+          -o, --output <png>                 Output PNG path. Defaults to the script
+                                             render output, then ./out.png.
               --output-type <name>           beauty, depth, normal, albedo, material-id,
-                                             object-id, motion-vector. Default: beauty.
+                                             object-id, motion-vector. Default: script
+                                             render outputType, then beauty.
               --transparent-background       Primary sky misses write alpha 0.
 
         Sampling and quality:
-          -s, --samples <n>                  Progressive samples. Default: 32.
-              --size <px>                    Square render size. Default: 512.
-              --width <px>                   Output width. Overrides --size.
-              --height <px>                  Output height. Overrides --size.
-              --quality <name>               preview, interactive, final. Default: preview.
+          -s, --samples <n>                  Progressive samples. Default: script
+                                             render samples, then 32.
+              --size <px>                    Square render size. Default: 512
+                                             unless script width/height are set.
+              --width <px>                   Output width. Overrides script width
+                                             and --size.
+              --height <px>                  Output height. Overrides script height
+                                             and --size.
+              --quality <name>               preview, interactive, final. Default:
+                                             script quality, then preview.
               --max-bounces <n>              Path depth. Defaults by quality:
                                              preview 4, interactive 5, final 8.
               --sample-radiance-clamp <v>    Firefly clamp. Defaults by quality:
@@ -367,10 +447,11 @@ func printRenderHelp() {
 
         Backend:
               --backend <name>               automatic, flat-bvh, metal-ray-tracing.
-                                             Default: automatic.
+                                             Default: script backend, then automatic.
 
         Denoising:
-              --denoise <name>               none, simple, apple-svgf. Default: none.
+              --denoise <name>               none, simple, apple-svgf. Default:
+                                             script denoise, then none.
               --denoise-radius <n>           Spatial denoise radius.
               --denoise-iterations <n>       Denoise iterations.
               --denoise-normal-sigma <v>     Normal edge sigma.
@@ -379,6 +460,8 @@ func printRenderHelp() {
               --denoise-color-sigma <v>      Color sigma.
 
         Reporting:
+              Progress is printed to stderr during normal renders.
+              --json suppresses progress so stdout stays valid JSON.
               --json                         Print the render benchmark report as JSON.
               --report-output <json>         Also write the benchmark report to JSON.
           -h, --help                         Show this help.
@@ -571,6 +654,17 @@ func renderQuality(named name: String) throws -> RenderQuality {
     }
 }
 
+func renderQualityName(_ quality: RenderQuality) -> String {
+    switch quality {
+    case .preview:
+        return "preview"
+    case .interactive:
+        return "interactive"
+    case .final:
+        return "final"
+    }
+}
+
 func defaultMaxBounces(for quality: RenderQuality) -> Int {
     switch quality {
     case .preview:
@@ -579,6 +673,17 @@ func defaultMaxBounces(for quality: RenderQuality) -> Int {
         return 5
     case .final:
         return 8
+    }
+}
+
+func denoiseSettingsName(_ settings: DenoiseSettings) -> String {
+    switch settings.denoiser {
+    case .none:
+        return "none"
+    case .simpleSpatial:
+        return "simple"
+    case .appleSVGF:
+        return "apple-svgf"
     }
 }
 

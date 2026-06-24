@@ -2,7 +2,7 @@
 
 This directory contains a Denrim scene wrapper for Benedikt Bitterli's Material Test Ball geometry.
 
-The original mesh scene is public domain / CC0. The bundled `textures/envmap.pfm` is not used by the Denrim scene because the light probe license is non-commercial. The Denrim version instead uses local area lights and reflection cards inside a large axis-aligned preview room. The camera looks down at the object so thumbnails see floor only, while the unseen room walls still catch indirect rays.
+The original mesh scene is public domain / CC0.
 
 ## Change the Preview Material
 
@@ -28,7 +28,7 @@ swift run denrim -- material "0.8 0.05 0.02 roughness 0.18 clearcoat 0.65" --out
 From the repository root:
 
 ```sh
-swift run -c release denrim -- Examples/SceneScripts/MaterialTestBall/material-testball.denrim --output Examples/Renders/material-testball.png --samples 64 --size 720 --width 1280
+swift run -c release denrim -- Examples/SceneScripts/MaterialTestBall/material-testball.denrim --output /tmp/material-testball.png --samples 64 --size 720 --width 1280
 ```
 
 To render all built-in material presets as square thumbnails:

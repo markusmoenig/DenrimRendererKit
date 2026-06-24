@@ -6,6 +6,7 @@ The first version is intentionally small. It supports:
 
 * Comments with `#`.
 * `include` with an application-provided resolver.
+* `render` defaults for CLI and host applications.
 * `camera`.
 * `environment`.
 * `texture`.
@@ -18,6 +19,14 @@ The first version is intentionally small. It supports:
 Example:
 
 ```text
+# render [output path] [outputType name] [size hd|fhd|uhd|px]
+#        [width px] [height px] [samples n] [spp n]
+#        [quality preview|interactive|final] [maxBounces n]
+#        [backend automatic|flat-bvh|metal-ray-tracing]
+#        [sampleRadianceClamp value] [transparentBackground 0|1]
+#        [denoise none|simple|apple-svgf]
+render output Renders/Scene.png size hd spp 512 quality final
+
 # camera origin(x, y, z) target(x, y, z) fov(degrees)
 camera origin(0, 1.4, 4.0) target(0, 0.6, 0) fov(42)
 
@@ -121,11 +130,13 @@ CLI usage:
 swift run denrim -- ./Scenes/scene.denrim --output ./ScriptedScene.png --samples 32 --size 512
 ```
 
+When a script contains `render` defaults, `denrim` uses them for omitted CLI options. Explicit CLI flags still win. `SceneScript.parse(contentsOf:)` resolves a render default output path relative to the script file; `SceneScript.parse(_:)` without a base URL preserves the authored relative path.
+
 Denoising is off by default. `--denoise apple-svgf` and `--denoise experimental-simple` are explicit opt-in comparison modes, not baseline output modes.
 
-The repository includes a self-contained material-variant script template at `Examples/SceneScripts/MaterialVariants/material-variants.denrim` and a rendered output at `Examples/Renders/material-variants.png`. It uses a bundled toy PLY mesh so tests can run without external assets.
+The repository includes a self-contained material-variant script template at `Examples/SceneScripts/MaterialVariants/material-variants.denrim`. It uses a bundled toy PLY mesh so tests can run without external assets.
 
-The Stanford Dragon example lives at `Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim`. Run `./Examples/Tools/render-quality-examples.sh` to fetch the mesh if needed and render persistent reference outputs into `Examples/Renders`.
+The Stanford Dragon example lives at `Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim`. Run `./Examples/Tools/render-quality-examples.sh` to fetch the mesh if needed and render local comparison outputs into `/tmp/denrim-quality-examples`.
 
 Render any `.denrim` file with the unified CLI:
 

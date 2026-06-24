@@ -1,6 +1,69 @@
 import Foundation
 import simd
 
+/// Optional render defaults authored by a scene script or host application.
+public struct RenderDefaults: Sendable {
+    /// Default output path. Relative script-authored paths are resolved by `SceneScript.parse(contentsOf:)`.
+    public var outputPath: String?
+
+    /// Default output type.
+    public var output: RenderOutput?
+
+    /// Default progressive sample count.
+    public var samples: Int?
+
+    /// Default output width.
+    public var width: Int?
+
+    /// Default output height.
+    public var height: Int?
+
+    /// Default quality intent.
+    public var quality: RenderQuality?
+
+    /// Default maximum path depth.
+    public var maxBounces: Int?
+
+    /// Default acceleration backend.
+    public var accelerationMode: RenderAccelerationMode?
+
+    /// Default per-sample radiance clamp.
+    public var sampleRadianceClamp: Float?
+
+    /// Default transparent background export behavior.
+    public var transparentBackground: Bool?
+
+    /// Default denoising settings.
+    public var denoise: DenoiseSettings?
+
+    /// Creates empty render defaults.
+    public init(
+        outputPath: String? = nil,
+        output: RenderOutput? = nil,
+        samples: Int? = nil,
+        width: Int? = nil,
+        height: Int? = nil,
+        quality: RenderQuality? = nil,
+        maxBounces: Int? = nil,
+        accelerationMode: RenderAccelerationMode? = nil,
+        sampleRadianceClamp: Float? = nil,
+        transparentBackground: Bool? = nil,
+        denoise: DenoiseSettings? = nil
+    ) {
+        self.outputPath = outputPath
+        self.output = output
+        self.samples = samples
+        self.width = width
+        self.height = height
+        self.quality = quality
+        self.maxBounces = maxBounces
+        self.accelerationMode = accelerationMode
+        self.sampleRadianceClamp = sampleRadianceClamp
+        self.transparentBackground = transparentBackground
+        self.denoise = denoise
+    }
+}
+
 /// A renderable scene containing camera, materials, and mesh instances.
 public struct RenderScene: Sendable {
     /// Scene camera.
@@ -15,16 +78,21 @@ public struct RenderScene: Sendable {
     /// Environment lighting sampled by rays that miss scene geometry.
     public var environment: Environment
 
+    /// Optional render defaults used by command-line tools and host applications.
+    public var renderDefaults: RenderDefaults
+
     /// Creates an empty render scene.
     public init(
         camera: Camera = Camera(
             origin: SIMD3<Float>(0, 1, 4),
             target: SIMD3<Float>(0, 1, 0)
         ),
-        environment: Environment = .sky
+        environment: Environment = .sky,
+        renderDefaults: RenderDefaults = RenderDefaults()
     ) {
         self.camera = camera
         self.environment = environment
+        self.renderDefaults = renderDefaults
         self.materials = []
         self.meshInstances = []
     }

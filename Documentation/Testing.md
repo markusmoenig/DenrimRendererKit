@@ -84,7 +84,7 @@ Current visual reference scenes:
 * Scripted UV/normal-map scene authored with `SceneScript`
 * Scripted image-texture quad scene authored with `SceneScript`
 * Scripted imported-mesh scene authored with `SceneScript`
-* Bundled material-variant script template in `Examples/SceneScripts/MaterialVariants` with rendered output in `Examples/Renders`
+* Bundled material-variant script template in `Examples/SceneScripts/MaterialVariants`
 * Stanford Dragon material-variant script in `Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim`, backed by `Examples/Tools/fetch-stanford-dragon.sh`
 * Transparent floating-quad export scene
 

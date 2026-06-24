@@ -147,6 +147,53 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(scene.materials[5].sheenRoughness, 0.65, accuracy: 0.0001)
     }
 
+    func testSceneScriptParsesRenderDefaults() throws {
+        let source = """
+        render output ./beauty.png outputType normal size hd spp 512 quality final maxBounces 10 backend metal-ray-tracing sampleRadianceClamp 48 transparentBackground denoise simple
+        """
+
+        let scene = try SceneScript.parse(source)
+        let defaults = scene.renderDefaults
+
+        XCTAssertEqual(defaults.outputPath, "./beauty.png")
+        if case .normal? = defaults.output {
+        } else {
+            XCTFail("Expected normal output default.")
+        }
+        XCTAssertEqual(defaults.width, 1280)
+        XCTAssertEqual(defaults.height, 720)
+        XCTAssertEqual(defaults.samples, 512)
+        if case .final? = defaults.quality {
+        } else {
+            XCTFail("Expected final quality default.")
+        }
+        XCTAssertEqual(defaults.maxBounces, 10)
+        XCTAssertEqual(defaults.accelerationMode?.rawValue, RenderAccelerationMode.metalRayTracing.rawValue)
+        XCTAssertEqual(try XCTUnwrap(defaults.sampleRadianceClamp), 48, accuracy: 0.0001)
+        XCTAssertEqual(defaults.transparentBackground, true)
+        XCTAssertEqual(defaults.denoise?.denoiser, .simpleSpatial)
+    }
+
+    func testSceneScriptFileRenderDefaultOutputResolvesRelativeToScript() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("denrim-render-defaults-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let sceneURL = directory.appendingPathComponent("scene.denrim")
+        try "render output ../Renders/DiningRoom.png size 64 samples 2\n".write(to: sceneURL, atomically: true, encoding: .utf8)
+
+        let scene = try SceneScript.parse(contentsOf: sceneURL)
+
+        XCTAssertEqual(
+            scene.renderDefaults.outputPath,
+            directory.deletingLastPathComponent()
+                .appendingPathComponent("Renders/DiningRoom.png")
+                .path
+        )
+        XCTAssertEqual(scene.renderDefaults.width, 64)
+        XCTAssertEqual(scene.renderDefaults.height, 64)
+        XCTAssertEqual(scene.renderDefaults.samples, 2)
+    }
+
     func testSceneScriptParsesBuiltInMaterialPresets() throws {
         let source = """
         material glass preset glass.thin-pane roughness 0.03
