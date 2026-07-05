@@ -72,6 +72,10 @@ public struct RenderScene: Sendable {
     /// Materials available to scene geometry.
     public private(set) var materials: [Material]
 
+    /// Authored material sources. These are the material system source of truth;
+    /// `materials` stores their resolved renderer payloads.
+    public private(set) var materialSources: [SemanticMaterial]
+
     /// Mesh instances in the scene.
     public private(set) var meshInstances: [MeshInstance]
 
@@ -99,17 +103,25 @@ public struct RenderScene: Sendable {
         self.camera = camera
         self.environment = environment
         self.renderDefaults = renderDefaults
+        self.materialSources = []
         self.materials = []
         self.meshInstances = []
         self.volumeInstances = []
         self.sparseVolumeInstances = []
     }
 
-    /// Adds a material and returns its scene-local identifier.
+    /// Adds an expanded renderer material and returns its scene-local identifier.
     @discardableResult
     public mutating func addMaterial(_ material: Material) -> MaterialID {
-        let id = MaterialID(rawValue: UInt32(materials.count))
-        materials.append(material)
+        addMaterial(SemanticMaterial.physical(material))
+    }
+
+    /// Adds an authored semantic material and returns its scene-local identifier.
+    @discardableResult
+    public mutating func addMaterial(_ material: SemanticMaterial) -> MaterialID {
+        let id = MaterialID(rawValue: UInt32(materialSources.count))
+        materialSources.append(material)
+        materials.append(material.resolvedMaterial())
         return id
     }
 
@@ -150,6 +162,99 @@ public struct RenderScene: Sendable {
             material: material,
             transform: transform
         ))
+    }
+
+    /// Adds a renderable SDF field bundle using its fallback material.
+    ///
+    /// This is the preferred integration point for procedural products such as
+    /// Denrim Form. The bundle may be backed by dense samples or sparse bricks;
+    /// RendererKit routes it to the current mixed-geometry backend.
+    @discardableResult
+    public mutating func add(
+        fieldBundle: RenderFieldBundle,
+        transform: Transform = .identity
+    ) -> RenderFieldID {
+        switch fieldBundle.storage {
+        case .dense(let volume):
+            let index = volumeInstances.count
+            add(volume: volume, material: fieldBundle.fallbackMaterial, transform: transform)
+            return RenderFieldID(storage: .dense, index: index)
+        case .sparse(let volume):
+            let index = sparseVolumeInstances.count
+            add(sparseVolume: volume, material: fieldBundle.fallbackMaterial, transform: transform)
+            return RenderFieldID(storage: .sparse, index: index)
+        }
+    }
+
+    /// Replaces an existing field using a handle returned by `add(fieldBundle:)`.
+    ///
+    /// The current replacement API preserves the field storage family. If an
+    /// editor wants to switch a field from dense to sparse, rebuild the scene or
+    /// add a new field and discard the old handle.
+    @discardableResult
+    public mutating func replaceField(
+        _ id: RenderFieldID,
+        with fieldBundle: RenderFieldBundle,
+        transform: Transform? = nil
+    ) -> Bool {
+        switch id.storage {
+        case .dense:
+            return replaceDenseField(at: id.index, with: fieldBundle, transform: transform)
+        case .sparse:
+            return replaceSparseField(at: id.index, with: fieldBundle, transform: transform)
+        }
+    }
+
+    /// Replaces an existing dense field instance.
+    ///
+    /// This first replacement API is intentionally whole-bundle based. Interactive
+    /// editors can use it for near-term rebuilds while RendererKit grows partial
+    /// dirty-brick update support.
+    @discardableResult
+    public mutating func replaceDenseField(
+        at index: Int,
+        with fieldBundle: RenderFieldBundle,
+        transform: Transform? = nil
+    ) -> Bool {
+        guard volumeInstances.indices.contains(index) else {
+            return false
+        }
+        guard case .dense(let volume) = fieldBundle.storage else {
+            return false
+        }
+        let existingTransform = volumeInstances[index].transform
+        volumeInstances[index] = DistanceVolumeInstance(
+            volume: volume,
+            material: fieldBundle.fallbackMaterial,
+            transform: transform ?? existingTransform
+        )
+        return true
+    }
+
+    /// Replaces an existing sparse field instance.
+    ///
+    /// This first replacement API is intentionally whole-bundle based. Interactive
+    /// editors can use it for near-term rebuilds while RendererKit grows partial
+    /// dirty-brick update support.
+    @discardableResult
+    public mutating func replaceSparseField(
+        at index: Int,
+        with fieldBundle: RenderFieldBundle,
+        transform: Transform? = nil
+    ) -> Bool {
+        guard sparseVolumeInstances.indices.contains(index) else {
+            return false
+        }
+        guard case .sparse(let volume) = fieldBundle.storage else {
+            return false
+        }
+        let existingTransform = sparseVolumeInstances[index].transform
+        sparseVolumeInstances[index] = SparseDistanceVolumeInstance(
+            volume: volume,
+            material: fieldBundle.fallbackMaterial,
+            transform: transform ?? existingTransform
+        )
+        return true
     }
 
     /// Adds an app-authored quad area light.
@@ -677,7 +782,7 @@ public struct RenderScene: Sendable {
     }
 
     func compileForGPU() throws -> SceneCompilation {
-        guard !materials.isEmpty else {
+        guard !materialSources.isEmpty else {
             throw DenrimRendererError.invalidScene("At least one material is required.")
         }
 
@@ -685,14 +790,20 @@ public struct RenderScene: Sendable {
 
         let volumeResources = try LinearTriangleAccelerationBackend.gpuVolumes(scene: self)
         let volumeBrickResources = try LinearTriangleAccelerationBackend.gpuVolumeBricks(scene: self)
+        let resolvedMaterials = materialSources.map { $0.resolvedMaterial() }
 
         return SceneCompilation(
             triangles: instanceAcceleration.materializedTriangles(),
-            materials: materials.map { $0.gpuMaterial() },
+            materials: resolvedMaterials.map { $0.gpuMaterial() },
+            materialSemantics: materialSources.map(LinearTriangleAccelerationBackend.gpuMaterialSemanticDescriptor),
             volumes: volumeResources.descriptors,
             volumeSamples: volumeResources.samples,
+            volumeAttributeDescriptors: volumeResources.attributeDescriptors,
+            volumeAttributeSamples: volumeResources.attributeSamples,
             volumeBricks: volumeBrickResources.descriptors,
             volumeBrickSamples: volumeBrickResources.samples,
+            volumeBrickAttributeDescriptors: volumeBrickResources.attributeDescriptors,
+            volumeBrickAttributeSamples: volumeBrickResources.attributeSamples,
             instanceAcceleration: instanceAcceleration
         )
     }
@@ -701,9 +812,14 @@ public struct RenderScene: Sendable {
 struct SceneCompilation {
     var triangles: [GPUTriangle]
     var materials: [GPUMaterial]
+    var materialSemantics: [GPUMaterialSemanticDescriptor]
     var volumes: [GPUVolumeDescriptor]
     var volumeSamples: [GPUVolumeSample]
+    var volumeAttributeDescriptors: [GPUVolumeAttributeDescriptor]
+    var volumeAttributeSamples: [SIMD4<Float>]
     var volumeBricks: [GPUVolumeBrickDescriptor]
     var volumeBrickSamples: [GPUVolumeSample]
+    var volumeBrickAttributeDescriptors: [GPUVolumeAttributeDescriptor]
+    var volumeBrickAttributeSamples: [SIMD4<Float>]
     var instanceAcceleration: InstanceAcceleration
 }

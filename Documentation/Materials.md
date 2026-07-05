@@ -1,8 +1,12 @@
 # Materials
 
-DenrimRendererKit currently ships a deliberately small material model while the renderer core, acceleration backends, AOVs, texture path, and reference tests stabilize.
+DenrimRendererKit's material source of truth is moving toward semantic material intent plus compact procedural fields.
 
-The current public `Material` supports:
+Artists and host products should author `SemanticMaterial` values such as moss, wet film, crystal, wax, bark, metal, rust, burn, ice, lava, ceramic, emissive, or plain. A semantic material stores an archetype, editable style colors, and compact attributes such as age, wetness, polish, cavity, amount, and emission. RendererKit expands that source into the renderer-facing `Material` payload at scene compilation time.
+
+For SDF-backed products, compact scalar fields should live in `DistanceVolumeAttributeLayout` / packed attribute samples. This lets operators bake `growthAge`, `branchID`, `curvature`, `cavity`, `wetness`, `mossAmount`, or similar fields into dense and sparse volumes without expanding them into full material parameters. The flat Metal path samples those fields for volume hits and lets semantic material resolvers consume them during shading and AOV material evaluation.
+
+The expanded public `Material` remains the compiled renderer representation. It supports:
 
 * `baseColor`
 * `roughness`
@@ -53,7 +57,20 @@ The current public `Material` supports:
 
 `transmission`, `transmissionColor`, `transmissionRoughness`, `transmissionIndexOfRefraction`, `transmissionAbsorptionColor`, `transmissionAbsorptionDistance`, and `thinWalled` are active as dielectric transport controls. Transmissive solid surfaces sample reflection or refraction using exact dielectric Fresnel, independent roughness-driven GGX micro-normals, explicit transmission tint, independent transmission IOR, Beer-style exit absorption, and transparent direct-light shadow rays. Omitted transmission color, roughness, and IOR inherit from `baseColor`, `roughness`, and `indexOfRefraction` so existing materials keep their previous behavior. Absorption is disabled by default with distance zero; when enabled, `transmissionAbsorptionColor` is the remaining color after traveling `transmissionAbsorptionDistance` scene units through the solid. `volumeScattering`, `volumeScatteringColor`, `volumeScatteringDistance`, and `volumeAnisotropy` add participating-medium scattering inside solid transmissive geometry. The renderer samples spectral free-flight distances through the current closed solid, scatters by a Henyey-Greenstein phase function, and uses absorption plus out-scattering as shadow-ray extinction. This path is intended for cloudy liquids, milky glass, resin, and other refractive media where Beer absorption alone is too clear. `thinWalled` switches transmission to a zero-thickness sheet path that can reflect by Fresnel but transmits straight through without entering a refractive volume. This is suitable for glass validation assets such as the DiningRoom table and thin panes, leaves, or film-like sheets. It is not yet the final production dielectric stack: nested dielectric priority, caustic controls, dispersion, direct volume next-event estimation, and semi-transparent blending are still future work.
 
-This is enough for the first reusable path tracing vertical slice, but it is not the intended final material system.
+This expanded payload is enough for the current path tracing shader, but it is not the intended authored material system. It should increasingly be treated like compiled code: useful for renderer internals, tests, and compatibility, but not the main abstraction Denrim products expose to artists.
+
+## Semantic Source Direction
+
+The Form-style material model should avoid carrying large MoonRay-like parameter blocks through every SDF sample. Instead, the source representation should be:
+
+* Material archetype: moss, wet film, bark, crystal, wax, rust, ice, lava, and similar semantic families.
+* Editable style: artist-controlled colors, ramps, roughness feel, polish, clarity, glow, and related high-level settings.
+* Compact attributes: per-object, per-operator, or per-volume fields such as age, wetness, cavity, growth age, branch ID, moss amount, and polish.
+* Resolver: renderer-owned code that expands the semantic source and sampled compact fields into the active `Material` / shader parameters.
+
+This keeps baked SDF bricks small. A mossy surface can store `mossAmount`, `mossAge`, `wetness`, and `cavity` instead of a full base-color, specular, sheen, subsurface, clearcoat, and transmission struct per sample. The editable palette still lives in the semantic material style, so colors are art-directable without becoming per-voxel baggage.
+
+`RenderScene` now stores `materialSources` as authored `SemanticMaterial` values and keeps `materials` as the resolved renderer cache used by current mesh, volume, and GPU paths. Scene compilation also emits compact semantic material descriptors so volume attributes can modulate semantic families such as moss, wet film, crystal/ice, burn, and lava without allocating unique static materials per voxel.
 
 ## MoonRay Reference
 

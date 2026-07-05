@@ -176,6 +176,8 @@ public enum SceneScript {
             case "material":
                 let parsed = try parseMaterial(tokens, line: lineNumber, textures: textures)
                 materials[parsed.name] = scene.addMaterial(parsed.material)
+            case "sdf", "volume":
+                try parseSDFVolume(tokens, line: lineNumber, scene: &scene, materials: materials)
             case "quad":
                 let parsed = try parseQuad(tokens, line: lineNumber, materials: materials)
                 scene.add(mesh: parsed.mesh, material: parsed.material)
@@ -551,13 +553,27 @@ public enum SceneScript {
         _ tokens: [String],
         line: Int,
         textures: [String: Texture2D]
-    ) throws -> (name: String, material: Material) {
+    ) throws -> (name: String, material: SemanticMaterial) {
         guard tokens.count >= 3 else {
             throw SceneScriptError.invalidArgumentCount("material", line: line)
         }
 
         let name = tokens[1]
         let lowercasedSource = tokens[2].lowercased()
+        if lowercasedSource == "semantic" || lowercasedSource == "archetype" {
+            guard tokens.count >= 4 else {
+                throw SceneScriptError.invalidArgumentCount("material", line: line)
+            }
+            return (
+                name,
+                try parseSemanticMaterial(
+                    archetypeName: tokens[3],
+                    options: Array(tokens.dropFirst(4)),
+                    line: line
+                )
+            )
+        }
+
         let startingMaterial: Material
         let startingIndex: Int
         if lowercasedSource == "preset" || lowercasedSource == "builtin" || lowercasedSource == "built-in" {
@@ -579,11 +595,11 @@ public enum SceneScript {
                 let emission = try floats(tokens[5..<9], line: line)
                 return (
                     name,
-                    Material(
+                    SemanticMaterial.physical(Material(
                         baseColor: SIMD3<Float>(base[0], base[1], base[2]),
                         emission: SIMD3<Float>(emission[0], emission[1], emission[2]),
                         emissionStrength: emission[3]
-                    )
+                    ))
                 )
             }
             startingMaterial = Material(baseColor: SIMD3<Float>(base[0], base[1], base[2]))
@@ -842,7 +858,146 @@ public enum SceneScript {
 
         return (
             name,
-            material
+            SemanticMaterial.physical(material)
+        )
+    }
+
+    private static func parseSemanticMaterial(
+        archetypeName: String,
+        options: [String],
+        line: Int
+    ) throws -> SemanticMaterial {
+        let archetype = try materialArchetype(named: archetypeName, line: line)
+        var primaryColor = defaultPrimaryColor(for: archetype)
+        var secondaryColor: SIMD3<Float>?
+        var accentColor: SIMD3<Float>?
+        var roughness: Float = defaultRoughness(for: archetype)
+        var metallic: Float = archetype == .metal ? 1 : 0
+        var opacity: Float = 1
+        var transmission: Float = archetype == .crystal || archetype == .ice ? 0.85 : 0
+        var emissionStrength: Float = archetype == .emissive ? 1 : 0
+        var amount: Float = 1
+        var age: Float = 0
+        var wetness: Float = 0
+        var polish: Float = 0
+        var cavity: Float = 0
+        var emission: Float = archetype == .emissive ? 1 : 0
+        var index = 0
+
+        while index < options.count {
+            switch options[index].lowercased() {
+            case "color", "primary", "primarycolor", "youngcolor", "tint":
+                guard index + 3 < options.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                let values = try floats(options[(index + 1)...(index + 3)], line: line)
+                primaryColor = SIMD3<Float>(values[0], values[1], values[2])
+                index += 4
+            case "secondary", "secondarycolor", "maturecolor":
+                guard index + 3 < options.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                let values = try floats(options[(index + 1)...(index + 3)], line: line)
+                secondaryColor = SIMD3<Float>(values[0], values[1], values[2])
+                index += 4
+            case "accent", "accentcolor", "drycolor":
+                guard index + 3 < options.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                let values = try floats(options[(index + 1)...(index + 3)], line: line)
+                accentColor = SIMD3<Float>(values[0], values[1], values[2])
+                index += 4
+            case "roughness":
+                guard index + 1 < options.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                roughness = try floats(options[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "metallic":
+                guard index + 1 < options.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                metallic = try floats(options[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "opacity":
+                guard index + 1 < options.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                opacity = try floats(options[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "transmission", "clarity":
+                guard index + 1 < options.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                transmission = try floats(options[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "emissionstrength", "strength":
+                guard index + 1 < options.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                emissionStrength = try floats(options[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "amount":
+                guard index + 1 < options.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                amount = try floats(options[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "age":
+                guard index + 1 < options.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                age = try floats(options[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "wetness":
+                guard index + 1 < options.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                wetness = try floats(options[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "polish":
+                guard index + 1 < options.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                polish = try floats(options[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "cavity":
+                guard index + 1 < options.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                cavity = try floats(options[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "emission":
+                guard index + 1 < options.count else {
+                    throw SceneScriptError.invalidArgumentCount("material", line: line)
+                }
+                emission = try floats(options[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            default:
+                throw SceneScriptError.invalidArgumentCount("material", line: line)
+            }
+        }
+
+        return SemanticMaterial(
+            archetype: archetype,
+            style: MaterialStyle(
+                primaryColor: primaryColor,
+                secondaryColor: secondaryColor,
+                accentColor: accentColor,
+                roughness: roughness,
+                metallic: metallic,
+                opacity: opacity,
+                transmission: transmission,
+                emissionStrength: emissionStrength
+            ),
+            attributes: MaterialSemanticAttributes(
+                amount: amount,
+                age: age,
+                wetness: wetness,
+                polish: polish,
+                cavity: cavity,
+                emission: emission
+            )
         )
     }
 
@@ -1060,6 +1215,369 @@ public enum SceneScript {
         transform = transform * Transform.scale(scale)
 
         return (mesh, material, transform)
+    }
+
+    private static func parseSDFVolume(
+        _ tokens: [String],
+        line: Int,
+        scene: inout RenderScene,
+        materials: [String: MaterialID]
+    ) throws {
+        guard tokens.count >= 2 else {
+            throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+        }
+
+        var isSparse = false
+        var fallbackMaterialName: String?
+        var resolution = 32
+        var brickSize = 8
+        var narrowBand: Float = 0.1
+        var boundsMin = SIMD3<Float>(repeating: -1)
+        var boundsMax = SIMD3<Float>(repeating: 1)
+        var attributeNames: [String] = []
+        var position = SIMD3<Float>(repeating: 0)
+        var scale = SIMD3<Float>(repeating: 1)
+        var rotationY: Float?
+        var primitives: [SDFPrimitive] = []
+        var index = 1
+
+        if index < tokens.count,
+           !isSDFGlobalKeyword(tokens[index]),
+           !isSDFShapeKeyword(tokens[index]) {
+            index += 1
+        }
+
+        while index < tokens.count {
+            let keyword = tokens[index].lowercased()
+            if isSDFShapeKeyword(keyword) {
+                let parsed = try parseSDFPrimitive(
+                    tokens,
+                    index: index,
+                    line: line,
+                    fallbackMaterialName: fallbackMaterialName,
+                    materials: materials
+                )
+                primitives.append(parsed.primitive)
+                index = parsed.nextIndex
+                continue
+            }
+
+            switch keyword {
+            case "dense":
+                isSparse = false
+                index += 1
+            case "sparse", "bricks", "brick":
+                isSparse = true
+                index += 1
+            case "backend", "storage":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                switch tokens[index + 1].lowercased() {
+                case "dense":
+                    isSparse = false
+                case "sparse", "bricks", "brick":
+                    isSparse = true
+                default:
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                index += 2
+            case "material":
+                let parsed = try parseOptionalNamedString(
+                    tokens,
+                    index: index,
+                    keyword: "material",
+                    defaultConsumesBareValue: false,
+                    line: line
+                )
+                fallbackMaterialName = parsed.value
+                index = parsed.nextIndex
+            case "resolution", "res":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                resolution = max(2, try int(tokens[index + 1], line: line))
+                index += 2
+            case "bricksize", "brick-size":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                brickSize = max(1, try int(tokens[index + 1], line: line))
+                index += 2
+            case "narrowband", "band":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                narrowBand = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "boundsmin", "min":
+                let parsed = try parseNamedVector3(tokens, index: index, line: line)
+                boundsMin = parsed.value
+                index = parsed.nextIndex
+            case "boundsmax", "max":
+                let parsed = try parseNamedVector3(tokens, index: index, line: line)
+                boundsMax = parsed.value
+                index = parsed.nextIndex
+            case "attributes", "attrs":
+                index += 1
+                while index < tokens.count,
+                      !isSDFShapeKeyword(tokens[index]),
+                      !isSDFGlobalKeyword(tokens[index]) {
+                    appendUnique(tokens[index], to: &attributeNames)
+                    index += 1
+                }
+            case "position", "translation", "translate":
+                let parsed = try parseNamedVector3(tokens, index: index, line: line)
+                position = parsed.value
+                index = parsed.nextIndex
+            case "scale":
+                let parsed = try parseNamedVector3(tokens, index: index, line: line)
+                scale = parsed.value
+                index = parsed.nextIndex
+            case "rotationy", "rotatey":
+                let parsed = try parseNamedFloat(tokens, index: index, line: line)
+                rotationY = parsed.value
+                index = parsed.nextIndex
+            default:
+                throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+            }
+        }
+
+        guard !primitives.isEmpty else {
+            throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+        }
+
+        if attributeNames.isEmpty {
+            for primitive in primitives {
+                for name in primitive.attributes.values.keys.sorted() {
+                    appendUnique(name, to: &attributeNames)
+                }
+            }
+        }
+
+        let attributeLayout = DistanceVolumeAttributeLayout(channels: attributeNames.map { name in
+            DistanceVolumeAttributeChannel(
+                name: name,
+                semantic: attributeSemantic(named: name),
+                defaultValue: 0
+            )
+        })
+        let model = SDFModel(
+            primitives: primitives,
+            attributeLayout: attributeLayout
+        )
+        let fallbackMaterial: MaterialID
+        if let fallbackMaterialName {
+            fallbackMaterial = try material(named: fallbackMaterialName, line: line, materials: materials)
+        } else {
+            fallbackMaterial = primitives[0].material
+        }
+        var transform = Transform.translation(position)
+        if let rotationY {
+            transform = transform * Transform.rotationY(radians: rotationY)
+        }
+        transform = transform * Transform.scale(scale)
+
+        if isSparse {
+            let sparse = try DistanceVolumeBuilder.buildSparse(
+                model: model,
+                settings: SparseDistanceVolumeBuildSettings(
+                    resolution: resolution,
+                    brickSize: brickSize,
+                    boundsMin: boundsMin,
+                    boundsMax: boundsMax,
+                    narrowBand: narrowBand
+                )
+            )
+            scene.add(
+                fieldBundle: RenderFieldBundle(sparse: sparse, fallbackMaterial: fallbackMaterial),
+                transform: transform
+            )
+        } else {
+            let volume = try DistanceVolumeBuilder.build(
+                model: model,
+                settings: DistanceVolumeBuildSettings(
+                    resolution: resolution,
+                    boundsMin: boundsMin,
+                    boundsMax: boundsMax
+                )
+            )
+            scene.add(
+                fieldBundle: RenderFieldBundle(dense: volume, fallbackMaterial: fallbackMaterial),
+                transform: transform
+            )
+        }
+    }
+
+    private static func parseSDFPrimitive(
+        _ tokens: [String],
+        index startIndex: Int,
+        line: Int,
+        fallbackMaterialName: String?,
+        materials: [String: MaterialID]
+    ) throws -> (primitive: SDFPrimitive, nextIndex: Int) {
+        let shapeKeyword = tokens[startIndex].lowercased()
+        var index = startIndex + 1
+        var materialName = fallbackMaterialName
+        if index < tokens.count,
+           !isSDFPrimitiveKeyword(tokens[index]),
+           !isSDFShapeKeyword(tokens[index]) {
+            materialName = tokens[index]
+            index += 1
+        }
+        var radius: Float?
+        var halfExtents: SIMD3<Float>?
+        var cornerRadius: Float = 0
+        var position = SIMD3<Float>(repeating: 0)
+        var scale = SIMD3<Float>(repeating: 1)
+        var rotationY: Float?
+        var smoothUnionRadius: Float = 0
+        var attributes: [String: Float] = [:]
+        var materialFields = DistanceVolumeMaterialFields()
+
+        while index < tokens.count, !isSDFShapeKeyword(tokens[index]) {
+            let keyword = tokens[index].lowercased()
+            switch keyword {
+            case "material":
+                let parsed = try parseOptionalNamedString(
+                    tokens,
+                    index: index,
+                    keyword: "material",
+                    defaultConsumesBareValue: false,
+                    line: line
+                )
+                materialName = parsed.value
+                index = parsed.nextIndex
+            case "radius":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                radius = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "halfextents", "halfextent", "extents":
+                let parsed = try parseNamedVector3(tokens, index: index, line: line)
+                halfExtents = parsed.value
+                index = parsed.nextIndex
+            case "size":
+                let parsed = try parseNamedVector3(tokens, index: index, line: line)
+                halfExtents = parsed.value * 0.5
+                index = parsed.nextIndex
+            case "cornerradius", "rounding", "round":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                cornerRadius = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "position", "translation", "translate":
+                let parsed = try parseNamedVector3(tokens, index: index, line: line)
+                position = parsed.value
+                index = parsed.nextIndex
+            case "scale":
+                let parsed = try parseNamedVector3(tokens, index: index, line: line)
+                scale = parsed.value
+                index = parsed.nextIndex
+            case "rotationy", "rotatey":
+                let parsed = try parseNamedFloat(tokens, index: index, line: line)
+                rotationY = parsed.value
+                index = parsed.nextIndex
+            case "smooth", "smoothunion", "smoothunionradius":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                smoothUnionRadius = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "attr", "attribute":
+                guard index + 2 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                attributes[tokens[index + 1]] = try floats(tokens[(index + 2)...(index + 2)], line: line)[0]
+                index += 3
+            case "basecolor", "color":
+                guard index + 3 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                let values = try floats(tokens[(index + 1)...(index + 3)], line: line)
+                materialFields.baseColor = SIMD3<Float>(values[0], values[1], values[2])
+                index += 4
+            case "opacity":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                materialFields.opacity = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "emission":
+                guard index + 3 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                let values = try floats(tokens[(index + 1)...(index + 3)], line: line)
+                materialFields.emission = SIMD3<Float>(values[0], values[1], values[2])
+                index += 4
+            case "roughness":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                materialFields.roughness = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "metallic":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                materialFields.metallic = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "transmission":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                materialFields.transmission = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            default:
+                if attributeSemantic(named: tokens[index]) != .custom,
+                   index + 1 < tokens.count,
+                   Float(tokens[index + 1]) != nil {
+                    attributes[tokens[index]] = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                    index += 2
+                } else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+            }
+        }
+
+        let shape: SDFPrimitiveShape
+        switch shapeKeyword {
+        case "sphere":
+            guard let radius else {
+                throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+            }
+            shape = .sphere(radius: radius)
+        case "box":
+            guard let halfExtents else {
+                throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+            }
+            shape = .box(halfExtents: halfExtents, cornerRadius: cornerRadius)
+        default:
+            throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+        }
+
+        guard let materialName else {
+            throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+        }
+        var transform = Transform.translation(position)
+        if let rotationY {
+            transform = transform * Transform.rotationY(radians: rotationY)
+        }
+        transform = transform * Transform.scale(scale)
+
+        return (
+            SDFPrimitive(
+                shape: shape,
+                material: try material(named: materialName, line: line, materials: materials),
+                materialFields: materialFields,
+                attributes: DistanceVolumeAttributeValues(attributes),
+                transform: transform,
+                smoothUnionRadius: smoothUnionRadius
+            ),
+            index
+        )
     }
 
     private static func material(
@@ -1440,5 +1958,150 @@ public enum SceneScript {
 
     private static func canParseFloats<S: Sequence>(_ tokens: S) -> Bool where S.Element == String {
         tokens.allSatisfy { Float($0) != nil }
+    }
+
+    private static func materialArchetype(named name: String, line: Int) throws -> MaterialArchetype {
+        switch name.lowercased() {
+        case "plain", "matte":
+            return .plain
+        case "moss":
+            return .moss
+        case "bark":
+            return .bark
+        case "wetfilm", "wet-film", "wet":
+            return .wetFilm
+        case "crystal":
+            return .crystal
+        case "wax":
+            return .wax
+        case "ceramic":
+            return .ceramic
+        case "metal":
+            return .metal
+        case "rust":
+            return .rust
+        case "burn", "char":
+            return .burn
+        case "ice":
+            return .ice
+        case "lava":
+            return .lava
+        case "emissive", "emission":
+            return .emissive
+        default:
+            throw SceneScriptError.invalidArgumentCount("material", line: line)
+        }
+    }
+
+    private static func defaultPrimaryColor(for archetype: MaterialArchetype) -> SIMD3<Float> {
+        switch archetype {
+        case .plain:
+            return SIMD3<Float>(0.8, 0.8, 0.8)
+        case .moss:
+            return SIMD3<Float>(0.42, 0.68, 0.22)
+        case .bark:
+            return SIMD3<Float>(0.36, 0.22, 0.12)
+        case .wetFilm:
+            return SIMD3<Float>(0.55, 0.72, 0.82)
+        case .crystal, .ice:
+            return SIMD3<Float>(0.75, 0.9, 1)
+        case .wax:
+            return SIMD3<Float>(0.95, 0.78, 0.55)
+        case .ceramic:
+            return SIMD3<Float>(0.82, 0.78, 0.68)
+        case .metal:
+            return SIMD3<Float>(0.74, 0.72, 0.68)
+        case .rust:
+            return SIMD3<Float>(0.62, 0.24, 0.08)
+        case .burn:
+            return SIMD3<Float>(0.08, 0.07, 0.06)
+        case .lava:
+            return SIMD3<Float>(0.3, 0.05, 0.02)
+        case .emissive:
+            return SIMD3<Float>(1, 0.82, 0.55)
+        }
+    }
+
+    private static func defaultRoughness(for archetype: MaterialArchetype) -> Float {
+        switch archetype {
+        case .moss, .bark, .burn, .rust:
+            return 0.82
+        case .wetFilm, .crystal, .ice:
+            return 0.08
+        case .metal:
+            return 0.28
+        default:
+            return 0.55
+        }
+    }
+
+    private static func attributeSemantic(named name: String) -> DistanceVolumeAttributeSemantic {
+        switch name.lowercased() {
+        case "growthage", "age", "mossage":
+            return .growthAge
+        case "branchid", "branch":
+            return .branchID
+        case "curvature":
+            return .curvature
+        case "cavity":
+            return .cavity
+        case "noise":
+            return .noise
+        case "wetness", "wet":
+            return .wetness
+        case "mossamount", "moss":
+            return .mossAmount
+        case "polish":
+            return .polish
+        case "fracture":
+            return .fracture
+        case "burnamount", "burn":
+            return .burnAmount
+        default:
+            return .custom
+        }
+    }
+
+    private static func isSDFShapeKeyword(_ token: String) -> Bool {
+        switch token.lowercased() {
+        case "sphere", "box":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func isSDFGlobalKeyword(_ token: String) -> Bool {
+        switch token.lowercased() {
+        case "dense", "sparse", "bricks", "brick", "backend", "storage", "material",
+             "resolution", "res", "bricksize", "brick-size", "narrowband", "band",
+             "boundsmin", "min", "boundsmax", "max", "attributes", "attrs",
+             "position", "translation", "translate", "scale", "rotationy", "rotatey":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func isSDFPrimitiveKeyword(_ token: String) -> Bool {
+        if isSDFShapeKeyword(token) {
+            return true
+        }
+        switch token.lowercased() {
+        case "material", "radius", "halfextents", "halfextent", "extents", "size",
+             "cornerradius", "rounding", "round", "position", "translation", "translate",
+             "scale", "rotationy", "rotatey", "smooth", "smoothunion", "smoothunionradius",
+             "attr", "attribute", "basecolor", "color", "opacity", "emission",
+             "roughness", "metallic", "transmission":
+            return true
+        default:
+            return attributeSemantic(named: token) != .custom
+        }
+    }
+
+    private static func appendUnique(_ value: String, to values: inout [String]) {
+        if !values.contains(value) {
+            values.append(value)
+        }
     }
 }

@@ -75,6 +75,67 @@ final class APITests: XCTestCase {
         XCTAssertEqual(build.volumes[0].metadata.y, 0)
     }
 
+    func testRenderFieldBundleAddsDenseStorage() throws {
+        var scene = RenderScene()
+        let material = scene.addMaterial(SemanticMaterial.moss())
+        let volume = DistanceVolume.sphere(resolution: 12, radius: 0.55)
+        let bundle = RenderFieldBundle(dense: volume, fallbackMaterial: material)
+        let field = scene.add(
+            fieldBundle: bundle,
+            transform: .translation(SIMD3<Float>(0.25, 0.5, 0))
+        )
+
+        let build = try LinearTriangleAccelerationBackend().build(scene: scene)
+
+        XCTAssertEqual(field.storage, .dense)
+        XCTAssertEqual(field.index, 0)
+        XCTAssertEqual(scene.volumeInstances.count, 1)
+        XCTAssertTrue(scene.sparseVolumeInstances.isEmpty)
+        XCTAssertEqual(scene.volumeInstances[0].material, material)
+        XCTAssertEqual(scene.volumeInstances[0].transform.matrix.columns.3.x, 0.25, accuracy: 0.0001)
+        XCTAssertEqual(bundle.bounds.minimum, volume.boundsMin)
+        XCTAssertEqual(bundle.bounds.maximum, volume.boundsMax)
+        XCTAssertEqual(build.volumes.count, 1)
+        XCTAssertEqual(build.volumeSamples.count, 12 * 12 * 12)
+    }
+
+    func testRenderFieldBundleAddsSparseStorageAndReplacesWholeBundle() throws {
+        var scene = RenderScene()
+        let material = scene.addMaterial(SemanticMaterial.moss())
+        let model = SDFModel(primitives: [
+            SDFPrimitive(shape: .sphere(radius: 0.48), material: material)
+        ])
+        let sparse = try DistanceVolumeBuilder.buildSparse(
+            model: model,
+            settings: SparseDistanceVolumeBuildSettings(resolution: 20, brickSize: 5, narrowBand: 0.3)
+        )
+        let replacement = try DistanceVolumeBuilder.buildSparse(
+            model: model,
+            settings: SparseDistanceVolumeBuildSettings(resolution: 18, brickSize: 6, narrowBand: 0.3)
+        )
+
+        let field = scene.add(
+            fieldBundle: RenderFieldBundle(sparse: sparse, fallbackMaterial: material),
+            transform: .translation(SIMD3<Float>(0.1, 0.2, 0.3))
+        )
+        let replaced = scene.replaceField(
+            field,
+            with: RenderFieldBundle(sparse: replacement, fallbackMaterial: material)
+        )
+        let compiled = try scene.compileForGPU()
+
+        XCTAssertTrue(replaced)
+        XCTAssertEqual(field.storage, .sparse)
+        XCTAssertEqual(field.index, 0)
+        XCTAssertTrue(scene.volumeInstances.isEmpty)
+        XCTAssertEqual(scene.sparseVolumeInstances.count, 1)
+        XCTAssertEqual(scene.sparseVolumeInstances[0].volume.dimensions, replacement.dimensions)
+        XCTAssertEqual(scene.sparseVolumeInstances[0].transform.matrix.columns.3.x, 0.1, accuracy: 0.0001)
+        XCTAssertEqual(scene.sparseVolumeInstances[0].transform.matrix.columns.3.y, 0.2, accuracy: 0.0001)
+        XCTAssertEqual(scene.sparseVolumeInstances[0].transform.matrix.columns.3.z, 0.3, accuracy: 0.0001)
+        XCTAssertEqual(compiled.volumeBricks.count, replacement.bricks.count)
+    }
+
     func testQuadLightAPIAddsAppAuthoredEmissiveLight() throws {
         var scene = RenderScene()
         scene.addQuadLight(QuadLight(
@@ -125,6 +186,44 @@ final class APITests: XCTestCase {
         XCTAssertTrue(scene.materials.contains { $0.clearcoat > 0 })
         XCTAssertTrue(scene.materials.contains { $0.sheen > 0 })
         XCTAssertTrue(scene.materials.contains { $0.specularAnisotropy > 0 })
+    }
+
+    func testSemanticMaterialResolvesArtistEditableStyle() {
+        let moss = SemanticMaterial.moss(
+            youngColor: SIMD3<Float>(0.6, 0.9, 0.25),
+            matureColor: SIMD3<Float>(0.1, 0.42, 0.12),
+            dryColor: SIMD3<Float>(0.48, 0.34, 0.18),
+            age: 0.5,
+            wetness: 0.7
+        )
+
+        let material = moss.resolvedMaterial()
+
+        XCTAssertGreaterThan(material.baseColor.y, material.baseColor.x)
+        XCTAssertGreaterThan(material.baseColor.y, material.baseColor.z)
+        XCTAssertLessThan(material.roughness, 0.7)
+        XCTAssertGreaterThan(material.sheen, 0)
+        XCTAssertGreaterThan(material.subsurface, 0)
+    }
+
+    func testRenderSceneStoresSemanticMaterialsAsSourceOfTruth() throws {
+        var scene = RenderScene()
+        let moss = SemanticMaterial.moss(
+            youngColor: SIMD3<Float>(0.3, 0.8, 0.2),
+            matureColor: SIMD3<Float>(0.05, 0.32, 0.08),
+            age: 0.25,
+            wetness: 0.4
+        )
+        let material = scene.addMaterial(moss)
+
+        XCTAssertEqual(material.rawValue, 0)
+        XCTAssertEqual(scene.materialSources.count, 1)
+        XCTAssertEqual(scene.materialSources[0].archetype, .moss)
+        XCTAssertEqual(scene.materials.count, 1)
+
+        let compiled = try scene.compileForGPU()
+        XCTAssertEqual(compiled.materials.count, 1)
+        XCTAssertEqual(compiled.materials[0].baseColor.x, moss.resolvedMaterial().baseColor.x, accuracy: 0.0001)
     }
 
     func testTransparentMaterialReferenceSceneCompiles() throws {
@@ -280,6 +379,110 @@ final class APITests: XCTestCase {
                 && sample.materialFieldFlags.x & DistanceVolumeMaterialFields.roughnessFlag != 0
                 && sample.materialFieldFlags.x & DistanceVolumeMaterialFields.metallicFlag != 0
         })
+    }
+
+    func testSDFPrimitiveAttributesBakeIntoDenseAndSparseVolumes() throws {
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.4, 0.8, 0.25)))
+        let layout = DistanceVolumeAttributeLayout(channels: [
+            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge, defaultValue: 0),
+            DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness, defaultValue: 0),
+            DistanceVolumeAttributeChannel(name: "mossAmount", semantic: .mossAmount, defaultValue: 0)
+        ])
+        let model = SDFModel(
+            primitives: [
+                SDFPrimitive(
+                    shape: .sphere(radius: 0.5),
+                    material: material,
+                    attributes: DistanceVolumeAttributeValues([
+                        "growthAge": 0.35,
+                        "wetness": 0.72,
+                        "mossAmount": 0.9
+                    ])
+                )
+            ],
+            attributeLayout: layout
+        )
+
+        let dense = try DistanceVolumeBuilder.build(
+            model: model,
+            settings: DistanceVolumeBuildSettings(resolution: 12)
+        )
+        let sparse = try DistanceVolumeBuilder.buildSparse(
+            model: model,
+            settings: SparseDistanceVolumeBuildSettings(resolution: 12, brickSize: 4, narrowBand: 0.4)
+        )
+        let reconstructed = sparse.denseVolume()
+        scene.add(sparseVolume: sparse, material: material)
+        let compiled = try scene.compileForGPU()
+
+        XCTAssertEqual(dense.attributeLayout, layout)
+        XCTAssertEqual(dense.attributeSamples.count, 12 * 12 * 12)
+        XCTAssertTrue(dense.attributeSamples.contains { sample in
+            sample.x == 0.35 && sample.y == 0.72 && sample.z == 0.9
+        })
+        XCTAssertEqual(reconstructed.attributeLayout, layout)
+        XCTAssertEqual(reconstructed.attributeSamples.count, 12 * 12 * 12)
+        XCTAssertTrue(reconstructed.attributeSamples.contains { sample in
+            sample.x == 0.35 && sample.y == 0.72 && sample.z == 0.9
+        })
+        XCTAssertTrue(sparse.bricks.contains { brick in
+            brick.attributeSamples.contains { sample in
+                sample.x == 0.35 && sample.y == 0.72 && sample.z == 0.9
+            }
+        })
+        XCTAssertEqual(compiled.volumeBrickAttributeDescriptors.count, sparse.bricks.count)
+        XCTAssertTrue(compiled.volumeBrickAttributeSamples.contains { sample in
+            sample.x == 0.35 && sample.y == 0.72 && sample.z == 0.9
+        })
+    }
+
+    func testDistanceVolumeAttributesReachGPUAttributeBuffers() throws {
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.4, 0.8, 0.25)))
+        let layout = DistanceVolumeAttributeLayout(channels: [
+            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
+            DistanceVolumeAttributeChannel(name: "cavity", semantic: .cavity),
+            DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness),
+            DistanceVolumeAttributeChannel(name: "polish", semantic: .polish)
+        ])
+        let sampleCount = 4 * 4 * 4
+        let packed = packedAttributeSample(
+            values: DistanceVolumeAttributeValues([
+                "growthAge": 0.25,
+                "cavity": 0.6,
+                "wetness": 0.8,
+                "polish": 0.1
+            ]),
+            layout: layout
+        )
+        var attributeSamples: [SIMD4<Float>] = []
+        for _ in 0..<sampleCount {
+            attributeSamples.append(contentsOf: packed)
+        }
+        let volume = DistanceVolume(
+            width: 4,
+            height: 4,
+            depth: 4,
+            distances: [Float](repeating: 1, count: sampleCount),
+            attributeLayout: layout,
+            attributeSamples: attributeSamples
+        )
+        scene.add(volume: volume, material: material)
+
+        let compiled = try scene.compileForGPU()
+        let descriptor = try XCTUnwrap(compiled.volumeAttributeDescriptors.first)
+
+        XCTAssertEqual(compiled.volumeAttributeSamples.count, sampleCount)
+        XCTAssertEqual(compiled.volumeAttributeSamples[0], SIMD4<Float>(0.25, 0.6, 0.8, 0.1))
+        XCTAssertEqual(descriptor.metadata.x, 0)
+        XCTAssertEqual(descriptor.metadata.y, 1)
+        XCTAssertEqual(descriptor.metadata.z, UInt32(sampleCount))
+        XCTAssertEqual(descriptor.metadata.w, 0)
+        XCTAssertEqual(descriptor.semantics0.x, DistanceVolumeAttributeSemantic.growthAge.rawValue)
+        XCTAssertEqual(descriptor.semantics0.y, DistanceVolumeAttributeSemantic.cavity.rawValue)
+        XCTAssertEqual(descriptor.semantics0.z, DistanceVolumeAttributeSemantic.wetness.rawValue)
+        XCTAssertEqual(descriptor.semantics0.w, DistanceVolumeAttributeSemantic.polish.rawValue)
     }
 
     func testSparseSDFBuildStoresOnlyActiveBricks() throws {

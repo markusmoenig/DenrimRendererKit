@@ -173,6 +173,138 @@ final class RenderSessionTests: XCTestCase {
         })
     }
 
+    func testSemanticVolumeAttributesDriveAlbedoAOV() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        var scene = RenderScene(
+            camera: Camera(
+                origin: SIMD3<Float>(0, 0, 3),
+                target: SIMD3<Float>(0, 0, 0),
+                projection: .orthographic(verticalScale: 2.4)
+            )
+        )
+        let moss = scene.addMaterial(SemanticMaterial.moss(
+            youngColor: SIMD3<Float>(0.9, 0.95, 0.12),
+            matureColor: SIMD3<Float>(0.04, 0.34, 0.04),
+            dryColor: SIMD3<Float>(0.52, 0.36, 0.12),
+            age: 0,
+            wetness: 0
+        ))
+        let layout = DistanceVolumeAttributeLayout(channels: [
+            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
+            DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness),
+            DistanceVolumeAttributeChannel(name: "mossAmount", semantic: .mossAmount),
+            DistanceVolumeAttributeChannel(name: "cavity", semantic: .cavity)
+        ])
+        let model = SDFModel(
+            primitives: [
+                SDFPrimitive(
+                    shape: .sphere(radius: 0.55),
+                    material: moss,
+                    attributes: DistanceVolumeAttributeValues([
+                        "growthAge": 0.92,
+                        "wetness": 0.8,
+                        "mossAmount": 1,
+                        "cavity": 0.35
+                    ])
+                )
+            ],
+            attributeLayout: layout
+        )
+        let volume = try DistanceVolumeBuilder.build(
+            model: model,
+            settings: DistanceVolumeBuildSettings(
+                dimensions: SIMD3<Int>(20, 20, 20),
+                boundsMin: SIMD3<Float>(-1, -1, -1),
+                boundsMax: SIMD3<Float>(1, 1, 1)
+            )
+        )
+        scene.add(volume: volume, material: moss)
+
+        let renderer = try DenrimRenderer(device: device)
+        let session = try renderer.makeSession(
+            scene: scene,
+            settings: RenderSettings(width: 20, height: 20, maxBounces: 1),
+            accelerationMode: .automatic
+        )
+
+        try session.renderNextSample()
+        let albedo = try session.pixels(for: RenderOutput.albedo)
+
+        XCTAssertTrue(albedo.contains { pixel in
+            pixel.r > 0.08 && pixel.r < 0.45
+                && pixel.g > 0.18 && pixel.g < 0.55
+                && pixel.b < 0.12
+                && pixel.a > 0.9
+        })
+    }
+
+    func testSemanticSparseVolumeAttributesDriveAlbedoAOV() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        var scene = RenderScene(
+            camera: Camera(
+                origin: SIMD3<Float>(0, 0, 3),
+                target: SIMD3<Float>(0, 0, 0),
+                projection: .orthographic(verticalScale: 2.4)
+            )
+        )
+        let moss = scene.addMaterial(SemanticMaterial.moss(
+            youngColor: SIMD3<Float>(0.9, 0.95, 0.12),
+            matureColor: SIMD3<Float>(0.04, 0.34, 0.04),
+            dryColor: SIMD3<Float>(0.52, 0.36, 0.12),
+            age: 0,
+            wetness: 0
+        ))
+        let layout = DistanceVolumeAttributeLayout(channels: [
+            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
+            DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness),
+            DistanceVolumeAttributeChannel(name: "mossAmount", semantic: .mossAmount),
+            DistanceVolumeAttributeChannel(name: "cavity", semantic: .cavity)
+        ])
+        let model = SDFModel(
+            primitives: [
+                SDFPrimitive(
+                    shape: .sphere(radius: 0.55),
+                    material: moss,
+                    attributes: DistanceVolumeAttributeValues([
+                        "growthAge": 0.92,
+                        "wetness": 0.8,
+                        "mossAmount": 1,
+                        "cavity": 0.35
+                    ])
+                )
+            ],
+            attributeLayout: layout
+        )
+        let sparse = try DistanceVolumeBuilder.buildSparse(
+            model: model,
+            settings: SparseDistanceVolumeBuildSettings(resolution: 20, brickSize: 5, narrowBand: 0.3)
+        )
+        scene.add(sparseVolume: sparse, material: moss)
+
+        let renderer = try DenrimRenderer(device: device)
+        let session = try renderer.makeSession(
+            scene: scene,
+            settings: RenderSettings(width: 20, height: 20, maxBounces: 1),
+            accelerationMode: .automatic
+        )
+
+        try session.renderNextSample()
+        let albedo = try session.pixels(for: RenderOutput.albedo)
+
+        XCTAssertTrue(albedo.contains { pixel in
+            pixel.r > 0.08 && pixel.r < 0.45
+                && pixel.g > 0.18 && pixel.g < 0.55
+                && pixel.b < 0.12
+                && pixel.a > 0.9
+        })
+    }
+
     func testSparseVolumeOnlySceneRendersThroughBrickPathOnFlatPath() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw XCTSkip("No Metal device available.")

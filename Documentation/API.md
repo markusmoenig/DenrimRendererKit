@@ -58,9 +58,17 @@ Initial public types:
 * `MeshInstance`
 * `MeshLoadingError`
 * `DistanceVolume`
+* `DistanceVolumeAttributeChannel`
+* `DistanceVolumeAttributeLayout`
+* `DistanceVolumeAttributeSemantic`
+* `DistanceVolumeAttributeValues`
 * `DistanceVolumeInstance`
 * `DistanceVolumeMaterialFields`
 * `DistanceVolumeMaterialSample`
+* `RenderFieldBundle`
+* `RenderFieldID`
+* `RenderFieldStorage`
+* `RenderFieldStorageKind`
 * `SparseDistanceVolume`
 * `SparseDistanceVolumeBrick`
 * `SparseDistanceVolumeInstance`
@@ -70,6 +78,10 @@ Initial public types:
 * `DistanceVolumeBuildSettings`
 * `SparseDistanceVolumeBuildSettings`
 * `DistanceVolumeBuilder`
+* `SemanticMaterial`
+* `MaterialArchetype`
+* `MaterialStyle`
+* `MaterialSemanticAttributes`
 * `Material`
 * `MaterialID`
 * `BuiltInMaterialLibrary`
@@ -90,7 +102,12 @@ Meshes can be added with a material and an optional transform:
 
 ```swift
 var scene = RenderScene()
-let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.8, 0.8, 0.8)))
+let material = scene.addMaterial(SemanticMaterial.moss(
+    youngColor: SIMD3<Float>(0.42, 0.68, 0.22),
+    matureColor: SIMD3<Float>(0.12, 0.38, 0.12),
+    age: 0.35,
+    wetness: 0.2
+))
 
 scene.add(
     mesh: mesh,
@@ -123,25 +140,62 @@ scene.add(
 
 `DistanceVolumeMaterialSample` can carry a two-material blend plus optional baked `DistanceVolumeMaterialFields`. These fields override selected material channels after material-ID blending, which lets procedural SDF systems bake color, opacity, emission, roughness, metallic, and transmission fields without generating a unique static material for every voxel.
 
+`RenderFieldBundle` is the preferred Form-to-RendererKit boundary. Products should add semantic materials to the scene, compile their procedural model into dense or sparse field storage, and pass the bundle to `RenderScene`:
+
+```swift
+let moss = scene.addMaterial(SemanticMaterial.moss())
+let sparse = try DistanceVolumeBuilder.buildSparse(
+    model: formCompiledModel,
+    settings: SparseDistanceVolumeBuildSettings(resolution: 64, brickSize: 8)
+)
+let bundle = RenderFieldBundle(sparse: sparse, fallbackMaterial: moss)
+let fieldID = scene.add(fieldBundle: bundle, transform: objectTransform)
+```
+
+Form should own its editable timeline/operator document format. RendererKit owns the renderable field-bundle API and storage semantics. SceneScript can emit or load comparable scenes for debugging and fixtures, but it is not the realtime interchange layer between Form and RendererKit.
+
+The first replacement API is whole-bundle based and uses the scene-local handle returned by `add(fieldBundle:)`:
+
+```swift
+scene.replaceField(fieldID, with: updatedBundle)
+```
+
+This is enough for early editor integration where Form rebuilds an affected field and recreates a render session. `RenderFieldID` is intentionally a lightweight scene handle; if the host rebuilds the scene, it should discard old handles. Dirty-brick GPU updates and atlas residency can be added later behind the same high-level bundle contract.
+
+`DistanceVolumeAttributeLayout` declares compact scalar fields that operators and semantic materials can share. Samples are packed in `SIMD4<Float>` groups, so a Form-style object can store fields such as growth age, cavity, wetness, and moss amount without carrying a full material parameter block per voxel:
+
+```swift
+let attributes = DistanceVolumeAttributeLayout(channels: [
+    DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
+    DistanceVolumeAttributeChannel(name: "cavity", semantic: .cavity),
+    DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness),
+    DistanceVolumeAttributeChannel(name: "mossAmount", semantic: .mossAmount)
+])
+```
+
 Multiple SDF primitives can be compiled into one material-aware dense volume before adding it to a scene:
 
 ```swift
 let red = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.1, 0.1)))
 let blue = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.1, 0.2, 0.9)))
-let model = SDFModel(primitives: [
-    SDFPrimitive(
-        shape: .sphere(radius: 0.55),
-        material: red,
-        materialFields: DistanceVolumeMaterialFields(baseColor: SIMD3<Float>(0.9, 0.16, 0.08), roughness: 0.82),
-        transform: .translation(SIMD3<Float>(-0.25, 0, 0))
-    ),
-    SDFPrimitive(shape: .sphere(radius: 0.55), material: blue, transform: .translation(SIMD3<Float>(0.25, 0, 0)), smoothUnionRadius: 0.2)
-])
+let model = SDFModel(
+    primitives: [
+        SDFPrimitive(
+            shape: .sphere(radius: 0.55),
+            material: red,
+            materialFields: DistanceVolumeMaterialFields(baseColor: SIMD3<Float>(0.9, 0.16, 0.08), roughness: 0.82),
+            attributes: DistanceVolumeAttributeValues(["growthAge": 0.35, "wetness": 0.6]),
+            transform: .translation(SIMD3<Float>(-0.25, 0, 0))
+        ),
+        SDFPrimitive(shape: .sphere(radius: 0.55), material: blue, transform: .translation(SIMD3<Float>(0.25, 0, 0)), smoothUnionRadius: 0.2)
+    ],
+    attributeLayout: attributes
+)
 let field = try DistanceVolumeBuilder.build(model: model, settings: DistanceVolumeBuildSettings(resolution: 48))
 scene.add(volume: field, material: red)
 ```
 
-The dense builder writes distance plus material payload samples. Smooth unions can produce two-material blend weights so material transitions follow the same blend region as the distance field. Primitive material fields are baked into the volume samples and can be blended when both sides contribute the same channel. The scene instance material remains the fallback for manually authored single-material volumes.
+The dense builder writes distance, material payload samples, and packed attribute samples. Smooth unions can produce two-material blend weights so material transitions follow the same blend region as the distance field. Primitive material fields and attributes are baked into the volume samples and can be blended when both sides contribute the same channel. The flat Metal path forwards those attributes to the semantic material resolver for volume hits, so fields such as `growthAge`, `wetness`, `mossAmount`, `polish`, and `burnAmount` can affect both shading and albedo AOVs. The scene instance material remains the fallback for manually authored single-material volumes.
 
 For larger or editable SDF compositions, the same model can be compiled into sparse CPU-side bricks:
 
@@ -164,7 +218,7 @@ scene.add(volume: previewField, material: red)
 scene.add(sparseVolume: sparse, material: red)
 ```
 
-Scene compilation emits sparse brick descriptors and brick sample payloads. The flat Metal path traces dense volumes through dense buffers and sparse volumes through brick bounds plus brick-local samples, so sparse SDF scenes no longer need to be densified for rendering. A future optimization can replace the flat brick list with a brick BVH or atlas indirection without changing the scene API.
+Scene compilation emits sparse brick descriptors, brick sample payloads, and brick attribute payloads. The flat Metal path traces dense volumes through dense buffers and sparse volumes through brick bounds plus brick-local samples, so sparse SDF scenes no longer need to be densified for rendering. A future optimization can replace the flat brick list with a brick BVH or atlas indirection without changing the scene API.
 
 Wavefront OBJ and PLY meshes can be loaded from disk:
 
@@ -195,7 +249,21 @@ For viewport integrations, build `origin`, `target`, and `up` from the applicati
 
 ## Materials and Textures
 
-`Material` currently exposes scalar base color, emission, roughness, metallic, dielectric specular weight/color/anisotropy, index of refraction, clearcoat weight/tint/attenuation/thickness/roughness/IOR, thin-film interference strength/thickness/IOR, sheen/fuzz weight/color/roughness, random-walk subsurface weight/color/radius/scale/anisotropy, opacity, dielectric transmission weight/color/roughness/IOR/absorption/thin-wall mode, transmissive volume scattering controls, plus optional in-memory texture inputs:
+`SemanticMaterial` is the preferred authored material source. It stores an archetype, editable style colors, and compact semantic attributes:
+
+```swift
+let moss = scene.addMaterial(SemanticMaterial.moss(
+    youngColor: SIMD3<Float>(0.5, 0.82, 0.22),
+    matureColor: SIMD3<Float>(0.08, 0.36, 0.11),
+    dryColor: SIMD3<Float>(0.45, 0.32, 0.16),
+    age: 0.45,
+    wetness: 0.6
+))
+```
+
+`RenderScene.materialSources` stores these authored semantic materials. `RenderScene.materials` stores the resolved renderer payloads used by the current GPU path.
+
+`Material` is the expanded renderer material representation. It currently exposes scalar base color, emission, roughness, metallic, dielectric specular weight/color/anisotropy, index of refraction, clearcoat weight/tint/attenuation/thickness/roughness/IOR, thin-film interference strength/thickness/IOR, sheen/fuzz weight/color/roughness, random-walk subsurface weight/color/radius/scale/anisotropy, opacity, dielectric transmission weight/color/roughness/IOR/absorption/thin-wall mode, transmissive volume scattering controls, plus optional in-memory texture inputs:
 
 ```swift
 let checker = Texture2D.checker(

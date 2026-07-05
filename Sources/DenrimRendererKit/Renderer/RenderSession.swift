@@ -57,9 +57,14 @@ public final class RenderSession {
     private let triangleBuffer: MTLBuffer
     private let volumeBuffer: MTLBuffer
     private let volumeSampleBuffer: MTLBuffer
+    private let volumeAttributeDescriptorBuffer: MTLBuffer
+    private let volumeAttributeSampleBuffer: MTLBuffer
     private let volumeBrickBuffer: MTLBuffer
     private let volumeBrickSampleBuffer: MTLBuffer
+    private let volumeBrickAttributeDescriptorBuffer: MTLBuffer
+    private let volumeBrickAttributeSampleBuffer: MTLBuffer
     private let materialBuffer: MTLBuffer
+    private let materialSemanticBuffer: MTLBuffer
     private let textureDescriptorBuffer: MTLBuffer
     private let texturePixelBuffer: MTLBuffer
     private let lightBuffer: MTLBuffer
@@ -77,8 +82,10 @@ public final class RenderSession {
     private let triangleCount: Int
     private let volumeCount: Int
     private let volumeSampleCount: Int
+    private let volumeAttributeSampleCount: Int
     private let volumeBrickCount: Int
     private let volumeBrickSampleCount: Int
+    private let volumeBrickAttributeSampleCount: Int
     private let materialCount: Int
     private let textureDescriptorCount: Int
     private let texturePixelCount: Int
@@ -227,8 +234,10 @@ public final class RenderSession {
         self.triangleCount = compiled.triangles.count
         self.volumeCount = compiled.volumes.count
         self.volumeSampleCount = compiled.volumeSamples.count
+        self.volumeAttributeSampleCount = compiled.volumeAttributeSamples.count
         self.volumeBrickCount = compiled.volumeBricks.count
         self.volumeBrickSampleCount = compiled.volumeBrickSamples.count
+        self.volumeBrickAttributeSampleCount = compiled.volumeBrickAttributeSamples.count
         self.materialCount = compiled.materials.count
         self.textureDescriptorCount = compiled.textureDescriptors.count
         self.texturePixelCount = compiled.texturePixels.count
@@ -253,6 +262,14 @@ public final class RenderSession {
             device: device,
             values: compiled.volumeSamples
         )
+        self.volumeAttributeDescriptorBuffer = try Self.makeRequiredShaderBindingBuffer(
+            device: device,
+            values: compiled.volumeAttributeDescriptors
+        )
+        self.volumeAttributeSampleBuffer = try Self.makeRequiredShaderBindingBuffer(
+            device: device,
+            values: compiled.volumeAttributeSamples
+        )
         self.volumeBrickBuffer = try Self.makeRequiredShaderBindingBuffer(
             device: device,
             values: compiled.volumeBricks
@@ -261,11 +278,23 @@ public final class RenderSession {
             device: device,
             values: compiled.volumeBrickSamples
         )
+        self.volumeBrickAttributeDescriptorBuffer = try Self.makeRequiredShaderBindingBuffer(
+            device: device,
+            values: compiled.volumeBrickAttributeDescriptors
+        )
+        self.volumeBrickAttributeSampleBuffer = try Self.makeRequiredShaderBindingBuffer(
+            device: device,
+            values: compiled.volumeBrickAttributeSamples
+        )
         self.materialBuffer = device.makeBuffer(
             bytes: compiled.materials,
             length: MemoryLayout<GPUMaterial>.stride * compiled.materials.count,
             options: .storageModeShared
         )!
+        self.materialSemanticBuffer = try Self.makeRequiredShaderBindingBuffer(
+            device: device,
+            values: compiled.materialSemantics
+        )
         self.textureDescriptorBuffer = try Self.makeRequiredShaderBindingBuffer(
             device: device,
             values: compiled.textureDescriptors
@@ -404,9 +433,11 @@ public final class RenderSession {
             environmentMaxRadiance: environmentMaxRadiance,
             sampleRadianceClamp: settings.resolvedSampleRadianceClamp,
             volumeSampleCount: UInt32(volumeSampleCount),
-            padding1: settings.denoise.denoiser == .none ? 0 : 1,
+            volumeAttributeSampleCount: UInt32(volumeAttributeSampleCount),
             volumeBrickCount: UInt32(volumeBrickCount),
-            volumeBrickSampleCount: UInt32(volumeBrickSampleCount)
+            volumeBrickSampleCount: UInt32(volumeBrickSampleCount),
+            volumeBrickAttributeSampleCount: UInt32(volumeBrickAttributeSampleCount),
+            denoiserEnabled: settings.denoise.denoiser == .none ? 0 : 1
         )
         var camera = camera
         var previousCamera = previousCamera
@@ -435,6 +466,11 @@ public final class RenderSession {
         encoder.setBuffer(volumeSampleBuffer, offset: 0, index: 15)
         encoder.setBuffer(volumeBrickBuffer, offset: 0, index: 16)
         encoder.setBuffer(volumeBrickSampleBuffer, offset: 0, index: 17)
+        encoder.setBuffer(materialSemanticBuffer, offset: 0, index: 18)
+        encoder.setBuffer(volumeAttributeDescriptorBuffer, offset: 0, index: 19)
+        encoder.setBuffer(volumeAttributeSampleBuffer, offset: 0, index: 20)
+        encoder.setBuffer(volumeBrickAttributeDescriptorBuffer, offset: 0, index: 21)
+        encoder.setBuffer(volumeBrickAttributeSampleBuffer, offset: 0, index: 22)
         if useHardwareRayTracing,
            let tlasResource = metalRayTracingExperiment?.tlasResource,
            let sceneBuffers = metalRayTracingExperiment?.sceneBuffers {

@@ -5,9 +5,14 @@ struct AccelerationBuild {
     var triangles: [GPUTriangle]
     var volumes: [GPUVolumeDescriptor]
     var volumeSamples: [GPUVolumeSample]
+    var volumeAttributeDescriptors: [GPUVolumeAttributeDescriptor]
+    var volumeAttributeSamples: [SIMD4<Float>]
     var volumeBricks: [GPUVolumeBrickDescriptor]
     var volumeBrickSamples: [GPUVolumeSample]
+    var volumeBrickAttributeDescriptors: [GPUVolumeAttributeDescriptor]
+    var volumeBrickAttributeSamples: [SIMD4<Float>]
     var materials: [GPUMaterial]
+    var materialSemantics: [GPUMaterialSemanticDescriptor]
     var textureDescriptors: [GPUTextureDescriptor]
     var texturePixels: [SIMD4<Float>]
     var environmentTextureIndexPlusOne: UInt32
@@ -45,9 +50,14 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
             triangles: triangles,
             volumes: volumeResources.descriptors,
             volumeSamples: volumeResources.samples,
+            volumeAttributeDescriptors: volumeResources.attributeDescriptors,
+            volumeAttributeSamples: volumeResources.attributeSamples,
             volumeBricks: volumeBrickResources.descriptors,
             volumeBrickSamples: volumeBrickResources.samples,
+            volumeBrickAttributeDescriptors: volumeBrickResources.attributeDescriptors,
+            volumeBrickAttributeSamples: volumeBrickResources.attributeSamples,
             materials: materialResources.materials,
+            materialSemantics: materialResources.semantics,
             textureDescriptors: materialResources.descriptors,
             texturePixels: materialResources.pixels,
             environmentTextureIndexPlusOne: materialResources.environmentTextureIndexPlusOne,
@@ -61,9 +71,16 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
 
     static func gpuVolumes(
         scene: RenderScene
-    ) throws -> (descriptors: [GPUVolumeDescriptor], samples: [GPUVolumeSample]) {
+    ) throws -> (
+        descriptors: [GPUVolumeDescriptor],
+        samples: [GPUVolumeSample],
+        attributeDescriptors: [GPUVolumeAttributeDescriptor],
+        attributeSamples: [SIMD4<Float>]
+    ) {
         var descriptors: [GPUVolumeDescriptor] = []
         var samples: [GPUVolumeSample] = []
+        var attributeDescriptors: [GPUVolumeAttributeDescriptor] = []
+        var attributeSamples: [SIMD4<Float>] = []
 
         for (index, instance) in scene.volumeInstances.enumerated() {
             try appendVolume(
@@ -74,6 +91,8 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
                 primitiveID: index,
                 descriptors: &descriptors,
                 samples: &samples,
+                attributeDescriptors: &attributeDescriptors,
+                attributeSamples: &attributeSamples,
                 materialCount: scene.materials.count
             )
         }
@@ -92,14 +111,21 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
             )
         }
 
-        return (descriptors, samples)
+        return (descriptors, samples, attributeDescriptors, attributeSamples)
     }
 
     static func gpuVolumeBricks(
         scene: RenderScene
-    ) throws -> (descriptors: [GPUVolumeBrickDescriptor], samples: [GPUVolumeSample]) {
+    ) throws -> (
+        descriptors: [GPUVolumeBrickDescriptor],
+        samples: [GPUVolumeSample],
+        attributeDescriptors: [GPUVolumeAttributeDescriptor],
+        attributeSamples: [SIMD4<Float>]
+    ) {
         var descriptors: [GPUVolumeBrickDescriptor] = []
         var samples: [GPUVolumeSample] = []
+        var attributeDescriptors: [GPUVolumeAttributeDescriptor] = []
+        var attributeSamples: [SIMD4<Float>] = []
 
         let sparseVolumeIndexBase = scene.volumeInstances.count
         for (volumeIndex, instance) in scene.sparseVolumeInstances.enumerated() {
@@ -128,6 +154,23 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
                     ))
                 }
 
+                let attributeOffset = attributeSamples.count
+                let packedVectorCount = volume.attributeLayout.packedVectorCount
+                let brickIndex = descriptors.count
+                if packedVectorCount > 0 {
+                    let expectedAttributeCount = brick.distances.count * packedVectorCount
+                    guard brick.attributeSamples.count >= expectedAttributeCount else {
+                        throw DenrimRendererError.invalidScene("Sparse distance volume brick attribute sample count does not match its layout.")
+                    }
+                    attributeSamples.append(contentsOf: brick.attributeSamples.prefix(expectedAttributeCount))
+                }
+                attributeDescriptors.append(gpuVolumeAttributeDescriptor(
+                    layout: volume.attributeLayout,
+                    sampleOffset: attributeOffset,
+                    sampleCount: brick.distances.count,
+                    volumeOrBrickIndex: brickIndex
+                ))
+
                 let localBounds = brickCoreLocalBounds(brick: brick, in: volume)
                 let worldBounds = transformedBounds(
                     minimum: localBounds.minimum,
@@ -155,7 +198,7 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
             }
         }
 
-        return (descriptors, samples)
+        return (descriptors, samples, attributeDescriptors, attributeSamples)
     }
 
     private static func appendVolume(
@@ -166,6 +209,8 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
         primitiveID: Int,
         descriptors: inout [GPUVolumeDescriptor],
         samples: inout [GPUVolumeSample],
+        attributeDescriptors: inout [GPUVolumeAttributeDescriptor],
+        attributeSamples: inout [SIMD4<Float>],
         materialCount: Int
     ) throws {
         guard Int(material.rawValue) < materialCount else {
@@ -184,6 +229,11 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
         if !volume.materialSamples.isEmpty,
            volume.materialSamples.count < sampleCount {
             throw DenrimRendererError.invalidScene("Distance volume material sample count does not match its dimensions.")
+        }
+        let packedVectorCount = volume.attributeLayout.packedVectorCount
+        if packedVectorCount > 0,
+           volume.attributeSamples.count < sampleCount * packedVectorCount {
+            throw DenrimRendererError.invalidScene("Distance volume attribute sample count does not match its layout.")
         }
 
         let boundsMin = volume.boundsMin
@@ -204,6 +254,16 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
                 material: materialSample
             ))
         }
+        let attributeOffset = attributeSamples.count
+        if packedVectorCount > 0 {
+            attributeSamples.append(contentsOf: volume.attributeSamples.prefix(sampleCount * packedVectorCount))
+        }
+        attributeDescriptors.append(gpuVolumeAttributeDescriptor(
+            layout: volume.attributeLayout,
+            sampleOffset: attributeOffset,
+            sampleCount: sampleCount,
+            volumeOrBrickIndex: descriptors.count
+        ))
 
         let worldBounds = transformedBounds(
             minimum: boundsMin,
@@ -238,6 +298,28 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
             normalTransform2: normalTransform.columns.2,
             normalTransform3: normalTransform.columns.3
         ))
+    }
+
+    private static func gpuVolumeAttributeDescriptor(
+        layout: DistanceVolumeAttributeLayout,
+        sampleOffset: Int,
+        sampleCount: Int,
+        volumeOrBrickIndex: Int
+    ) -> GPUVolumeAttributeDescriptor {
+        var semantics = [UInt32](repeating: 0, count: DistanceVolumeAttributeLayout.maximumChannelCount)
+        for (index, channel) in layout.channels.enumerated() where index < semantics.count {
+            semantics[index] = channel.semantic.rawValue
+        }
+        return GPUVolumeAttributeDescriptor(
+            metadata: SIMD4<UInt32>(
+                UInt32(sampleOffset),
+                UInt32(layout.packedVectorCount),
+                UInt32(sampleCount),
+                UInt32(volumeOrBrickIndex)
+            ),
+            semantics0: SIMD4<UInt32>(semantics[0], semantics[1], semantics[2], semantics[3]),
+            semantics1: SIMD4<UInt32>(semantics[4], semantics[5], semantics[6], semantics[7])
+        )
     }
 
     private static func gpuVolumeSample(
@@ -386,10 +468,11 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
         )
     }
 
-    private static func gpuMaterialsAndTextures(
+    static func gpuMaterialsAndTextures(
         scene: RenderScene
     ) -> (
         materials: [GPUMaterial],
+        semantics: [GPUMaterialSemanticDescriptor],
         descriptors: [GPUTextureDescriptor],
         pixels: [SIMD4<Float>],
         environmentTextureIndexPlusOne: UInt32
@@ -419,7 +502,9 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
             return index
         }
 
-        let materials = scene.materials.map { material in
+        let resolvedMaterials = scene.materialSources.map { $0.resolvedMaterial() }
+        let semantics = scene.materialSources.map(gpuMaterialSemanticDescriptor)
+        let materials = resolvedMaterials.map { material in
             let baseColorTextureIndex = append(material.baseColorTexture)
             let normalMapIndex = append(material.normalMap)
             return material.gpuMaterial(
@@ -430,7 +515,55 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
 
         let environmentTextureIndexPlusOne = append(scene.environment.texture).map { UInt32($0 + 1) } ?? 0
 
-        return (materials, descriptors, pixels, environmentTextureIndexPlusOne)
+        return (materials, semantics, descriptors, pixels, environmentTextureIndexPlusOne)
+    }
+
+    static func gpuMaterialSemanticDescriptor(
+        _ source: SemanticMaterial
+    ) -> GPUMaterialSemanticDescriptor {
+        let style = source.style
+        let attributes = source.attributes
+        return GPUMaterialSemanticDescriptor(
+            metadata: SIMD4<UInt32>(
+                materialArchetypeID(source.archetype),
+                source.physicalOverride == nil ? 1 : 0,
+                0,
+                0
+            ),
+            style0: SIMD4<Float>(style.primaryColor, style.roughness),
+            style1: SIMD4<Float>(style.secondaryColor, style.metallic),
+            style2: SIMD4<Float>(style.accentColor, style.opacity),
+            controls0: SIMD4<Float>(
+                attributes.amount,
+                attributes.age,
+                attributes.wetness,
+                attributes.polish
+            ),
+            controls1: SIMD4<Float>(
+                attributes.cavity,
+                attributes.emission,
+                style.transmission,
+                style.emissionStrength
+            )
+        )
+    }
+
+    static func materialArchetypeID(_ archetype: MaterialArchetype) -> UInt32 {
+        switch archetype {
+        case .plain: return 0
+        case .moss: return 1
+        case .bark: return 2
+        case .wetFilm: return 3
+        case .crystal: return 4
+        case .wax: return 5
+        case .ceramic: return 6
+        case .metal: return 7
+        case .rust: return 8
+        case .burn: return 9
+        case .ice: return 10
+        case .lava: return 11
+        case .emissive: return 12
+        }
     }
 
     private static func lightRecordsAndTaggedTriangles(

@@ -48,6 +48,15 @@ struct GPUMaterial {
     float4 volumeParameters;
 };
 
+struct GPUMaterialSemanticDescriptor {
+    uint4 metadata;
+    float4 style0;
+    float4 style1;
+    float4 style2;
+    float4 controls0;
+    float4 controls1;
+};
+
 struct GPUAccelerationNode {
     float4 boundsMin;
     float4 boundsMax;
@@ -98,6 +107,12 @@ struct GPUVolumeSample {
     uint4 materialFieldFlags;
 };
 
+struct GPUVolumeAttributeDescriptor {
+    uint4 metadata;
+    uint4 semantics0;
+    uint4 semantics1;
+};
+
 struct GPUVolumeBrickDescriptor {
     float4 worldBoundsMin;
     float4 worldBoundsMax;
@@ -126,9 +141,11 @@ struct GPURenderConstants {
     float environmentMaxRadiance;
     float sampleRadianceClamp;
     uint volumeSampleCount;
-    uint padding1;
+    uint volumeAttributeSampleCount;
     uint volumeBrickCount;
     uint volumeBrickSampleCount;
+    uint volumeBrickAttributeSampleCount;
+    uint denoiserEnabled;
 };
 
 struct GPURayTracingInstance {
@@ -159,6 +176,10 @@ struct Hit {
     float4 volumeEmissionTransmission;
     float4 volumeSurface;
     uint volumeMaterialFieldFlags;
+    float4 volumeAttributes0;
+    float4 volumeAttributes1;
+    uint4 volumeAttributeSemantics0;
+    uint4 volumeAttributeSemantics1;
     uint objectID;
     uint primitiveID;
     bool frontFacing;
@@ -170,6 +191,31 @@ constant uint volumeMaterialFieldEmission = 1u << 2;
 constant uint volumeMaterialFieldRoughness = 1u << 3;
 constant uint volumeMaterialFieldMetallic = 1u << 4;
 constant uint volumeMaterialFieldTransmission = 1u << 5;
+
+constant uint materialArchetypePlain = 0u;
+constant uint materialArchetypeMoss = 1u;
+constant uint materialArchetypeBark = 2u;
+constant uint materialArchetypeWetFilm = 3u;
+constant uint materialArchetypeCrystal = 4u;
+constant uint materialArchetypeWax = 5u;
+constant uint materialArchetypeCeramic = 6u;
+constant uint materialArchetypeMetal = 7u;
+constant uint materialArchetypeRust = 8u;
+constant uint materialArchetypeBurn = 9u;
+constant uint materialArchetypeIce = 10u;
+constant uint materialArchetypeLava = 11u;
+constant uint materialArchetypeEmissive = 12u;
+
+constant uint volumeAttributeGrowthAge = 1u;
+constant uint volumeAttributeBranchID = 2u;
+constant uint volumeAttributeCurvature = 3u;
+constant uint volumeAttributeCavity = 4u;
+constant uint volumeAttributeNoise = 5u;
+constant uint volumeAttributeWetness = 6u;
+constant uint volumeAttributeMossAmount = 7u;
+constant uint volumeAttributePolish = 8u;
+constant uint volumeAttributeFracture = 9u;
+constant uint volumeAttributeBurnAmount = 10u;
 
 static uint hash(uint value) {
     value ^= value >> 16;
@@ -493,6 +539,123 @@ static GPUMaterial applyVolumeMaterialFields(GPUMaterial material, Hit hit) {
         material.parameters.y = clamp(hit.volumeSurface.y, 0.0f, 1.0f);
     }
     return material;
+}
+
+static bool volumeAttributeValue(Hit hit, uint semantic, thread float &value) {
+    for (uint index = 0u; index < 4u; ++index) {
+        if (hit.volumeAttributeSemantics0[index] == semantic) {
+            value = hit.volumeAttributes0[index];
+            return true;
+        }
+        if (hit.volumeAttributeSemantics1[index] == semantic) {
+            value = hit.volumeAttributes1[index];
+            return true;
+        }
+    }
+    return false;
+}
+
+static float volumeAttributeOr(Hit hit, uint semantic, float fallback) {
+    float value = fallback;
+    if (volumeAttributeValue(hit, semantic, value)) {
+        return value;
+    }
+    return fallback;
+}
+
+static bool hitHasVolumeAttributes(Hit hit) {
+    return any(hit.volumeAttributeSemantics0 != uint4(0))
+        || any(hit.volumeAttributeSemantics1 != uint4(0));
+}
+
+static GPUMaterial applySemanticVolumeAttributes(
+    GPUMaterial material,
+    Hit hit,
+    GPUMaterialSemanticDescriptor semantic
+) {
+    if (!hitHasVolumeAttributes(hit) || semantic.metadata.y == 0u) {
+        return material;
+    }
+
+    uint archetype = semantic.metadata.x;
+    float amount = clamp(volumeAttributeOr(hit, volumeAttributeMossAmount, semantic.controls0.x), 0.0f, 1.0f);
+    float age = clamp(volumeAttributeOr(hit, volumeAttributeGrowthAge, semantic.controls0.y), 0.0f, 1.0f);
+    float wetness = clamp(volumeAttributeOr(hit, volumeAttributeWetness, semantic.controls0.z), 0.0f, 1.0f);
+    float polish = clamp(volumeAttributeOr(hit, volumeAttributePolish, semantic.controls0.w), 0.0f, 1.0f);
+    float cavity = clamp(volumeAttributeOr(hit, volumeAttributeCavity, semantic.controls1.x), 0.0f, 1.0f);
+    float burn = clamp(volumeAttributeOr(hit, volumeAttributeBurnAmount, 0.0f), 0.0f, 1.0f);
+    float emissionAmount = clamp(volumeAttributeOr(hit, volumeAttributeBurnAmount, semantic.controls1.y), 0.0f, 1.0f);
+
+    float3 primary = max(semantic.style0.xyz, float3(0.0f));
+    float3 secondary = max(semantic.style1.xyz, float3(0.0f));
+    float3 accent = max(semantic.style2.xyz, float3(0.0f));
+
+    if (archetype == materialArchetypeMoss) {
+        float3 aged = mix(primary, secondary, age);
+        float dryBlend = clamp((age - 0.65f) / 0.35f, 0.0f, 1.0f);
+        aged = mix(aged, accent, dryBlend);
+        float3 wetTint = aged * float3(0.45f, 0.62f, 0.48f);
+        float3 colored = mix(aged, wetTint, wetness);
+        colored = mix(colored, colored * 0.68f, cavity * 0.5f);
+        material.baseColor.xyz = mix(material.baseColor.xyz, colored, amount);
+        material.parameters.x = clamp(mix(material.parameters.x, 0.34f, wetness * amount), 0.02f, 1.0f);
+        material.parameters2.x = clamp(mix(material.parameters2.x, 0.45f, wetness * amount), 0.0f, 1.0f);
+        material.sheenColor.w = max(material.sheenColor.w, 0.28f * amount);
+        material.subsurfaceColor.w = max(material.subsurfaceColor.w, 0.16f * amount);
+        return material;
+    }
+
+    if (archetype == materialArchetypeWetFilm) {
+        float activeWetness = max(wetness, amount);
+        material.baseColor.xyz = mix(material.baseColor.xyz, primary, activeWetness * 0.35f);
+        material.baseColor.w = clamp(mix(material.baseColor.w, semantic.style2.w, activeWetness), 0.0f, 1.0f);
+        material.emission.w = clamp(mix(material.emission.w, max(semantic.controls1.z, 0.0f), activeWetness), 0.0f, 1.0f);
+        material.parameters.x = clamp(mix(material.parameters.x, 0.025f, activeWetness), 0.02f, 1.0f);
+        material.parameters2.x = max(material.parameters2.x, 0.85f * activeWetness);
+        return material;
+    }
+
+    if (archetype == materialArchetypeCrystal || archetype == materialArchetypeIce) {
+        float clarity = clamp(max(semantic.controls1.z, material.emission.w), 0.0f, 1.0f);
+        material.baseColor.xyz = mix(material.baseColor.xyz, primary, clarity * 0.35f);
+        material.parameters.x = clamp(mix(material.parameters.x, 0.012f, polish), 0.02f, 1.0f);
+        material.parameters3.y = clamp(mix(material.parameters3.y, 0.012f, polish), 0.001f, 1.0f);
+        material.emission.w = max(material.emission.w, clarity);
+        return material;
+    }
+
+    if (archetype == materialArchetypeBurn || archetype == materialArchetypeLava) {
+        float heat = max(burn, emissionAmount);
+        material.baseColor.xyz = mix(material.baseColor.xyz, mix(primary, secondary, age), amount);
+        material.emission.xyz = max(material.emission.xyz, accent * semantic.controls1.w * heat);
+        material.parameters.x = clamp(mix(material.parameters.x, 0.64f, heat), 0.02f, 1.0f);
+        return material;
+    }
+
+    if (wetness > 0.0f) {
+        material.baseColor.xyz = mix(material.baseColor.xyz, material.baseColor.xyz * 0.72f, wetness * 0.35f);
+        material.parameters.x = clamp(mix(material.parameters.x, 0.08f, wetness), 0.02f, 1.0f);
+        material.parameters2.x = max(material.parameters2.x, wetness * 0.55f);
+    }
+
+    return material;
+}
+
+static GPUMaterial materialForHit(
+    Hit hit,
+    constant GPUMaterial *materials,
+    constant GPUMaterialSemanticDescriptor *materialSemantics,
+    uint materialCount
+) {
+    uint materialA = min(hit.materialID, materialCount - 1u);
+    GPUMaterial material = applySemanticVolumeAttributes(materials[materialA], hit, materialSemantics[materialA]);
+    if (hit.materialBlend > 0.0f) {
+        uint materialB = min(hit.materialID2, materialCount - 1u);
+        GPUMaterial blended = applySemanticVolumeAttributes(materials[materialB], hit, materialSemantics[materialB]);
+        material = blendMaterials(material, blended, hit.materialBlend);
+    }
+
+    return applyVolumeMaterialFields(material, hit);
 }
 
 static GPUMaterial materialForHit(
@@ -1270,6 +1433,10 @@ static Hit emptyHit() {
     closest.volumeEmissionTransmission = float4(0);
     closest.volumeSurface = float4(0);
     closest.volumeMaterialFieldFlags = 0u;
+    closest.volumeAttributes0 = float4(0);
+    closest.volumeAttributes1 = float4(0);
+    closest.volumeAttributeSemantics0 = uint4(0);
+    closest.volumeAttributeSemantics1 = uint4(0);
     closest.objectID = 0;
     closest.primitiveID = 0;
     closest.frontFacing = true;
@@ -1349,6 +1516,49 @@ static GPUVolumeSample sampleVolumeMaterial(
     uint3 nearest = min(uint3(round(uvw * float3(dimensions - uint3(1)))), dimensions - uint3(1));
     uint index = sampleOffset + nearest.x + nearest.y * dimensions.x + nearest.z * dimensions.x * dimensions.y;
     return volumeSamples[index];
+}
+
+static void sampleVolumeAttributes(
+    uint volumeIndex,
+    constant GPUVolumeDescriptor &volume,
+    constant GPUVolumeAttributeDescriptor *attributeDescriptors,
+    constant float4 *attributeSamples,
+    uint attributeSampleCount,
+    float3 localPosition,
+    thread float4 &attributes0,
+    thread float4 &attributes1,
+    thread uint4 &semantics0,
+    thread uint4 &semantics1
+) {
+    attributes0 = float4(0);
+    attributes1 = float4(0);
+    semantics0 = uint4(0);
+    semantics1 = uint4(0);
+    constant GPUVolumeAttributeDescriptor &descriptor = attributeDescriptors[volumeIndex];
+    uint packedVectorCount = descriptor.metadata.y;
+    if (packedVectorCount == 0u) {
+        return;
+    }
+
+    uint3 dimensions = uint3(volume.dimensions.xyz);
+    uint sampleCount = dimensions.x * dimensions.y * dimensions.z;
+    uint sampleOffset = descriptor.metadata.x;
+    if (sampleOffset >= attributeSampleCount || sampleOffset + sampleCount * packedVectorCount > attributeSampleCount) {
+        return;
+    }
+
+    float3 extent = max(volume.localBoundsMax.xyz - volume.localBoundsMin.xyz, float3(1e-6f));
+    float3 uvw = clamp((localPosition - volume.localBoundsMin.xyz) / extent, float3(0.0f), float3(1.0f));
+    uint3 nearest = min(uint3(round(uvw * float3(dimensions - uint3(1)))), dimensions - uint3(1));
+    uint sampleIndex = nearest.x + nearest.y * dimensions.x + nearest.z * dimensions.x * dimensions.y;
+    uint attributeIndex = sampleOffset + sampleIndex * packedVectorCount;
+
+    attributes0 = attributeSamples[attributeIndex];
+    if (packedVectorCount > 1u) {
+        attributes1 = attributeSamples[attributeIndex + 1u];
+    }
+    semantics0 = descriptor.semantics0;
+    semantics1 = descriptor.semantics1;
 }
 
 static float3 volumeNormal(
@@ -1466,6 +1676,56 @@ static GPUVolumeSample sampleVolumeBrickMaterial(
     return brickSamples[index];
 }
 
+static void sampleVolumeBrickAttributes(
+    uint brickIndex,
+    constant GPUVolumeDescriptor &volume,
+    constant GPUVolumeBrickDescriptor &brick,
+    constant GPUVolumeAttributeDescriptor *attributeDescriptors,
+    constant float4 *attributeSamples,
+    uint attributeSampleCount,
+    float3 localPosition,
+    thread float4 &attributes0,
+    thread float4 &attributes1,
+    thread uint4 &semantics0,
+    thread uint4 &semantics1
+) {
+    attributes0 = float4(0);
+    attributes1 = float4(0);
+    semantics0 = uint4(0);
+    semantics1 = uint4(0);
+    constant GPUVolumeAttributeDescriptor &descriptor = attributeDescriptors[brickIndex];
+    uint packedVectorCount = descriptor.metadata.y;
+    if (packedVectorCount == 0u) {
+        return;
+    }
+
+    uint3 dimensions = uint3(brick.dimensionsAndSampleOffset.xyz);
+    uint sampleCount = dimensions.x * dimensions.y * dimensions.z;
+    uint sampleOffset = descriptor.metadata.x;
+    if (sampleOffset >= attributeSampleCount || sampleOffset + sampleCount * packedVectorCount > attributeSampleCount) {
+        return;
+    }
+
+    float3 volumeExtent = max(volume.localBoundsMax.xyz - volume.localBoundsMin.xyz, float3(1e-6f));
+    float3 volumeDenominator = max(float3(volume.dimensions.xyz) - float3(1.0f), float3(1.0f));
+    float3 sampleMin = volume.localBoundsMin.xyz
+        + volumeExtent * (float3(brick.gridOriginAndVolume.xyz) / volumeDenominator);
+    float3 sampleMax = volume.localBoundsMin.xyz
+        + volumeExtent * ((float3(brick.gridOriginAndVolume.xyz) + float3(dimensions - uint3(1))) / volumeDenominator);
+    float3 extent = max(sampleMax - sampleMin, float3(1e-6f));
+    float3 uvw = clamp((localPosition - sampleMin) / extent, float3(0.0f), float3(1.0f));
+    uint3 nearest = min(uint3(round(uvw * float3(dimensions - uint3(1)))), dimensions - uint3(1));
+    uint sampleIndex = nearest.x + nearest.y * dimensions.x + nearest.z * dimensions.x * dimensions.y;
+    uint attributeIndex = sampleOffset + sampleIndex * packedVectorCount;
+
+    attributes0 = attributeSamples[attributeIndex];
+    if (packedVectorCount > 1u) {
+        attributes1 = attributeSamples[attributeIndex + 1u];
+    }
+    semantics0 = descriptor.semantics0;
+    semantics1 = descriptor.semantics1;
+}
+
 static float3 volumeBrickNormal(
     constant GPUVolumeDescriptor &volume,
     constant GPUVolumeBrickDescriptor &brick,
@@ -1496,10 +1756,14 @@ static float3 volumeBrickNormal(
 }
 
 static bool intersectVolume(
+    uint volumeIndex,
     Ray ray,
     constant GPUVolumeDescriptor &volume,
     constant GPUVolumeSample *volumeSamples,
+    constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors,
+    constant float4 *volumeAttributeSamples,
     uint volumeSampleCount,
+    uint volumeAttributeSampleCount,
     float closestT,
     thread Hit &hit
 ) {
@@ -1597,6 +1861,18 @@ static bool intersectVolume(
             hit.volumeEmissionTransmission = materialSample.emissionTransmission;
             hit.volumeSurface = materialSample.surface;
             hit.volumeMaterialFieldFlags = materialSample.materialFieldFlags.x;
+            sampleVolumeAttributes(
+                volumeIndex,
+                volume,
+                volumeAttributeDescriptors,
+                volumeAttributeSamples,
+                volumeAttributeSampleCount,
+                refinedLocalPosition,
+                hit.volumeAttributes0,
+                hit.volumeAttributes1,
+                hit.volumeAttributeSemantics0,
+                hit.volumeAttributeSemantics1
+            );
             hit.objectID = volume.metadata.y;
             hit.primitiveID = volume.metadata.z;
             hit.frontFacing = frontFacing;
@@ -1612,11 +1888,15 @@ static bool intersectVolume(
 }
 
 static bool intersectVolumeBrick(
+    uint brickIndex,
     Ray ray,
     constant GPUVolumeDescriptor &volume,
     constant GPUVolumeBrickDescriptor &brick,
     constant GPUVolumeSample *brickSamples,
+    constant GPUVolumeAttributeDescriptor *brickAttributeDescriptors,
+    constant float4 *brickAttributeSamples,
     uint brickSampleCount,
+    uint brickAttributeSampleCount,
     float closestT,
     thread Hit &hit
 ) {
@@ -1745,6 +2025,19 @@ static bool intersectVolumeBrick(
             hit.volumeEmissionTransmission = materialSample.emissionTransmission;
             hit.volumeSurface = materialSample.surface;
             hit.volumeMaterialFieldFlags = materialSample.materialFieldFlags.x;
+            sampleVolumeBrickAttributes(
+                brickIndex,
+                volume,
+                brick,
+                brickAttributeDescriptors,
+                brickAttributeSamples,
+                brickAttributeSampleCount,
+                refinedLocalPosition,
+                hit.volumeAttributes0,
+                hit.volumeAttributes1,
+                hit.volumeAttributeSemantics0,
+                hit.volumeAttributeSemantics1
+            );
             hit.objectID = volume.metadata.y;
             hit.primitiveID = volume.metadata.z;
             hit.frontFacing = frontFacing;
@@ -1765,8 +2058,12 @@ static Hit closestVolumeHit(
     constant GPURenderConstants &constants,
     constant GPUVolumeDescriptor *volumes,
     constant GPUVolumeSample *volumeSamples,
+    constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors,
+    constant float4 *volumeAttributeSamples,
     constant GPUVolumeBrickDescriptor *volumeBricks,
     constant GPUVolumeSample *volumeBrickSamples,
+    constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors,
+    constant float4 *volumeBrickAttributeSamples,
     float closestT
 ) {
     Hit closest = emptyHit();
@@ -1777,10 +2074,14 @@ static Hit closestVolumeHit(
         }
         Hit candidate = emptyHit();
         if (intersectVolume(
+            index,
             ray,
             volumes[index],
             volumeSamples,
+            volumeAttributeDescriptors,
+            volumeAttributeSamples,
             constants.volumeSampleCount,
+            constants.volumeAttributeSampleCount,
             closest.t,
             candidate
         ) && candidate.t < closest.t) {
@@ -1794,11 +2095,15 @@ static Hit closestVolumeHit(
         }
         Hit candidate = emptyHit();
         if (intersectVolumeBrick(
+            index,
             ray,
             volumes[volumeIndex],
             volumeBricks[index],
             volumeBrickSamples,
+            volumeBrickAttributeDescriptors,
+            volumeBrickAttributeSamples,
             constants.volumeBrickSampleCount,
+            constants.volumeBrickAttributeSampleCount,
             closest.t,
             candidate
         ) && candidate.t < closest.t) {
@@ -1845,13 +2150,29 @@ static Hit intersectScene(
     constant uint *primitiveIndices,
     constant GPUVolumeDescriptor *volumes,
     constant GPUVolumeSample *volumeSamples,
+    constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors,
+    constant float4 *volumeAttributeSamples,
     constant GPUVolumeBrickDescriptor *volumeBricks,
-    constant GPUVolumeSample *volumeBrickSamples
+    constant GPUVolumeSample *volumeBrickSamples,
+    constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors,
+    constant float4 *volumeBrickAttributeSamples
 ) {
     Hit closest = emptyHit();
     if (constants.accelerationNodeCount == 0 || nodes == nullptr || primitiveIndices == nullptr) {
         closest = intersectSceneLinear(ray, constants, triangles);
-        Hit volumeHit = closestVolumeHit(ray, constants, volumes, volumeSamples, volumeBricks, volumeBrickSamples, closest.t);
+        Hit volumeHit = closestVolumeHit(
+            ray,
+            constants,
+            volumes,
+            volumeSamples,
+            volumeAttributeDescriptors,
+            volumeAttributeSamples,
+            volumeBricks,
+            volumeBrickSamples,
+            volumeBrickAttributeDescriptors,
+            volumeBrickAttributeSamples,
+            closest.t
+        );
         return volumeHit.hit ? volumeHit : closest;
     }
 
@@ -1912,7 +2233,19 @@ static Hit intersectScene(
         }
     }
 
-    Hit volumeHit = closestVolumeHit(ray, constants, volumes, volumeSamples, volumeBricks, volumeBrickSamples, closest.t);
+    Hit volumeHit = closestVolumeHit(
+        ray,
+        constants,
+        volumes,
+        volumeSamples,
+        volumeAttributeDescriptors,
+        volumeAttributeSamples,
+        volumeBricks,
+        volumeBrickSamples,
+        volumeBrickAttributeDescriptors,
+        volumeBrickAttributeSamples,
+        closest.t
+    );
     if (volumeHit.hit) {
         closest = volumeHit;
     }
@@ -1978,6 +2311,10 @@ static Hit intersectSceneHardware(
     hit.volumeEmissionTransmission = float4(0);
     hit.volumeSurface = float4(0);
     hit.volumeMaterialFieldFlags = 0u;
+    hit.volumeAttributes0 = float4(0);
+    hit.volumeAttributes1 = float4(0);
+    hit.volumeAttributeSemantics0 = uint4(0);
+    hit.volumeAttributeSemantics1 = uint4(0);
     hit.objectID = instance.metadata.z;
     hit.primitiveID = triangleIndex;
     return hit;
@@ -2027,8 +2364,12 @@ static bool continueSubsurfaceRandomWalk(
     constant uint *primitiveIndices,
     constant GPUVolumeDescriptor *volumes,
     constant GPUVolumeSample *volumeSamples,
+    constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors,
+    constant float4 *volumeAttributeSamples,
     constant GPUVolumeBrickDescriptor *volumeBricks,
     constant GPUVolumeSample *volumeBrickSamples,
+    constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors,
+    constant float4 *volumeBrickAttributeSamples,
     thread Ray &ray,
     thread float3 &throughput,
     thread float &previousBSDFPDF,
@@ -2060,8 +2401,12 @@ static bool continueSubsurfaceRandomWalk(
             primitiveIndices,
             volumes,
             volumeSamples,
+            volumeAttributeDescriptors,
+            volumeAttributeSamples,
             volumeBricks,
-            volumeBrickSamples
+            volumeBrickSamples,
+            volumeBrickAttributeDescriptors,
+            volumeBrickAttributeSamples
         );
         if (!boundaryHit.hit) {
             return false;
@@ -2475,9 +2820,14 @@ static bool tracePrimaryAOV(
     constant uint *primitiveIndices,
     constant GPUVolumeDescriptor *volumes,
     constant GPUVolumeSample *volumeSamples,
+    constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors,
+    constant float4 *volumeAttributeSamples,
     constant GPUVolumeBrickDescriptor *volumeBricks,
     constant GPUVolumeSample *volumeBrickSamples,
+    constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors,
+    constant float4 *volumeBrickAttributeSamples,
     constant GPUMaterial *materials,
+    constant GPUMaterialSemanticDescriptor *materialSemantics,
     constant GPUTextureDescriptor *textureDescriptors,
     constant float4 *texturePixels,
     thread Hit &primaryHit,
@@ -2492,14 +2842,18 @@ static bool tracePrimaryAOV(
             primitiveIndices,
             volumes,
             volumeSamples,
+            volumeAttributeDescriptors,
+            volumeAttributeSamples,
             volumeBricks,
-            volumeBrickSamples
+            volumeBrickSamples,
+            volumeBrickAttributeDescriptors,
+            volumeBrickAttributeSamples
         );
         if (!hit.hit) {
             return false;
         }
 
-        GPUMaterial material = materialForHit(hit, materials, constants.materialCount);
+        GPUMaterial material = materialForHit(hit, materials, materialSemantics, constants.materialCount);
         hit = applyNormalMap(hit, material, textureDescriptors, texturePixels, ray.direction);
         material = applyBaseColorTexture(material, hit, textureDescriptors, texturePixels);
         if (material.baseColor.w <= 0.001f) {
@@ -2555,12 +2909,17 @@ static bool shadowOccluded(
     constant GPURenderConstants &constants,
     constant GPUTriangle *triangles,
     constant GPUMaterial *materials,
+    constant GPUMaterialSemanticDescriptor *materialSemantics,
     constant GPUAccelerationNode *nodes,
     constant uint *primitiveIndices,
     constant GPUVolumeDescriptor *volumes,
     constant GPUVolumeSample *volumeSamples,
+    constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors,
+    constant float4 *volumeAttributeSamples,
     constant GPUVolumeBrickDescriptor *volumeBricks,
     constant GPUVolumeSample *volumeBrickSamples,
+    constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors,
+    constant float4 *volumeBrickAttributeSamples,
     thread float3 &transmittance
 ) {
     float traveled = 0.0f;
@@ -2573,14 +2932,18 @@ static bool shadowOccluded(
             primitiveIndices,
             volumes,
             volumeSamples,
+            volumeAttributeDescriptors,
+            volumeAttributeSamples,
             volumeBricks,
-            volumeBrickSamples
+            volumeBrickSamples,
+            volumeBrickAttributeDescriptors,
+            volumeBrickAttributeSamples
         );
         if (!shadowHit.hit || traveled + shadowHit.t >= maxDistance) {
             return false;
         }
 
-        GPUMaterial shadowMaterial = materialForHit(shadowHit, materials, constants.materialCount);
+        GPUMaterial shadowMaterial = materialForHit(shadowHit, materials, materialSemantics, constants.materialCount);
         if (shadowMaterial.baseColor.w <= 0.001f) {
             traveled += shadowHit.t;
             shadowRay.origin = shadowHit.position + shadowRay.direction * 0.001f;
@@ -2660,12 +3023,17 @@ static float3 sampleDirectLighting(
     constant GPURenderConstants &constants,
     constant GPUTriangle *triangles,
     constant GPUMaterial *materials,
+    constant GPUMaterialSemanticDescriptor *materialSemantics,
     constant GPUAccelerationNode *nodes,
     constant uint *primitiveIndices,
     constant GPUVolumeDescriptor *volumes,
     constant GPUVolumeSample *volumeSamples,
+    constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors,
+    constant float4 *volumeAttributeSamples,
     constant GPUVolumeBrickDescriptor *volumeBricks,
     constant GPUVolumeSample *volumeBrickSamples,
+    constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors,
+    constant float4 *volumeBrickAttributeSamples,
     constant GPULightRecord *lights,
     constant GPUEnvironmentSample *environmentSamples,
     constant GPUTextureDescriptor *textureDescriptors,
@@ -2718,12 +3086,17 @@ static float3 sampleDirectLighting(
                         constants,
                         triangles,
                         materials,
+                        materialSemantics,
                         nodes,
                         primitiveIndices,
                         volumes,
                         volumeSamples,
+                        volumeAttributeDescriptors,
+                        volumeAttributeSamples,
                         volumeBricks,
                         volumeBrickSamples,
+                        volumeBrickAttributeDescriptors,
+                        volumeBrickAttributeSamples,
                         shadowTransmittance
                     )) {
                         float geometryTerm = cosSurface * cosLight * area / max(distanceSquared, 1e-6f);
@@ -2774,12 +3147,17 @@ static float3 sampleDirectLighting(
                 constants,
                 triangles,
                 materials,
+                materialSemantics,
                 nodes,
                 primitiveIndices,
                 volumes,
                 volumeSamples,
+                volumeAttributeDescriptors,
+                volumeAttributeSamples,
                 volumeBricks,
                 volumeBrickSamples,
+                volumeBrickAttributeDescriptors,
+                volumeBrickAttributeSamples,
                 shadowTransmittance
             )) {
                 float3 brdf = evaluateMaterialBRDF(
@@ -2969,6 +3347,11 @@ kernel void pathTraceKernel(
     constant GPUVolumeSample *volumeSamples [[buffer(15)]],
     constant GPUVolumeBrickDescriptor *volumeBricks [[buffer(16)]],
     constant GPUVolumeSample *volumeBrickSamples [[buffer(17)]],
+    constant GPUMaterialSemanticDescriptor *materialSemantics [[buffer(18)]],
+    constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors [[buffer(19)]],
+    constant float4 *volumeAttributeSamples [[buffer(20)]],
+    constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors [[buffer(21)]],
+    constant float4 *volumeBrickAttributeSamples [[buffer(22)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     if (gid.x >= constants.width || gid.y >= constants.height) {
@@ -3022,8 +3405,12 @@ kernel void pathTraceKernel(
             primitiveIndices,
             volumes,
             volumeSamples,
+            volumeAttributeDescriptors,
+            volumeAttributeSamples,
             volumeBricks,
-            volumeBrickSamples
+            volumeBrickSamples,
+            volumeBrickAttributeDescriptors,
+            volumeBrickAttributeSamples
         );
         if (!hit.hit) {
             if (constants.transparentBackground != 0u) {
@@ -3052,7 +3439,7 @@ kernel void pathTraceKernel(
             break;
         }
 
-        GPUMaterial material = materialForHit(hit, materials, constants.materialCount);
+        GPUMaterial material = materialForHit(hit, materials, materialSemantics, constants.materialCount);
         hit = applyNormalMap(hit, material, textureDescriptors, texturePixels, ray.direction);
         material = applyBaseColorTexture(material, hit, textureDescriptors, texturePixels);
         if (material.baseColor.w <= 0.001f) {
@@ -3082,8 +3469,12 @@ kernel void pathTraceKernel(
                 primitiveIndices,
                 volumes,
                 volumeSamples,
+                volumeAttributeDescriptors,
+                volumeAttributeSamples,
                 volumeBricks,
                 volumeBrickSamples,
+                volumeBrickAttributeDescriptors,
+                volumeBrickAttributeSamples,
                 ray,
                 throughput,
                 previousBSDFPDF,
@@ -3128,12 +3519,17 @@ kernel void pathTraceKernel(
             constants,
             triangles,
             materials,
+            materialSemantics,
             nodes,
             primitiveIndices,
             volumes,
             volumeSamples,
+            volumeAttributeDescriptors,
+            volumeAttributeSamples,
             volumeBricks,
             volumeBrickSamples,
+            volumeBrickAttributeDescriptors,
+            volumeBrickAttributeSamples,
             lights,
             environmentSamples,
             textureDescriptors,
@@ -3249,7 +3645,7 @@ kernel void pathTraceKernel(
     bool hasAOVHit = primaryHit.hit;
     aovHit = primaryHit;
     aovMaterial = primaryMaterial;
-    if (constants.padding1 != 0u) {
+    if (constants.denoiserEnabled != 0u) {
         hasAOVHit = tracePrimaryAOV(
             makeCameraRay(camera, constants.width, constants.height, gid, 0.5f, 0.5f),
             constants,
@@ -3258,9 +3654,14 @@ kernel void pathTraceKernel(
             primitiveIndices,
             volumes,
             volumeSamples,
+            volumeAttributeDescriptors,
+            volumeAttributeSamples,
             volumeBricks,
             volumeBrickSamples,
+            volumeBrickAttributeDescriptors,
+            volumeBrickAttributeSamples,
             materials,
+            materialSemantics,
             textureDescriptors,
             texturePixels,
             aovHit,
@@ -3584,7 +3985,7 @@ kernel void pathTraceHardwareKernel(
     bool hasAOVHit = primaryHit.hit;
     aovHit = primaryHit;
     aovMaterial = primaryMaterial;
-    if (constants.padding1 != 0u) {
+    if (constants.denoiserEnabled != 0u) {
         hasAOVHit = tracePrimaryAOVHardware(
             makeCameraRay(camera, constants.width, constants.height, gid, 0.5f, 0.5f),
             scene,

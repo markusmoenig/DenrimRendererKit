@@ -215,6 +215,100 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(scene.materials[3].emissionStrength, 8, accuracy: 0.0001)
     }
 
+    func testSceneScriptParsesSemanticMaterials() throws {
+        let source = """
+        material mossy semantic moss youngColor 0.9 0.95 0.12 matureColor 0.04 0.34 0.04 dryColor 0.52 0.36 0.12 age 0.1 wetness 0.2
+        material clear semantic crystal color 0.7 0.9 1 clarity 0.85 polish 0.9
+        """
+
+        let scene = try SceneScript.parse(source)
+
+        XCTAssertEqual(scene.materialSources.count, 2)
+        XCTAssertEqual(scene.materialSources[0].archetype.rawValue, "moss")
+        XCTAssertEqual(scene.materialSources[0].style.primaryColor.x, 0.9, accuracy: 0.0001)
+        XCTAssertEqual(scene.materialSources[0].style.secondaryColor.y, 0.34, accuracy: 0.0001)
+        XCTAssertEqual(scene.materialSources[0].attributes.age, 0.1, accuracy: 0.0001)
+        XCTAssertEqual(scene.materialSources[1].archetype.rawValue, "crystal")
+        XCTAssertEqual(scene.materialSources[1].style.transmission, 0.85, accuracy: 0.0001)
+        XCTAssertEqual(scene.materialSources[1].attributes.polish, 0.9, accuracy: 0.0001)
+    }
+
+    func testSceneScriptBuildsDenseSDFVolumeWithSemanticAttributes() throws {
+        let source = """
+        material mossy semantic moss youngColor 0.9 0.95 0.12 matureColor 0.04 0.34 0.04 dryColor 0.52 0.36 0.12
+        material clear semantic crystal color 0.7 0.9 1 clarity 0.75 polish 0.8
+        sdf dense material mossy resolution 18 attributes growthAge wetness mossAmount cavity boundsMin -1 -1 -1 boundsMax 1 1 1 sphere material mossy radius 0.55 attr growthAge 0.9 attr wetness 0.8 attr mossAmount 1 attr cavity 0.35 box material clear size 0.45 0.45 0.45 position 0.35 0 0 smooth 0.12 opacity 0.55 transmission 0.8
+        """
+
+        let scene = try SceneScript.parse(source)
+        let compiled = try scene.compileForGPU()
+
+        XCTAssertEqual(scene.volumeInstances.count, 1)
+        XCTAssertEqual(scene.sparseVolumeInstances.count, 0)
+        XCTAssertEqual(compiled.volumes.count, 1)
+        XCTAssertEqual(compiled.volumeAttributeDescriptors.count, 1)
+        XCTAssertEqual(compiled.volumeAttributeDescriptors[0].semantics0.x, DistanceVolumeAttributeSemantic.growthAge.rawValue)
+        XCTAssertEqual(compiled.volumeAttributeDescriptors[0].semantics0.y, DistanceVolumeAttributeSemantic.wetness.rawValue)
+        XCTAssertEqual(compiled.volumeAttributeSamples.count, 18 * 18 * 18)
+    }
+
+    func testSceneScriptBuildsSparseSDFVolumeWithSemanticAttributes() throws {
+        let source = """
+        material mossy semantic moss youngColor 0.9 0.95 0.12 matureColor 0.04 0.34 0.04 dryColor 0.52 0.36 0.12
+        sdf sparse material mossy resolution 20 brickSize 5 narrowBand 0.3 attributes growthAge wetness mossAmount sphere material mossy radius 0.55 attr growthAge 0.9 attr wetness 0.8 attr mossAmount 1
+        """
+
+        let scene = try SceneScript.parse(source)
+        let compiled = try scene.compileForGPU()
+
+        XCTAssertEqual(scene.volumeInstances.count, 0)
+        XCTAssertEqual(scene.sparseVolumeInstances.count, 1)
+        XCTAssertEqual(compiled.volumeBricks.count, scene.sparseVolumeInstances[0].volume.bricks.count)
+        XCTAssertGreaterThan(compiled.volumeBrickAttributeSamples.count, 0)
+        XCTAssertEqual(compiled.volumeBrickAttributeDescriptors.first?.semantics0.x, DistanceVolumeAttributeSemantic.growthAge.rawValue)
+    }
+
+    func testSceneScriptSDFSemanticAttributesRenderAlbedoAOV() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let source = """
+        camera origin(0, 0, 3) target(0, 0, 0) fov(35)
+        material mossy semantic moss youngColor 0.9 0.95 0.12 matureColor 0.04 0.34 0.04 dryColor 0.52 0.36 0.12
+        sdf dense material mossy resolution 20 attributes growthAge wetness mossAmount cavity sphere material mossy radius 0.55 attr growthAge 0.92 attr wetness 0.8 attr mossAmount 1 attr cavity 0.35
+        """
+        let scene = try SceneScript.parse(source)
+        let renderer = try DenrimRenderer(device: device)
+        let session = try renderer.makeSession(
+            scene: scene,
+            settings: RenderSettings(width: 20, height: 20, maxBounces: 1),
+            accelerationMode: .automatic
+        )
+
+        try session.renderNextSample()
+        let albedo = try session.pixels(for: .albedo)
+
+        XCTAssertTrue(albedo.contains { pixel in
+            pixel.r > 0.08 && pixel.r < 0.45
+                && pixel.g > 0.18 && pixel.g < 0.55
+                && pixel.b < 0.12
+                && pixel.a > 0.9
+        })
+    }
+
+    func testSceneScriptSemanticSDFExampleCompiles() throws {
+        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("Examples/SceneScripts/SDF/semantic-sdf.denrim")
+
+        let scene = try SceneScript.parse(contentsOf: url)
+        let compiled = try scene.compileForGPU()
+
+        XCTAssertEqual(scene.sparseVolumeInstances.count, 1)
+        XCTAssertGreaterThan(compiled.volumeBricks.count, 0)
+        XCTAssertGreaterThan(compiled.volumeBrickAttributeSamples.count, 0)
+    }
+
     func testSceneScriptParsesMaterialTextureBindings() throws {
         let source = """
         texture checker checker 1 0 0 1 0 0 1 1 linear

@@ -1,6 +1,112 @@
 import Foundation
 import simd
 
+/// Semantic meaning for compact scalar attributes baked alongside a distance field.
+public enum DistanceVolumeAttributeSemantic: UInt32, Sendable, Equatable, CaseIterable {
+    case custom = 0
+    case growthAge = 1
+    case branchID = 2
+    case curvature = 3
+    case cavity = 4
+    case noise = 5
+    case wetness = 6
+    case mossAmount = 7
+    case polish = 8
+    case fracture = 9
+    case burnAmount = 10
+}
+
+/// One scalar channel in a compact volume attribute layout.
+public struct DistanceVolumeAttributeChannel: Sendable, Equatable {
+    public var name: String
+    public var semantic: DistanceVolumeAttributeSemantic
+    public var defaultValue: Float
+
+    public init(
+        name: String,
+        semantic: DistanceVolumeAttributeSemantic = .custom,
+        defaultValue: Float = 0
+    ) {
+        self.name = name
+        self.semantic = semantic
+        self.defaultValue = defaultValue
+    }
+}
+
+/// Compact scalar attribute layout for SDF volumes.
+///
+/// Samples are packed as `SIMD4<Float>` groups. For each voxel, all groups for
+/// that voxel are stored consecutively, so the packed index is
+/// `sampleIndex * packedVectorCount + vectorIndex`.
+public struct DistanceVolumeAttributeLayout: Sendable, Equatable {
+    public var channels: [DistanceVolumeAttributeChannel]
+
+    public init(channels: [DistanceVolumeAttributeChannel] = []) {
+        self.channels = Array(channels.prefix(Self.maximumChannelCount))
+    }
+
+    public var channelCount: Int {
+        channels.count
+    }
+
+    public var packedVectorCount: Int {
+        (channels.count + 3) / 4
+    }
+
+    public var isEmpty: Bool {
+        channels.isEmpty
+    }
+
+    public func channelIndex(named name: String) -> Int? {
+        channels.firstIndex { $0.name == name }
+    }
+
+    public func channelIndex(semantic: DistanceVolumeAttributeSemantic) -> Int? {
+        channels.firstIndex { $0.semantic == semantic }
+    }
+
+    public func defaultPackedSample() -> [SIMD4<Float>] {
+        packedAttributeSample(values: DistanceVolumeAttributeValues(), layout: self)
+    }
+
+    public static let maximumChannelCount = 8
+}
+
+/// Named scalar values emitted by an SDF primitive or operator.
+public struct DistanceVolumeAttributeValues: Sendable, Equatable {
+    public var values: [String: Float]
+
+    public init(_ values: [String: Float] = [:]) {
+        self.values = values
+    }
+
+    public subscript(_ name: String) -> Float? {
+        get { values[name] }
+        set { values[name] = newValue }
+    }
+}
+
+public func packedAttributeSample(
+    values: DistanceVolumeAttributeValues,
+    layout: DistanceVolumeAttributeLayout
+) -> [SIMD4<Float>] {
+    guard !layout.isEmpty else {
+        return []
+    }
+
+    var packed = [SIMD4<Float>](
+        repeating: SIMD4<Float>(repeating: 0),
+        count: layout.packedVectorCount
+    )
+    for (channelIndex, channel) in layout.channels.enumerated() {
+        let value = values.values[channel.name] ?? channel.defaultValue
+        let vectorIndex = channelIndex / 4
+        let laneIndex = channelIndex % 4
+        packed[vectorIndex][laneIndex] = value
+    }
+    return packed
+}
+
 /// Optional material channels baked alongside a signed-distance sample.
 ///
 /// These fields are applied after the renderer resolves `materialA/materialB`,
@@ -95,6 +201,12 @@ public struct DistanceVolume: Sendable, Equatable {
     /// When empty, the scene instance material is used for the entire volume.
     public var materialSamples: [DistanceVolumeMaterialSample]
 
+    /// Compact scalar attribute layout for per-sample procedural data.
+    public var attributeLayout: DistanceVolumeAttributeLayout
+
+    /// Packed attribute samples in row-major X-fastest order.
+    public var attributeSamples: [SIMD4<Float>]
+
     /// Minimum local-space corner covered by the distance samples.
     public var boundsMin: SIMD3<Float>
 
@@ -108,12 +220,16 @@ public struct DistanceVolume: Sendable, Equatable {
         depth: Int,
         distances: [Float],
         materialSamples: [DistanceVolumeMaterialSample] = [],
+        attributeLayout: DistanceVolumeAttributeLayout = DistanceVolumeAttributeLayout(),
+        attributeSamples: [SIMD4<Float>] = [],
         boundsMin: SIMD3<Float> = SIMD3<Float>(repeating: -1),
         boundsMax: SIMD3<Float> = SIMD3<Float>(repeating: 1)
     ) {
         self.dimensions = SIMD3<Int>(width, height, depth)
         self.distances = distances
         self.materialSamples = materialSamples
+        self.attributeLayout = attributeLayout
+        self.attributeSamples = attributeSamples
         self.boundsMin = boundsMin
         self.boundsMax = boundsMax
     }
@@ -177,6 +293,9 @@ public struct SparseDistanceVolumeBrick: Sendable, Equatable {
     /// Brick-local material payload samples in row-major X-fastest order.
     public var materialSamples: [DistanceVolumeMaterialSample]
 
+    /// Packed brick-local attribute samples in row-major X-fastest order.
+    public var attributeSamples: [SIMD4<Float>]
+
     /// Creates a sparse signed-distance brick.
     public init(
         origin: SIMD3<Int>,
@@ -184,7 +303,8 @@ public struct SparseDistanceVolumeBrick: Sendable, Equatable {
         coreOrigin: SIMD3<Int>? = nil,
         coreDimensions: SIMD3<Int>? = nil,
         distances: [Float],
-        materialSamples: [DistanceVolumeMaterialSample]
+        materialSamples: [DistanceVolumeMaterialSample],
+        attributeSamples: [SIMD4<Float>] = []
     ) {
         self.origin = origin
         self.dimensions = dimensions
@@ -192,6 +312,7 @@ public struct SparseDistanceVolumeBrick: Sendable, Equatable {
         self.coreDimensions = coreDimensions ?? dimensions
         self.distances = distances
         self.materialSamples = materialSamples
+        self.attributeSamples = attributeSamples
     }
 }
 
@@ -219,6 +340,12 @@ public struct SparseDistanceVolume: Sendable, Equatable {
     /// Material payload assigned to samples outside stored bricks when densified.
     public var defaultMaterial: DistanceVolumeMaterialSample
 
+    /// Compact scalar attribute layout for per-sample procedural data.
+    public var attributeLayout: DistanceVolumeAttributeLayout
+
+    /// Packed attribute values assigned outside stored bricks when densified.
+    public var defaultAttributeSample: [SIMD4<Float>]
+
     /// Stored occupied bricks.
     public var bricks: [SparseDistanceVolumeBrick]
 
@@ -230,6 +357,8 @@ public struct SparseDistanceVolume: Sendable, Equatable {
         boundsMax: SIMD3<Float>,
         defaultDistance: Float,
         defaultMaterial: DistanceVolumeMaterialSample,
+        attributeLayout: DistanceVolumeAttributeLayout = DistanceVolumeAttributeLayout(),
+        defaultAttributeSample: [SIMD4<Float>] = [],
         bricks: [SparseDistanceVolumeBrick]
     ) {
         self.dimensions = dimensions
@@ -238,6 +367,8 @@ public struct SparseDistanceVolume: Sendable, Equatable {
         self.boundsMax = boundsMax
         self.defaultDistance = defaultDistance
         self.defaultMaterial = defaultMaterial
+        self.attributeLayout = attributeLayout
+        self.defaultAttributeSample = defaultAttributeSample
         self.bricks = bricks
     }
 
@@ -246,6 +377,22 @@ public struct SparseDistanceVolume: Sendable, Equatable {
         let sampleCount = dimensions.x * dimensions.y * dimensions.z
         var distances = [Float](repeating: defaultDistance, count: sampleCount)
         var materialSamples = [DistanceVolumeMaterialSample](repeating: defaultMaterial, count: sampleCount)
+        let packedVectorCount = attributeLayout.packedVectorCount
+        let defaultAttributes = defaultAttributeSample.isEmpty
+            ? attributeLayout.defaultPackedSample()
+            : defaultAttributeSample
+        var attributeSamples = [SIMD4<Float>]()
+        if packedVectorCount > 0 {
+            attributeSamples.reserveCapacity(sampleCount * packedVectorCount)
+            for _ in 0..<sampleCount {
+                for vectorIndex in 0..<packedVectorCount {
+                    let value = vectorIndex < defaultAttributes.count
+                        ? defaultAttributes[vectorIndex]
+                        : SIMD4<Float>(repeating: 0)
+                    attributeSamples.append(value)
+                }
+            }
+        }
 
         for brick in bricks {
             for z in 0..<brick.dimensions.z {
@@ -265,6 +412,17 @@ public struct SparseDistanceVolume: Sendable, Equatable {
                         let targetIndex = targetX + targetY * dimensions.x + targetZ * dimensions.x * dimensions.y
                         distances[targetIndex] = brick.distances[sourceIndex]
                         materialSamples[targetIndex] = brick.materialSamples[sourceIndex]
+                        if packedVectorCount > 0 {
+                            let sourceAttributeIndex = sourceIndex * packedVectorCount
+                            let targetAttributeIndex = targetIndex * packedVectorCount
+                            guard sourceAttributeIndex + packedVectorCount <= brick.attributeSamples.count,
+                                  targetAttributeIndex + packedVectorCount <= attributeSamples.count else {
+                                continue
+                            }
+                            for vectorIndex in 0..<packedVectorCount {
+                                attributeSamples[targetAttributeIndex + vectorIndex] = brick.attributeSamples[sourceAttributeIndex + vectorIndex]
+                            }
+                        }
                     }
                 }
             }
@@ -276,9 +434,121 @@ public struct SparseDistanceVolume: Sendable, Equatable {
             depth: dimensions.z,
             distances: distances,
             materialSamples: materialSamples,
+            attributeLayout: attributeLayout,
+            attributeSamples: attributeSamples,
             boundsMin: boundsMin,
             boundsMax: boundsMax
         )
+    }
+}
+
+/// Storage variant for a renderable SDF field bundle.
+///
+/// This is the renderer-facing boundary for products such as Denrim Form:
+/// host apps can compile procedural geometry into either dense samples or
+/// sparse bricks without depending on GPU packing details.
+public enum RenderFieldStorage: Sendable, Equatable {
+    /// Dense row-major signed-distance samples.
+    case dense(DistanceVolume)
+
+    /// Sparse signed-distance bricks.
+    case sparse(SparseDistanceVolume)
+
+    /// Bounds covered by the field in bundle-local space.
+    public var bounds: (minimum: SIMD3<Float>, maximum: SIMD3<Float>) {
+        switch self {
+        case .dense(let volume):
+            return (volume.boundsMin, volume.boundsMax)
+        case .sparse(let volume):
+            return (volume.boundsMin, volume.boundsMax)
+        }
+    }
+
+    /// Compact scalar attribute layout stored alongside the field.
+    public var attributeLayout: DistanceVolumeAttributeLayout {
+        switch self {
+        case .dense(let volume):
+            return volume.attributeLayout
+        case .sparse(let volume):
+            return volume.attributeLayout
+        }
+    }
+}
+
+/// Storage family for a render field currently stored in a scene.
+public enum RenderFieldStorageKind: Sendable, Hashable {
+    /// Dense row-major signed-distance samples.
+    case dense
+
+    /// Sparse signed-distance bricks.
+    case sparse
+}
+
+/// Stable-enough scene handle returned when a render field bundle is added.
+///
+/// The handle records which scene collection owns the field plus that
+/// collection index. It is intended for short-lived editor sessions where the
+/// app owns scene rebuilding and can discard handles when it rebuilds a scene.
+public struct RenderFieldID: Sendable, Hashable {
+    /// Storage family for the scene field.
+    public var storage: RenderFieldStorageKind
+
+    /// Index inside the matching scene field collection.
+    public var index: Int
+
+    /// Creates a render field handle.
+    public init(storage: RenderFieldStorageKind, index: Int) {
+        self.storage = storage
+        self.index = index
+    }
+}
+
+/// A renderable SDF field bundle compiled by a host product.
+///
+/// `RenderFieldBundle` is the intended API boundary between procedural editors
+/// like Denrim Form and RendererKit. Form owns its timeline/operator document;
+/// RendererKit owns this renderable payload shape and how it is uploaded to the
+/// active backend.
+public struct RenderFieldBundle: Sendable, Equatable {
+    /// Dense or sparse field storage.
+    public var storage: RenderFieldStorage
+
+    /// Fallback material for samples or regions that do not provide a material payload.
+    public var fallbackMaterial: MaterialID
+
+    /// Creates a field bundle from dense or sparse storage.
+    public init(
+        storage: RenderFieldStorage,
+        fallbackMaterial: MaterialID
+    ) {
+        self.storage = storage
+        self.fallbackMaterial = fallbackMaterial
+    }
+
+    /// Creates a field bundle from a dense signed-distance volume.
+    public init(
+        dense volume: DistanceVolume,
+        fallbackMaterial: MaterialID
+    ) {
+        self.init(storage: .dense(volume), fallbackMaterial: fallbackMaterial)
+    }
+
+    /// Creates a field bundle from a sparse signed-distance volume.
+    public init(
+        sparse volume: SparseDistanceVolume,
+        fallbackMaterial: MaterialID
+    ) {
+        self.init(storage: .sparse(volume), fallbackMaterial: fallbackMaterial)
+    }
+
+    /// Bounds covered by the field in bundle-local space.
+    public var bounds: (minimum: SIMD3<Float>, maximum: SIMD3<Float>) {
+        storage.bounds
+    }
+
+    /// Compact scalar attribute layout stored alongside the field.
+    public var attributeLayout: DistanceVolumeAttributeLayout {
+        storage.attributeLayout
     }
 }
 

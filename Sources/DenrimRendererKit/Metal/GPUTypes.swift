@@ -46,6 +46,15 @@ struct GPUMaterial {
     var volumeParameters: SIMD4<Float>
 }
 
+struct GPUMaterialSemanticDescriptor {
+    var metadata: SIMD4<UInt32>
+    var style0: SIMD4<Float>
+    var style1: SIMD4<Float>
+    var style2: SIMD4<Float>
+    var controls0: SIMD4<Float>
+    var controls1: SIMD4<Float>
+}
+
 struct GPUTextureDescriptor {
     var metadata: SIMD4<UInt32>
 }
@@ -90,6 +99,12 @@ struct GPUVolumeSample {
     var materialFieldFlags: SIMD4<UInt32>
 }
 
+struct GPUVolumeAttributeDescriptor {
+    var metadata: SIMD4<UInt32>
+    var semantics0: SIMD4<UInt32>
+    var semantics1: SIMD4<UInt32>
+}
+
 struct GPUVolumeBrickDescriptor {
     var worldBoundsMin: SIMD4<Float>
     var worldBoundsMax: SIMD4<Float>
@@ -124,9 +139,11 @@ struct GPURenderConstants {
     var environmentMaxRadiance: Float
     var sampleRadianceClamp: Float
     var volumeSampleCount: UInt32
-    var padding1: UInt32
+    var volumeAttributeSampleCount: UInt32
     var volumeBrickCount: UInt32
     var volumeBrickSampleCount: UInt32
+    var volumeBrickAttributeSampleCount: UInt32
+    var denoiserEnabled: UInt32
 }
 
 struct GPURayTracingInstance {

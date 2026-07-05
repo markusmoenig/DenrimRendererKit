@@ -12,6 +12,7 @@ The first version is intentionally small. It supports:
 * `texture`.
 * `mesh`.
 * `material`.
+* `sdf` / `volume`.
 * `quad`.
 * `box`.
 * `instance`.
@@ -91,6 +92,17 @@ material amberPreset preset coating.iridescent-amber
 material glassPreset preset glass.thin-pane
 material warmPanel preset emission.warm-panel emission 1 0.82 0.55 6
 
+# Semantic materials are the preferred source for SDF-heavy products.
+# material name semantic archetype [color r g b] [secondaryColor r g b] [accentColor r g b]
+#                        [youngColor r g b] [matureColor r g b] [dryColor r g b]
+#                        [roughness value] [metallic value] [opacity value]
+#                        [transmission value] [emissionStrength value]
+#                        [amount value] [age value] [wetness value] [polish value]
+#                        [cavity value] [emission value]
+material mossy semantic moss youngColor 0.9 0.95 0.12 matureColor 0.04 0.34 0.04 dryColor 0.52 0.36 0.12
+material wet semantic wetFilm tint 0.55 0.72 0.82 wetness 1
+material crystal semantic crystal color 0.72 0.9 1 clarity 0.82 polish 0.92
+
 # include reusable script fragment
 include commonMaterials
 
@@ -105,6 +117,16 @@ instance dragon brushedGold position(0, 0, 0) scale(1, 1, 1) rotationY(0.25)
 
 # fully named mesh/material form is also accepted
 instance mesh(dragon) material(brushedGold) position(0, 0, 0) scale(1, 1, 1) rotationY(0.25)
+
+# SDF model volumes can be built inline as dense fields or sparse bricks.
+# sdf [name] dense|sparse material name resolution n [brickSize n] [narrowBand value]
+#     [attributes channel ...] [boundsMin(x, y, z)] [boundsMax(x, y, z)]
+#     sphere material name radius value [position(x, y, z)] [smooth value]
+#            [attr channel value] [baseColor r g b] [opacity value]
+#            [roughness value] [metallic value] [transmission value]
+#     box material name size(x, y, z) [cornerRadius value] [position(x, y, z)]
+#         [rotationY value] [smooth value] [attr channel value]
+sdf organics sparse material mossy resolution 40 brickSize 8 narrowBand 0.22 attributes growthAge wetness mossAmount cavity polish boundsMin -1 -1 -1 boundsMax 1 1 1 sphere material mossy radius 0.56 attr growthAge 0.92 attr wetness 0.78 attr mossAmount 1 attr cavity 0.35 sphere material wet radius 0.36 position 0.42 0.04 0.02 smooth 0.22 attr wetness 1 attr mossAmount 0.25 opacity 0.58 transmission 0.42 box material crystal size 0.42 0.42 0.42 position -0.42 -0.02 0.03 rotationY 0.55 smooth 0.14 attr polish 0.95 attr wetness 0.2 transmission 0.82
 ```
 
 Swift usage:
@@ -134,7 +156,7 @@ When a script contains `render` defaults, `denrim` uses them for omitted CLI opt
 
 Denoising is off by default. `--denoise apple-svgf` and `--denoise experimental-simple` are explicit opt-in comparison modes, not baseline output modes.
 
-The repository includes a self-contained material-variant script template at `Examples/SceneScripts/MaterialVariants/material-variants.denrim`. It uses a bundled toy PLY mesh so tests can run without external assets.
+The repository includes a self-contained material-variant script template at `Examples/SceneScripts/MaterialVariants/material-variants.denrim`. It uses a bundled toy PLY mesh so tests can run without external assets. `Examples/SceneScripts/SDF/semantic-sdf.denrim` is the current scripted validation scene for sparse SDF bricks, semantic materials, compact volume attributes, smooth primitive blending, and baked material field overrides.
 
 The Stanford Dragon example lives at `Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim`. Run `./Examples/Tools/render-quality-examples.sh` to fetch the mesh if needed and render local comparison outputs into `/tmp/denrim-quality-examples`.
 
@@ -166,7 +188,7 @@ let scene = try SceneScript.parse(source) { name in
 }
 ```
 
-The script language is meant to grow carefully with the renderer. It should remain useful for tests, examples, and Denrim Render automation without becoming a full DCC format.
+The script language is meant to grow carefully with the renderer. It should remain useful for tests, examples, Denrim Render automation, and reproducible Form bug reports without becoming a full DCC format. Interactive products should pass compiled `RenderFieldBundle` values to RendererKit directly rather than generating SceneScript as their realtime interchange layer.
 
 ## Procedural Material Direction
 

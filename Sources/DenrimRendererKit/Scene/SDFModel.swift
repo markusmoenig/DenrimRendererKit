@@ -21,6 +21,9 @@ public struct SDFPrimitive: Sendable, Equatable {
     /// Optional baked material channels contributed by this primitive.
     public var materialFields: DistanceVolumeMaterialFields
 
+    /// Optional compact attributes contributed by this primitive.
+    public var attributes: DistanceVolumeAttributeValues
+
     /// Primitive-local to model-space transform.
     public var transform: Transform
 
@@ -32,12 +35,14 @@ public struct SDFPrimitive: Sendable, Equatable {
         shape: SDFPrimitiveShape,
         material: MaterialID,
         materialFields: DistanceVolumeMaterialFields = DistanceVolumeMaterialFields(),
+        attributes: DistanceVolumeAttributeValues = DistanceVolumeAttributeValues(),
         transform: Transform = .identity,
         smoothUnionRadius: Float = 0
     ) {
         self.shape = shape
         self.material = material
         self.materialFields = materialFields
+        self.attributes = attributes
         self.transform = transform
         self.smoothUnionRadius = smoothUnionRadius
     }
@@ -48,9 +53,16 @@ public struct SDFModel: Sendable, Equatable {
     /// Primitives composed in order.
     public var primitives: [SDFPrimitive]
 
+    /// Compact attributes baked by this model.
+    public var attributeLayout: DistanceVolumeAttributeLayout
+
     /// Creates an SDF model.
-    public init(primitives: [SDFPrimitive] = []) {
+    public init(
+        primitives: [SDFPrimitive] = [],
+        attributeLayout: DistanceVolumeAttributeLayout = DistanceVolumeAttributeLayout()
+    ) {
         self.primitives = primitives
+        self.attributeLayout = attributeLayout
     }
 
     /// Appends a primitive.
@@ -153,6 +165,15 @@ public enum DistanceVolumeBuilder {
             repeating: DistanceVolumeMaterialSample(materialA: model.primitives[0].material),
             count: sampleCount
         )
+        let packedVectorCount = model.attributeLayout.packedVectorCount
+        var attributeSamples = [SIMD4<Float>]()
+        if packedVectorCount > 0 {
+            let defaultPacked = model.attributeLayout.defaultPackedSample()
+            attributeSamples.reserveCapacity(sampleCount * packedVectorCount)
+            for _ in 0..<sampleCount {
+                attributeSamples.append(contentsOf: defaultPacked)
+            }
+        }
 
         let extent = settings.boundsMax - settings.boundsMin
         let compiledPrimitives = compiledPrimitives(for: model)
@@ -177,6 +198,13 @@ public enum DistanceVolumeBuilder {
 
                     distances[index] = field.distance
                     materialSamples[index] = materialSample(from: field)
+                    if packedVectorCount > 0 {
+                        let packedAttributes = packedAttributeSample(values: field.attributes, layout: model.attributeLayout)
+                        let attributeIndex = index * packedVectorCount
+                        for vectorIndex in 0..<packedVectorCount {
+                            attributeSamples[attributeIndex + vectorIndex] = packedAttributes[vectorIndex]
+                        }
+                    }
                 }
             }
         }
@@ -187,6 +215,8 @@ public enum DistanceVolumeBuilder {
             depth: dimensions.z,
             distances: distances,
             materialSamples: materialSamples,
+            attributeLayout: model.attributeLayout,
+            attributeSamples: attributeSamples,
             boundsMin: settings.boundsMin,
             boundsMax: settings.boundsMax
         )
@@ -254,7 +284,8 @@ public enum DistanceVolumeBuilder {
                         primitives: compiledPrimitives,
                         fallbackMaterial: fallbackMaterial,
                         defaultDistance: defaultDistance,
-                        defaultMaterial: defaultMaterial
+                        defaultMaterial: defaultMaterial,
+                        attributeLayout: model.attributeLayout
                     )
                     let minDistance = storedSamples.distances.min() ?? Float.greatestFiniteMagnitude
                     let maxDistance = storedSamples.distances.max() ?? -Float.greatestFiniteMagnitude
@@ -266,7 +297,8 @@ public enum DistanceVolumeBuilder {
                             coreOrigin: SIMD3<Int>(originX, originY, originZ),
                             coreDimensions: brickDimensions,
                             distances: storedSamples.distances,
-                            materialSamples: storedSamples.materialSamples
+                            materialSamples: storedSamples.materialSamples,
+                            attributeSamples: storedSamples.attributeSamples
                         ))
                     }
 
@@ -284,6 +316,8 @@ public enum DistanceVolumeBuilder {
             boundsMax: denseSettings.boundsMax,
             defaultDistance: defaultDistance,
             defaultMaterial: defaultMaterial,
+            attributeLayout: model.attributeLayout,
+            defaultAttributeSample: model.attributeLayout.defaultPackedSample(),
             bricks: bricks
         )
     }
@@ -297,11 +331,21 @@ public enum DistanceVolumeBuilder {
         primitives: [CompiledPrimitive],
         fallbackMaterial: MaterialID,
         defaultDistance: Float,
-        defaultMaterial: DistanceVolumeMaterialSample
-    ) -> (distances: [Float], materialSamples: [DistanceVolumeMaterialSample]) {
+        defaultMaterial: DistanceVolumeMaterialSample,
+        attributeLayout: DistanceVolumeAttributeLayout
+    ) -> (distances: [Float], materialSamples: [DistanceVolumeMaterialSample], attributeSamples: [SIMD4<Float>]) {
         let sampleCount = dimensions.x * dimensions.y * dimensions.z
         var distances = [Float](repeating: defaultDistance, count: sampleCount)
         var materialSamples = [DistanceVolumeMaterialSample](repeating: defaultMaterial, count: sampleCount)
+        let packedVectorCount = attributeLayout.packedVectorCount
+        var attributeSamples = [SIMD4<Float>]()
+        if packedVectorCount > 0 {
+            let defaultPacked = attributeLayout.defaultPackedSample()
+            attributeSamples.reserveCapacity(sampleCount * packedVectorCount)
+            for _ in 0..<sampleCount {
+                attributeSamples.append(contentsOf: defaultPacked)
+            }
+        }
 
         for z in 0..<dimensions.z {
             for y in 0..<dimensions.y {
@@ -325,11 +369,18 @@ public enum DistanceVolumeBuilder {
                     let index = x + y * dimensions.x + z * dimensions.x * dimensions.y
                     distances[index] = field.distance
                     materialSamples[index] = materialSample(from: field)
+                    if packedVectorCount > 0 {
+                        let packedAttributes = packedAttributeSample(values: field.attributes, layout: attributeLayout)
+                        let attributeIndex = index * packedVectorCount
+                        for vectorIndex in 0..<packedVectorCount {
+                            attributeSamples[attributeIndex + vectorIndex] = packedAttributes[vectorIndex]
+                        }
+                    }
                 }
             }
         }
 
-        return (distances, materialSamples)
+        return (distances, materialSamples, attributeSamples)
     }
 
     private static func validatedDimensions(model: SDFModel, settings: DistanceVolumeBuildSettings) throws -> SIMD3<Int> {
@@ -378,7 +429,8 @@ public enum DistanceVolumeBuilder {
             material: fallbackMaterial,
             secondaryMaterial: fallbackMaterial,
             blend: 0,
-            fields: DistanceVolumeMaterialFields()
+            fields: DistanceVolumeMaterialFields(),
+            attributes: DistanceVolumeAttributeValues()
         )
 
         for primitive in primitives {
@@ -388,6 +440,7 @@ public enum DistanceVolumeBuilder {
                 withDistance: primitiveDistance,
                 material: primitive.material,
                 fields: primitive.materialFields,
+                attributes: primitive.attributes,
                 smoothRadius: primitive.smoothUnionRadius
             )
         }
@@ -413,6 +466,7 @@ public enum DistanceVolumeBuilder {
         withDistance candidateDistance: Float,
         material candidateMaterial: MaterialID,
         fields candidateFields: DistanceVolumeMaterialFields,
+        attributes candidateAttributes: DistanceVolumeAttributeValues,
         smoothRadius: Float
     ) -> SampledField {
         guard current.distance.isFinite else {
@@ -421,7 +475,8 @@ public enum DistanceVolumeBuilder {
                 material: candidateMaterial,
                 secondaryMaterial: candidateMaterial,
                 blend: 0,
-                fields: candidateFields
+                fields: candidateFields,
+                attributes: candidateAttributes
             )
         }
 
@@ -433,7 +488,8 @@ public enum DistanceVolumeBuilder {
                     material: candidateMaterial,
                     secondaryMaterial: candidateMaterial,
                     blend: 0,
-                    fields: candidateFields
+                    fields: candidateFields,
+                    attributes: candidateAttributes
                 )
             }
             return current
@@ -448,7 +504,8 @@ public enum DistanceVolumeBuilder {
                 material: current.material,
                 secondaryMaterial: current.secondaryMaterial,
                 blend: current.blend,
-                fields: current.fields
+                fields: current.fields,
+                attributes: current.attributes
             )
         }
         if candidateWeight >= 0.999 {
@@ -457,7 +514,8 @@ public enum DistanceVolumeBuilder {
                 material: candidateMaterial,
                 secondaryMaterial: candidateMaterial,
                 blend: 0,
-                fields: candidateFields
+                fields: candidateFields,
+                attributes: candidateAttributes
             )
         }
         return SampledField(
@@ -465,7 +523,8 @@ public enum DistanceVolumeBuilder {
             material: current.material,
             secondaryMaterial: candidateMaterial,
             blend: candidateWeight,
-            fields: blendMaterialFields(current.fields, candidateFields, t: candidateWeight)
+            fields: blendMaterialFields(current.fields, candidateFields, t: candidateWeight),
+            attributes: blendAttributeValues(current.attributes, candidateAttributes, t: candidateWeight)
         )
     }
 
@@ -513,6 +572,33 @@ public enum DistanceVolumeBuilder {
             return nil
         }
     }
+
+    private static func blendAttributeValues(
+        _ lhs: DistanceVolumeAttributeValues,
+        _ rhs: DistanceVolumeAttributeValues,
+        t: Float
+    ) -> DistanceVolumeAttributeValues {
+        var keys = Set(lhs.values.keys)
+        keys.formUnion(rhs.values.keys)
+        var values: [String: Float] = [:]
+        for key in keys {
+            switch (lhs.values[key], rhs.values[key]) {
+            case let (.some(lhs), .some(rhs)):
+                values[key] = mix(lhs, rhs, t: t)
+            case let (.some(lhs), .none):
+                if t < 0.5 {
+                    values[key] = lhs
+                }
+            case let (.none, .some(rhs)):
+                if t >= 0.5 {
+                    values[key] = rhs
+                }
+            case (.none, .none):
+                break
+            }
+        }
+        return DistanceVolumeAttributeValues(values)
+    }
 }
 
 private struct SampledField {
@@ -521,12 +607,14 @@ private struct SampledField {
     var secondaryMaterial: MaterialID
     var blend: Float
     var fields: DistanceVolumeMaterialFields
+    var attributes: DistanceVolumeAttributeValues
 }
 
 private struct CompiledPrimitive {
     var shape: SDFPrimitiveShape
     var material: MaterialID
     var materialFields: DistanceVolumeMaterialFields
+    var attributes: DistanceVolumeAttributeValues
     var worldToPrimitive: simd_float4x4
     var distanceScale: Float
     var smoothUnionRadius: Float
@@ -535,6 +623,7 @@ private struct CompiledPrimitive {
         self.shape = primitive.shape
         self.material = primitive.material
         self.materialFields = primitive.materialFields
+        self.attributes = primitive.attributes
         self.worldToPrimitive = primitive.transform.matrix.inverse
         self.distanceScale = Self.distanceScale(for: primitive.transform.matrix)
         self.smoothUnionRadius = primitive.smoothUnionRadius

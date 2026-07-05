@@ -1,0 +1,15 @@
+# Semantic SDF volume validation scene.
+# Renders one multi-primitive SDF model with compact material attributes.
+
+render output /tmp/denrim-semantic-sdf.png size 512 spp 32 quality interactive maxBounces 3 backend flat-bvh denoise none
+camera origin(0, 0.65, 3.4) target(0, 0.1, 0) fov(34)
+environment sky
+
+material mossy semantic moss youngColor 0.9 0.95 0.12 matureColor 0.04 0.34 0.04 dryColor 0.52 0.36 0.12
+material wet semantic wetFilm tint 0.55 0.72 0.82 wetness 1
+material crystal semantic crystal color 0.72 0.9 1 clarity 0.82 polish 0.92
+material floor 0.45 0.45 0.42 roughness 0.75
+
+quad floor a(-1.8, -0.72, 1.2) b(1.8, -0.72, 1.2) c(1.8, -0.72, -1.4) d(-1.8, -0.72, -1.4)
+
+sdf organics sparse material mossy resolution 40 brickSize 8 narrowBand 0.22 attributes growthAge wetness mossAmount cavity polish boundsMin -1 -1 -1 boundsMax 1 1 1 sphere material mossy radius 0.56 attr growthAge 0.92 attr wetness 0.78 attr mossAmount 1 attr cavity 0.35 sphere material wet radius 0.36 position 0.42 0.04 0.02 smooth 0.22 attr wetness 1 attr mossAmount 0.25 opacity 0.58 transmission 0.42 box material crystal size 0.42 0.42 0.42 position -0.42 -0.02 0.03 rotationY 0.55 smooth 0.14 attr polish 0.95 attr wetness 0.2 transmission 0.82
