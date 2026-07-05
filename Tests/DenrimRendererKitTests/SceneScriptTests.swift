@@ -149,7 +149,7 @@ final class SceneScriptTests: XCTestCase {
 
     func testSceneScriptParsesRenderDefaults() throws {
         let source = """
-        render output ./beauty.png outputType normal size hd spp 512 quality final maxBounces 10 backend metal-ray-tracing sampleRadianceClamp 48 transparentBackground denoise simple
+        render output ./beauty.png outputType normal size hd spp 512 quality final maxBounces 10 backend metal-ray-tracing sampleRadianceClamp 48 transparentBackground denoise simple sdfResolution 96
         """
 
         let scene = try SceneScript.parse(source)
@@ -172,6 +172,27 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(defaults.sampleRadianceClamp), 48, accuracy: 0.0001)
         XCTAssertEqual(defaults.transparentBackground, true)
         XCTAssertEqual(defaults.denoise?.denoiser, .simpleSpatial)
+        XCTAssertEqual(defaults.sdfResolution, 96)
+    }
+
+    func testSceneScriptSDFResolutionDefaultsAndOverrides() throws {
+        let source = """
+        material white 1 1 1
+        render sdfResolution 14
+        sdf dense material white sphere material white radius 0.5
+        sdf sparse material white resolution 10 brickSize 5 sphere material white radius 0.5
+        """
+
+        let scene = try SceneScript.parse(source)
+        XCTAssertEqual(scene.volumeInstances[0].volume.dimensions, SIMD3<Int>(14, 14, 14))
+        XCTAssertEqual(scene.sparseVolumeInstances[0].volume.dimensions, SIMD3<Int>(10, 10, 10))
+
+        let overridden = try SceneScript.parse(
+            source,
+            options: SceneScriptOptions(sdfResolutionOverride: 12)
+        )
+        XCTAssertEqual(overridden.volumeInstances[0].volume.dimensions, SIMD3<Int>(12, 12, 12))
+        XCTAssertEqual(overridden.sparseVolumeInstances[0].volume.dimensions, SIMD3<Int>(12, 12, 12))
     }
 
     func testSceneScriptFileRenderDefaultOutputResolvesRelativeToScript() throws {
@@ -307,6 +328,21 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(scene.sparseVolumeInstances.count, 1)
         XCTAssertGreaterThan(compiled.volumeBricks.count, 0)
         XCTAssertGreaterThan(compiled.volumeBrickAttributeSamples.count, 0)
+    }
+
+    func testSceneScriptShadertoyMaterialTestBallExampleCompiles() throws {
+        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("Examples/SceneScripts/SDF/shadertoy-material-testball.denrim")
+
+        let scene = try SceneScript.parse(contentsOf: url)
+        let compiled = try scene.compileForGPU()
+
+        XCTAssertEqual(scene.camera.origin, SIMD3<Float>(0.08, 0.5, 2.8))
+        XCTAssertEqual(scene.camera.target, SIMD3<Float>(0.4, 0.7, 0))
+        XCTAssertEqual(scene.sparseVolumeInstances.count, 2)
+        XCTAssertGreaterThan(compiled.volumeBricks.count, 0)
+        XCTAssertFalse(scene.meshInstances.isEmpty)
+        XCTAssertTrue(scene.materials.contains { $0.emissionStrength > 0 })
     }
 
     func testSceneScriptParsesMaterialTextureBindings() throws {

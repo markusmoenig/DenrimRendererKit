@@ -8,6 +8,18 @@ public enum SDFPrimitiveShape: Sendable, Equatable {
 
     /// Rounded box centered at the primitive origin.
     case box(halfExtents: SIMD3<Float>, cornerRadius: Float = 0)
+
+    /// Capped cylinder centered at the primitive origin and aligned to local Y.
+    case cylinder(radius: Float, halfHeight: Float)
+}
+
+/// Boolean operation used when a primitive is combined with previous primitives.
+public enum SDFPrimitiveOperation: Sendable, Equatable {
+    /// Adds the primitive to the current field.
+    case union
+
+    /// Subtracts the primitive from the current field.
+    case subtract
 }
 
 /// One SDF primitive in a model-space composition.
@@ -30,6 +42,9 @@ public struct SDFPrimitive: Sendable, Equatable {
     /// Smooth-union radius used when this primitive is combined with previous primitives.
     public var smoothUnionRadius: Float
 
+    /// Boolean operation used to combine this primitive with previous primitives.
+    public var operation: SDFPrimitiveOperation
+
     /// Creates an SDF primitive.
     public init(
         shape: SDFPrimitiveShape,
@@ -37,7 +52,8 @@ public struct SDFPrimitive: Sendable, Equatable {
         materialFields: DistanceVolumeMaterialFields = DistanceVolumeMaterialFields(),
         attributes: DistanceVolumeAttributeValues = DistanceVolumeAttributeValues(),
         transform: Transform = .identity,
-        smoothUnionRadius: Float = 0
+        smoothUnionRadius: Float = 0,
+        operation: SDFPrimitiveOperation = .union
     ) {
         self.shape = shape
         self.material = material
@@ -45,6 +61,7 @@ public struct SDFPrimitive: Sendable, Equatable {
         self.attributes = attributes
         self.transform = transform
         self.smoothUnionRadius = smoothUnionRadius
+        self.operation = operation
     }
 }
 
@@ -435,14 +452,21 @@ public enum DistanceVolumeBuilder {
 
         for primitive in primitives {
             let primitiveDistance = primitive.distance(to: position)
-            field = combine(
-                field,
-                withDistance: primitiveDistance,
-                material: primitive.material,
-                fields: primitive.materialFields,
-                attributes: primitive.attributes,
-                smoothRadius: primitive.smoothUnionRadius
-            )
+            switch primitive.operation {
+            case .union:
+                field = combine(
+                    field,
+                    withDistance: primitiveDistance,
+                    material: primitive.material,
+                    fields: primitive.materialFields,
+                    attributes: primitive.attributes,
+                    smoothRadius: primitive.smoothUnionRadius
+                )
+            case .subtract:
+                if field.distance.isFinite {
+                    field.distance = max(field.distance, -primitiveDistance)
+                }
+            }
         }
 
         return field
@@ -618,6 +642,7 @@ private struct CompiledPrimitive {
     var worldToPrimitive: simd_float4x4
     var distanceScale: Float
     var smoothUnionRadius: Float
+    var operation: SDFPrimitiveOperation
 
     init(_ primitive: SDFPrimitive) {
         self.shape = primitive.shape
@@ -627,6 +652,7 @@ private struct CompiledPrimitive {
         self.worldToPrimitive = primitive.transform.matrix.inverse
         self.distanceScale = Self.distanceScale(for: primitive.transform.matrix)
         self.smoothUnionRadius = primitive.smoothUnionRadius
+        self.operation = primitive.operation
     }
 
     func distance(to position: SIMD3<Float>) -> Float {
@@ -641,6 +667,13 @@ private struct CompiledPrimitive {
             distance = simd_length(simd_max(q, SIMD3<Float>(repeating: 0)))
                 + min(max(q.x, max(q.y, q.z)), 0)
                 - max(cornerRadius, 0)
+        case .cylinder(let radius, let halfHeight):
+            let d = SIMD2<Float>(
+                simd_length(SIMD2<Float>(local.x, local.z)),
+                abs(local.y)
+            ) - SIMD2<Float>(radius, halfHeight)
+            distance = min(max(d.x, d.y), 0)
+                + simd_length(simd_max(d, SIMD2<Float>(repeating: 0)))
         }
         return distance * distanceScale
     }

@@ -136,6 +136,64 @@ final class APITests: XCTestCase {
         XCTAssertEqual(compiled.volumeBricks.count, replacement.bricks.count)
     }
 
+    func testDistanceFieldBakerProducesSparseFieldBundle() throws {
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.6, 0.2)))
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .metalCompute)
+        let result = try baker.bake(DistanceFieldBakeRequest(
+            graph: DistanceFieldBakeGraph(primitives: [
+                SDFPrimitive(shape: .sphere(radius: 0.55), material: material),
+                SDFPrimitive(
+                    shape: .box(halfExtents: SIMD3<Float>(0.18, 0.18, 0.18)),
+                    material: material,
+                    transform: .translation(SIMD3<Float>(0.3, 0, 0)),
+                    operation: .subtract
+                )
+            ]),
+            resolution: 18,
+            storage: .sparseBricks(brickSize: 6, narrowBand: 0.25),
+            fallbackMaterial: material
+        ))
+
+        XCTAssertEqual(result.backend, .metalCompute)
+        scene.add(fieldBundle: result.bundle)
+        XCTAssertTrue(scene.volumeInstances.isEmpty)
+        XCTAssertEqual(scene.sparseVolumeInstances.count, 1)
+        XCTAssertEqual(scene.sparseVolumeInstances[0].volume.dimensions, SIMD3<Int>(18, 18, 18))
+        XCTAssertGreaterThan(scene.sparseVolumeInstances[0].volume.bricks.count, 0)
+    }
+
+    func testDistanceFieldBakerFallsBackForAttributeGraphs() throws {
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(SemanticMaterial.moss())
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .metalCompute)
+        let result = try baker.bake(DistanceFieldBakeRequest(
+            graph: DistanceFieldBakeGraph(
+                primitives: [
+                    SDFPrimitive(
+                        shape: .sphere(radius: 0.55),
+                        material: material,
+                        attributes: DistanceVolumeAttributeValues(["growthAge": 0.75])
+                    )
+                ],
+                attributeLayout: DistanceVolumeAttributeLayout(channels: [
+                    DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge)
+                ])
+            ),
+            resolution: 14,
+            storage: .dense,
+            fallbackMaterial: material
+        ))
+
+        XCTAssertEqual(result.backend, .cpuReference)
+        scene.add(fieldBundle: result.bundle)
+        XCTAssertEqual(scene.volumeInstances.count, 1)
+        XCTAssertEqual(scene.volumeInstances[0].volume.attributeLayout.channelCount, 1)
+        XCTAssertFalse(scene.volumeInstances[0].volume.attributeSamples.isEmpty)
+    }
+
     func testQuadLightAPIAddsAppAuthoredEmissiveLight() throws {
         var scene = RenderScene()
         scene.addQuadLight(QuadLight(
@@ -284,6 +342,36 @@ final class APITests: XCTestCase {
         XCTAssertTrue(build.volumeSamples.contains { sample in
             sample.materialA == red.rawValue && sample.materialB == blue.rawValue && sample.materialBlend > 0 && sample.materialBlend < 1
         })
+    }
+
+    func testSDFModelSupportsCylinderAndSubtraction() throws {
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.8, 0.8, 0.76)))
+        let model = SDFModel(primitives: [
+            SDFPrimitive(
+                shape: .box(halfExtents: SIMD3<Float>(0.82, 0.82, 0.82), cornerRadius: 0.08),
+                material: material
+            ),
+            SDFPrimitive(
+                shape: .sphere(radius: 0.34),
+                material: material,
+                operation: .subtract
+            ),
+            SDFPrimitive(
+                shape: .cylinder(radius: 0.28, halfHeight: 0.18),
+                material: material,
+                transform: .translation(SIMD3<Float>(0.48, 0, 0))
+            )
+        ])
+
+        let volume = try DistanceVolumeBuilder.build(
+            model: model,
+            settings: DistanceVolumeBuildSettings(resolution: 11)
+        )
+        let centerIndex = 5 + 5 * 11 + 5 * 11 * 11
+
+        XCTAssertGreaterThan(volume.distances[centerIndex], 0)
+        XCTAssertTrue(volume.distances.contains { $0 < 0 })
     }
 
     func testDistanceVolumeMaterialFieldsReachGPUVolumeSamples() throws {

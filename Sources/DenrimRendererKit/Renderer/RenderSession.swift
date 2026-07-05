@@ -107,8 +107,8 @@ public final class RenderSession {
     var accelerationDebugInfo: (nodeCount: Int, hasNodeBuffer: Bool, hasPrimitiveIndexBuffer: Bool) {
         (
             nodeCount: accelerationNodeCount,
-            hasNodeBuffer: accelerationNodeBuffer != nil,
-            hasPrimitiveIndexBuffer: primitiveIndexBuffer != nil
+            hasNodeBuffer: accelerationNodeCount > 0 && accelerationNodeBuffer != nil,
+            hasPrimitiveIndexBuffer: accelerationNodeCount > 0 && primitiveIndexBuffer != nil
         )
     }
 
@@ -144,7 +144,7 @@ public final class RenderSession {
             activeMode: canUseHardwareRayTracing ? .metalRayTracing : .flatBVH,
             supportsMetalRayTracing: device.supportsRaytracing,
             hasMetalTLAS: metalRayTracingExperiment?.tlasResource != nil,
-            hasFlatBVH: accelerationNodeBuffer != nil && primitiveIndexBuffer != nil,
+            hasFlatBVH: accelerationNodeCount > 0 && accelerationNodeBuffer != nil && primitiveIndexBuffer != nil,
             flatBVHNodeCount: accelerationNodeCount
         )
     }
@@ -311,11 +311,11 @@ public final class RenderSession {
             device: device,
             values: compiled.environmentSamples
         )
-        self.accelerationNodeBuffer = Self.makeBuffer(
+        self.accelerationNodeBuffer = try Self.makeRequiredShaderBindingBuffer(
             device: device,
             values: compiled.bvh.nodes
         )
-        self.primitiveIndexBuffer = Self.makeBuffer(
+        self.primitiveIndexBuffer = try Self.makeRequiredShaderBindingBuffer(
             device: device,
             values: compiled.bvh.primitiveIndices
         )

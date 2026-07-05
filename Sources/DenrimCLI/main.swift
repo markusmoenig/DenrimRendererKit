@@ -53,7 +53,7 @@ struct RenderReport: Codable {
 let optionsWithValues: Set<String> = [
     "--output", "-o", "--output-type", "--report-output",
     "--samples", "-s", "--size", "--width", "--height",
-    "--quality", "--max-bounces", "--sample-radiance-clamp", "--backend", "--denoise",
+    "--quality", "--max-bounces", "--sample-radiance-clamp", "--sdf-resolution", "--backend", "--denoise",
     "--denoise-radius", "--denoise-iterations", "--denoise-normal-sigma",
     "--denoise-depth-sigma", "--denoise-albedo-sigma", "--denoise-color-sigma"
 ]
@@ -123,8 +123,8 @@ func render(arguments: [String]) throws {
         arguments: arguments,
         inputPath: inputURL.path,
         defaultOutputPath: defaultOutputPath(),
-        loadScene: {
-            try SceneScript.parse(contentsOf: inputURL)
+        loadScene: { options in
+            try SceneScript.parse(contentsOf: inputURL, options: options)
         }
     )
 }
@@ -141,11 +141,12 @@ func renderMaterial(arguments: [String]) throws {
         arguments: arguments,
         inputPath: "material \(materialExpression)",
         defaultOutputPath: defaultOutputPath(),
-        loadScene: {
+        loadScene: { options in
             let source = try String(contentsOf: sceneURL, encoding: .utf8)
             return try SceneScript.parse(
                 source,
                 baseURL: baseURL,
+                options: options,
                 includeResolver: { includeName in
                     if includeName == "preview-material.denrim" {
                         return previewMaterialSource
@@ -164,9 +165,18 @@ func performRender(
     arguments: [String],
     inputPath: String,
     defaultOutputPath: String,
-    loadScene: () throws -> RenderScene
+    loadScene: (SceneScriptOptions) throws -> RenderScene
 ) throws {
-    let (scene, sceneLoadSeconds) = try elapsed(loadScene)
+    let (renderer, rendererCreateSeconds) = try elapsed {
+        try DenrimRenderer()
+    }
+    let sceneOptions = SceneScriptOptions(
+        sdfResolutionOverride: optionInt(named: "--sdf-resolution", in: arguments),
+        distanceFieldBaker: renderer.makeDistanceFieldBaker()
+    )
+    let (scene, sceneLoadSeconds) = try elapsed {
+        try loadScene(sceneOptions)
+    }
     let renderDefaults = scene.renderDefaults
     let outputPath = optionValue(named: "--output", short: "-o", in: arguments)
         ?? renderDefaults.outputPath
@@ -214,9 +224,6 @@ func performRender(
             verticalFieldOfViewDegrees: scene.camera.verticalFieldOfViewDegrees
         )
         : nil
-    let (renderer, rendererCreateSeconds) = try elapsed {
-        try DenrimRenderer()
-    }
     let (session, sessionCreateSeconds) = try elapsed {
         try renderer.makeSession(
             scene: scene,
@@ -444,6 +451,8 @@ func printRenderHelp() {
               --sample-radiance-clamp <v>    Firefly clamp. Defaults by quality:
                                              preview 10, interactive 24, final 64.
                                              Use 0 to disable.
+              --sdf-resolution <n>            Override script SDF/volume build
+                                             resolution for every SDF object.
 
         Backend:
               --backend <name>               automatic, flat-bvh, metal-ray-tracing.
@@ -496,8 +505,8 @@ func printMaterialHelp() {
 
         It accepts the same render options as `denrim render`, including:
           --output, --samples, --size, --width, --height, --quality,
-          --max-bounces, --backend, --sample-radiance-clamp, --denoise,
-          --json, and --report-output.
+          --max-bounces, --backend, --sample-radiance-clamp,
+          --sdf-resolution, --denoise, --json, and --report-output.
 
         If --output is omitted, the image is written to ./out.png.
         """

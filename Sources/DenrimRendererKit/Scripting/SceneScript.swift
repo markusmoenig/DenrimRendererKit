@@ -46,6 +46,23 @@ public enum SceneScriptError: Error, LocalizedError, Equatable {
     }
 }
 
+/// Parse-time options supplied by host applications or CLI tools.
+public struct SceneScriptOptions: Sendable {
+    /// Overrides every script-authored SDF volume build resolution when present.
+    public var sdfResolutionOverride: Int?
+
+    /// Optional baker used for inline `sdf` / `volume` commands.
+    public var distanceFieldBaker: DistanceFieldBaker?
+
+    public init(
+        sdfResolutionOverride: Int? = nil,
+        distanceFieldBaker: DistanceFieldBaker? = nil
+    ) {
+        self.sdfResolutionOverride = sdfResolutionOverride
+        self.distanceFieldBaker = distanceFieldBaker
+    }
+}
+
 /// Parser for the small DenrimRendererKit scene scripting language.
 public enum SceneScript {
     /// Resolves an included scene script fragment by name.
@@ -58,6 +75,7 @@ public enum SceneScript {
         _ source: String,
         baseURL: URL? = nil,
         assetCache: SceneAssetCache? = nil,
+        options: SceneScriptOptions = SceneScriptOptions(),
         includeResolver: IncludeResolver? = nil
     ) throws -> RenderScene {
         var scene = RenderScene()
@@ -74,6 +92,7 @@ public enum SceneScript {
             meshes: &meshes,
             baseURL: baseURL,
             assetCache: assetCache,
+            options: options,
             includeResolver: includeResolver,
             includeStack: &includeStack
         )
@@ -82,13 +101,18 @@ public enum SceneScript {
     }
 
     /// Parses a scene script file, resolving relative assets and includes beside that file.
-    public static func parse(contentsOf url: URL, assetCache: SceneAssetCache? = nil) throws -> RenderScene {
+    public static func parse(
+        contentsOf url: URL,
+        assetCache: SceneAssetCache? = nil,
+        options: SceneScriptOptions = SceneScriptOptions()
+    ) throws -> RenderScene {
         let source = try String(contentsOf: url, encoding: .utf8)
         let baseURL = url.deletingLastPathComponent()
         return try parse(
             source,
             baseURL: baseURL,
             assetCache: assetCache,
+            options: options,
             includeResolver: { includeName in
                 try String(
                     contentsOf: assetURL(path: includeName, baseURL: baseURL),
@@ -106,6 +130,7 @@ public enum SceneScript {
         meshes: inout [String: Mesh],
         baseURL: URL?,
         assetCache: SceneAssetCache?,
+        options: SceneScriptOptions,
         includeResolver: IncludeResolver?,
         includeStack: inout [String]
     ) throws {
@@ -141,6 +166,7 @@ public enum SceneScript {
                     meshes: &meshes,
                     baseURL: baseURL,
                     assetCache: assetCache,
+                    options: options,
                     includeResolver: includeResolver,
                     includeStack: &includeStack
                 )
@@ -177,7 +203,7 @@ public enum SceneScript {
                 let parsed = try parseMaterial(tokens, line: lineNumber, textures: textures)
                 materials[parsed.name] = scene.addMaterial(parsed.material)
             case "sdf", "volume":
-                try parseSDFVolume(tokens, line: lineNumber, scene: &scene, materials: materials)
+                try parseSDFVolume(tokens, line: lineNumber, scene: &scene, materials: materials, options: options)
             case "quad":
                 let parsed = try parseQuad(tokens, line: lineNumber, materials: materials)
                 scene.add(mesh: parsed.mesh, material: parsed.material)
@@ -306,6 +332,13 @@ public enum SceneScript {
                     throw SceneScriptError.invalidArgumentCount("render", line: line)
                 }
                 defaults.denoise = try denoiseSettings(named: tokens[index + 1], line: line)
+                index += 2
+            case "sdfresolution", "sdf-resolution", "fieldresolution", "field-resolution",
+                 "volumeresolution", "volume-resolution":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("render", line: line)
+                }
+                defaults.sdfResolution = max(2, try int(tokens[index + 1], line: line))
                 index += 2
             default:
                 throw SceneScriptError.invalidArgumentCount("render", line: line)
@@ -1186,7 +1219,9 @@ public enum SceneScript {
         let material = try material(named: materialNameParse.value, line: line, materials: materials)
         var position = SIMD3<Float>(repeating: 0)
         var scale = SIMD3<Float>(repeating: 1)
+        var rotationX: Float?
         var rotationY: Float?
+        var rotationZ: Float?
 
         while index < tokens.count {
             let keyword = tokens[index].lowercased()
@@ -1199,9 +1234,17 @@ public enum SceneScript {
                 let parsed = try parseNamedVector3(tokens, index: index, line: line)
                 scale = parsed.value
                 index = parsed.nextIndex
+            case "rotationx", "rotatex":
+                let parsed = try parseNamedFloat(tokens, index: index, line: line)
+                rotationX = parsed.value
+                index = parsed.nextIndex
             case "rotationy", "rotatey":
                 let parsed = try parseNamedFloat(tokens, index: index, line: line)
                 rotationY = parsed.value
+                index = parsed.nextIndex
+            case "rotationz", "rotatez":
+                let parsed = try parseNamedFloat(tokens, index: index, line: line)
+                rotationZ = parsed.value
                 index = parsed.nextIndex
             default:
                 throw SceneScriptError.invalidArgumentCount("instance", line: line)
@@ -1209,8 +1252,14 @@ public enum SceneScript {
         }
 
         var transform = Transform.translation(position)
+        if let rotationX {
+            transform = transform * Transform.rotationX(radians: rotationX)
+        }
         if let rotationY {
             transform = transform * Transform.rotationY(radians: rotationY)
+        }
+        if let rotationZ {
+            transform = transform * Transform.rotationZ(radians: rotationZ)
         }
         transform = transform * Transform.scale(scale)
 
@@ -1221,7 +1270,8 @@ public enum SceneScript {
         _ tokens: [String],
         line: Int,
         scene: inout RenderScene,
-        materials: [String: MaterialID]
+        materials: [String: MaterialID],
+        options: SceneScriptOptions
     ) throws {
         guard tokens.count >= 2 else {
             throw SceneScriptError.invalidArgumentCount("sdf", line: line)
@@ -1229,7 +1279,7 @@ public enum SceneScript {
 
         var isSparse = false
         var fallbackMaterialName: String?
-        var resolution = 32
+        var resolution = max(2, scene.renderDefaults.sdfResolution ?? 32)
         var brickSize = 8
         var narrowBand: Float = 0.1
         var boundsMin = SIMD3<Float>(repeating: -1)
@@ -1243,13 +1293,14 @@ public enum SceneScript {
 
         if index < tokens.count,
            !isSDFGlobalKeyword(tokens[index]),
-           !isSDFShapeKeyword(tokens[index]) {
+           !isSDFShapeKeyword(tokens[index]),
+           !isSDFOperationKeyword(tokens[index]) {
             index += 1
         }
 
         while index < tokens.count {
             let keyword = tokens[index].lowercased()
-            if isSDFShapeKeyword(keyword) {
+            if isSDFShapeKeyword(keyword) || isSDFOperationKeyword(keyword) {
                 let parsed = try parseSDFPrimitive(
                     tokens,
                     index: index,
@@ -1322,6 +1373,7 @@ public enum SceneScript {
                 index += 1
                 while index < tokens.count,
                       !isSDFShapeKeyword(tokens[index]),
+                      !isSDFOperationKeyword(tokens[index]),
                       !isSDFGlobalKeyword(tokens[index]) {
                     appendUnique(tokens[index], to: &attributeNames)
                     index += 1
@@ -1378,35 +1430,23 @@ public enum SceneScript {
         }
         transform = transform * Transform.scale(scale)
 
-        if isSparse {
-            let sparse = try DistanceVolumeBuilder.buildSparse(
-                model: model,
-                settings: SparseDistanceVolumeBuildSettings(
-                    resolution: resolution,
-                    brickSize: brickSize,
-                    boundsMin: boundsMin,
-                    boundsMax: boundsMax,
-                    narrowBand: narrowBand
-                )
-            )
-            scene.add(
-                fieldBundle: RenderFieldBundle(sparse: sparse, fallbackMaterial: fallbackMaterial),
-                transform: transform
-            )
-        } else {
-            let volume = try DistanceVolumeBuilder.build(
-                model: model,
-                settings: DistanceVolumeBuildSettings(
-                    resolution: resolution,
-                    boundsMin: boundsMin,
-                    boundsMax: boundsMax
-                )
-            )
-            scene.add(
-                fieldBundle: RenderFieldBundle(dense: volume, fallbackMaterial: fallbackMaterial),
-                transform: transform
-            )
-        }
+        let buildResolution = max(2, options.sdfResolutionOverride ?? resolution)
+        let baker = options.distanceFieldBaker ?? DistanceFieldBaker(preferredBackend: .cpuReference)
+        let storage: DistanceFieldBakeStorage = isSparse
+            ? .sparseBricks(brickSize: brickSize, narrowBand: narrowBand)
+            : .dense
+        let result = try baker.bake(DistanceFieldBakeRequest(
+            graph: DistanceFieldBakeGraph(model: model),
+            resolution: buildResolution,
+            boundsMin: boundsMin,
+            boundsMax: boundsMax,
+            storage: storage,
+            fallbackMaterial: fallbackMaterial
+        ))
+        scene.add(
+            fieldBundle: result.bundle,
+            transform: transform
+        )
     }
 
     private static func parseSDFPrimitive(
@@ -1416,26 +1456,40 @@ public enum SceneScript {
         fallbackMaterialName: String?,
         materials: [String: MaterialID]
     ) throws -> (primitive: SDFPrimitive, nextIndex: Int) {
-        let shapeKeyword = tokens[startIndex].lowercased()
+        var shapeKeyword = tokens[startIndex].lowercased()
+        var operation = SDFPrimitiveOperation.union
         var index = startIndex + 1
+        if isSDFOperationKeyword(shapeKeyword) {
+            operation = try sdfOperation(named: shapeKeyword, line: line)
+            guard index < tokens.count, isSDFShapeKeyword(tokens[index]) else {
+                throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+            }
+            shapeKeyword = tokens[index].lowercased()
+            index += 1
+        }
         var materialName = fallbackMaterialName
         if index < tokens.count,
            !isSDFPrimitiveKeyword(tokens[index]),
-           !isSDFShapeKeyword(tokens[index]) {
+           !isSDFShapeKeyword(tokens[index]),
+           !isSDFOperationKeyword(tokens[index]) {
             materialName = tokens[index]
             index += 1
         }
         var radius: Float?
+        var halfHeight: Float?
         var halfExtents: SIMD3<Float>?
         var cornerRadius: Float = 0
         var position = SIMD3<Float>(repeating: 0)
         var scale = SIMD3<Float>(repeating: 1)
+        var rotationX: Float?
         var rotationY: Float?
+        var rotationZ: Float?
+        var worldToLocal: simd_float4x4?
         var smoothUnionRadius: Float = 0
         var attributes: [String: Float] = [:]
         var materialFields = DistanceVolumeMaterialFields()
 
-        while index < tokens.count, !isSDFShapeKeyword(tokens[index]) {
+        while index < tokens.count, !isSDFShapeKeyword(tokens[index]), !isSDFOperationKeyword(tokens[index]) {
             let keyword = tokens[index].lowercased()
             switch keyword {
             case "material":
@@ -1454,6 +1508,30 @@ public enum SceneScript {
                 }
                 radius = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
                 index += 2
+            case "halfheight", "half-height":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                halfHeight = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
+                index += 2
+            case "height":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                halfHeight = try floats(tokens[(index + 1)...(index + 1)], line: line)[0] * 0.5
+                index += 2
+            case "operation", "op":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                operation = try sdfOperation(named: tokens[index + 1], line: line)
+                index += 2
+            case "subtract", "difference", "cut":
+                operation = .subtract
+                index += 1
+            case "union", "add":
+                operation = .union
+                index += 1
             case "halfextents", "halfextent", "extents":
                 let parsed = try parseNamedVector3(tokens, index: index, line: line)
                 halfExtents = parsed.value
@@ -1476,9 +1554,21 @@ public enum SceneScript {
                 let parsed = try parseNamedVector3(tokens, index: index, line: line)
                 scale = parsed.value
                 index = parsed.nextIndex
+            case "rotationx", "rotatex":
+                let parsed = try parseNamedFloat(tokens, index: index, line: line)
+                rotationX = parsed.value
+                index = parsed.nextIndex
             case "rotationy", "rotatey":
                 let parsed = try parseNamedFloat(tokens, index: index, line: line)
                 rotationY = parsed.value
+                index = parsed.nextIndex
+            case "rotationz", "rotatez":
+                let parsed = try parseNamedFloat(tokens, index: index, line: line)
+                rotationZ = parsed.value
+                index = parsed.nextIndex
+            case "worldtolocal", "worldtoprimitive", "world-to-local", "matrix":
+                let parsed = try parseNamedMatrix4(tokens, index: index, line: line)
+                worldToLocal = parsed.value
                 index = parsed.nextIndex
             case "smooth", "smoothunion", "smoothunionradius":
                 guard index + 1 < tokens.count else {
@@ -1554,6 +1644,11 @@ public enum SceneScript {
                 throw SceneScriptError.invalidArgumentCount("sdf", line: line)
             }
             shape = .box(halfExtents: halfExtents, cornerRadius: cornerRadius)
+        case "cylinder":
+            guard let radius, let halfHeight else {
+                throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+            }
+            shape = .cylinder(radius: radius, halfHeight: halfHeight)
         default:
             throw SceneScriptError.invalidArgumentCount("sdf", line: line)
         }
@@ -1561,11 +1656,22 @@ public enum SceneScript {
         guard let materialName else {
             throw SceneScriptError.invalidArgumentCount("sdf", line: line)
         }
-        var transform = Transform.translation(position)
-        if let rotationY {
-            transform = transform * Transform.rotationY(radians: rotationY)
+        let transform: Transform
+        if let worldToLocal {
+            transform = Transform(matrix: worldToLocal.inverse)
+        } else {
+            var composedTransform = Transform.translation(position)
+            if let rotationX {
+                composedTransform = composedTransform * Transform.rotationX(radians: rotationX)
+            }
+            if let rotationY {
+                composedTransform = composedTransform * Transform.rotationY(radians: rotationY)
+            }
+            if let rotationZ {
+                composedTransform = composedTransform * Transform.rotationZ(radians: rotationZ)
+            }
+            transform = composedTransform * Transform.scale(scale)
         }
-        transform = transform * Transform.scale(scale)
 
         return (
             SDFPrimitive(
@@ -1574,7 +1680,8 @@ public enum SceneScript {
                 materialFields: materialFields,
                 attributes: DistanceVolumeAttributeValues(attributes),
                 transform: transform,
-                smoothUnionRadius: smoothUnionRadius
+                smoothUnionRadius: smoothUnionRadius,
+                operation: operation
             ),
             index
         )
@@ -1679,6 +1786,43 @@ public enum SceneScript {
             SIMD3<Float>(values[0], values[1], values[2]),
             index + 4
         )
+    }
+
+    private static func parseNamedMatrix4(
+        _ tokens: [String],
+        index: Int,
+        line: Int
+    ) throws -> (name: String, value: simd_float4x4, nextIndex: Int) {
+        guard index < tokens.count else {
+            throw SceneScriptError.invalidArgumentCount("matrix", line: line)
+        }
+
+        let name = tokens[index]
+        let values: [Float]
+        let nextIndex: Int
+        if tokens.indices.contains(index + 1),
+           tokens[index + 1] == "(" {
+            guard tokens.indices.contains(index + 18),
+                  tokens[index + 18] == ")" else {
+                throw SceneScriptError.invalidArgumentCount(name, line: line)
+            }
+            values = try floats(tokens[(index + 2)...(index + 17)], line: line)
+            nextIndex = index + 19
+        } else {
+            guard tokens.indices.contains(index + 16) else {
+                throw SceneScriptError.invalidArgumentCount(name, line: line)
+            }
+            values = try floats(tokens[(index + 1)...(index + 16)], line: line)
+            nextIndex = index + 17
+        }
+
+        let matrix = simd_float4x4(
+            SIMD4<Float>(values[0], values[4], values[8], values[12]),
+            SIMD4<Float>(values[1], values[5], values[9], values[13]),
+            SIMD4<Float>(values[2], values[6], values[10], values[14]),
+            SIMD4<Float>(values[3], values[7], values[11], values[15])
+        )
+        return (name, matrix, nextIndex)
     }
 
     private static func parseNamedVector2(
@@ -1875,7 +2019,9 @@ public enum SceneScript {
              "samples", "sample", "spp", "size", "resolution", "width", "height",
              "quality", "maxbounces", "max-bounces", "bounces", "backend", "acceleration",
              "sampleradianceclamp", "sample-radiance-clamp", "clamp",
-             "transparentbackground", "transparent-background", "denoise":
+             "transparentbackground", "transparent-background", "denoise",
+             "sdfresolution", "sdf-resolution", "fieldresolution", "field-resolution",
+             "volumeresolution", "volume-resolution":
             return true
         default:
             return false
@@ -2064,10 +2210,30 @@ public enum SceneScript {
 
     private static func isSDFShapeKeyword(_ token: String) -> Bool {
         switch token.lowercased() {
-        case "sphere", "box":
+        case "sphere", "box", "cylinder":
             return true
         default:
             return false
+        }
+    }
+
+    private static func isSDFOperationKeyword(_ token: String) -> Bool {
+        switch token.lowercased() {
+        case "subtract", "difference", "cut", "union", "add":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func sdfOperation(named name: String, line: Int) throws -> SDFPrimitiveOperation {
+        switch name.lowercased() {
+        case "union", "add":
+            return .union
+        case "subtract", "difference", "cut":
+            return .subtract
+        default:
+            throw SceneScriptError.invalidArgumentCount("sdf", line: line)
         }
     }
 
@@ -2076,7 +2242,8 @@ public enum SceneScript {
         case "dense", "sparse", "bricks", "brick", "backend", "storage", "material",
              "resolution", "res", "bricksize", "brick-size", "narrowband", "band",
              "boundsmin", "min", "boundsmax", "max", "attributes", "attrs",
-             "position", "translation", "translate", "scale", "rotationy", "rotatey":
+             "position", "translation", "translate", "scale", "rotationx", "rotatex",
+             "rotationy", "rotatey", "rotationz", "rotatez":
             return true
         default:
             return false
@@ -2090,9 +2257,12 @@ public enum SceneScript {
         switch token.lowercased() {
         case "material", "radius", "halfextents", "halfextent", "extents", "size",
              "cornerradius", "rounding", "round", "position", "translation", "translate",
-             "scale", "rotationy", "rotatey", "smooth", "smoothunion", "smoothunionradius",
+             "scale", "rotationx", "rotatex", "rotationy", "rotatey", "rotationz", "rotatez",
+             "smooth", "smoothunion", "smoothunionradius",
              "attr", "attribute", "basecolor", "color", "opacity", "emission",
-             "roughness", "metallic", "transmission":
+             "roughness", "metallic", "transmission", "halfheight", "half-height",
+             "height", "operation", "op", "subtract", "difference", "cut", "union", "add",
+             "worldtolocal", "worldtoprimitive", "world-to-local", "matrix":
             return true
         default:
             return attributeSemantic(named: token) != .custom

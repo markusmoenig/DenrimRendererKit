@@ -35,6 +35,7 @@ Initial public types:
 
 * `DenrimRenderer`
 * `RenderSession`
+* `RenderViewport`
 * `RenderSettings`
 * `RenderAccelerationMode`
 * `RenderAccelerationInfo`
@@ -69,11 +70,18 @@ Initial public types:
 * `RenderFieldID`
 * `RenderFieldStorage`
 * `RenderFieldStorageKind`
+* `DistanceFieldBaker`
+* `DistanceFieldBakeBackend`
+* `DistanceFieldBakeGraph`
+* `DistanceFieldBakeRequest`
+* `DistanceFieldBakeResult`
+* `DistanceFieldBakeStorage`
 * `SparseDistanceVolume`
 * `SparseDistanceVolumeBrick`
 * `SparseDistanceVolumeInstance`
 * `SDFModel`
 * `SDFPrimitive`
+* `SDFPrimitiveOperation`
 * `SDFPrimitiveShape`
 * `DistanceVolumeBuildSettings`
 * `SparseDistanceVolumeBuildSettings`
@@ -140,19 +148,24 @@ scene.add(
 
 `DistanceVolumeMaterialSample` can carry a two-material blend plus optional baked `DistanceVolumeMaterialFields`. These fields override selected material channels after material-ID blending, which lets procedural SDF systems bake color, opacity, emission, roughness, metallic, and transmission fields without generating a unique static material for every voxel.
 
-`RenderFieldBundle` is the preferred Form-to-RendererKit boundary. Products should add semantic materials to the scene, compile their procedural model into dense or sparse field storage, and pass the bundle to `RenderScene`:
+`RenderFieldBundle` is the preferred Form-to-RendererKit boundary. Products should add semantic materials to the scene, compile their procedural model into dense or sparse field storage, and pass the bundle to `RenderScene`. For bakeable primitive graphs, use the renderer's `DistanceFieldBaker` instead of calling the CPU reference builder directly:
 
 ```swift
+let renderer = try DenrimRenderer()
 let moss = scene.addMaterial(SemanticMaterial.moss())
-let sparse = try DistanceVolumeBuilder.buildSparse(
-    model: formCompiledModel,
-    settings: SparseDistanceVolumeBuildSettings(resolution: 64, brickSize: 8)
-)
-let bundle = RenderFieldBundle(sparse: sparse, fallbackMaterial: moss)
-let fieldID = scene.add(fieldBundle: bundle, transform: objectTransform)
+let baker = renderer.makeDistanceFieldBaker()
+let result = try baker.bake(DistanceFieldBakeRequest(
+    graph: DistanceFieldBakeGraph(model: formCompiledModel),
+    resolution: 64,
+    storage: .sparseBricks(brickSize: 8, narrowBand: 0.2),
+    fallbackMaterial: moss
+))
+let fieldID = scene.add(fieldBundle: result.bundle, transform: objectTransform)
 ```
 
 Form should own its editable timeline/operator document format. RendererKit owns the renderable field-bundle API and storage semantics. SceneScript can emit or load comparable scenes for debugging and fixtures, but it is not the realtime interchange layer between Form and RendererKit.
+
+`DistanceFieldBaker` is the shared bake service for SceneScript, Denrim Form, and other procedural hosts. It accepts a `DistanceFieldBakeGraph`, target bounds/resolution, and dense or sparse-brick storage. The current Metal compute path supports transformed spheres, rounded boxes, cylinders, union/subtract, smooth-union material IDs, and sparse-brick extraction. Graphs with compact attributes or baked material fields currently fall back to the CPU reference baker so semantic/material data is preserved. Future work should move those lanes, cache lookup, and dirty-brick rebuilds behind the same API.
 
 The first replacement API is whole-bundle based and uses the scene-local handle returned by `add(fieldBundle:)`:
 
@@ -161,6 +174,25 @@ scene.replaceField(fieldID, with: updatedBundle)
 ```
 
 This is enough for early editor integration where Form rebuilds an affected field and recreates a render session. `RenderFieldID` is intentionally a lightweight scene handle; if the host rebuilds the scene, it should discard old handles. Dirty-brick GPU updates and atlas residency can be added later behind the same high-level bundle contract.
+
+For live accumulation, prefer `RenderViewport` over managing `RenderSession` directly. `RenderSession` is a compiled snapshot; `RenderViewport` owns the editable scene snapshot plus the current session and restarts accumulation when the scene changes:
+
+```swift
+let viewport = try renderer.makeViewport(
+    scene: scene,
+    settings: RenderSettings(width: 1024, height: 1024, quality: .interactive)
+)
+
+try viewport.renderNextSample()
+
+let updatedBundle = RenderFieldBundle(sparse: updatedSparse, fallbackMaterial: moss)
+try viewport.replaceField(fieldID, with: updatedBundle)
+
+// sampleCount is back to zero because a new session was built.
+try viewport.renderNextSample()
+```
+
+`replaceField` is transactional: if the handle is invalid it returns `false`, and if rebuilding the session throws, the previous scene/session remain active. For app-owned Metal frame loops, call `viewport.encodeNextSample(into:)` and then sample `viewport.liveMetalTexture(for:)`.
 
 `DistanceVolumeAttributeLayout` declares compact scalar fields that operators and semantic materials can share. Samples are packed in `SIMD4<Float>` groups, so a Form-style object can store fields such as growth age, cavity, wetness, and moss amount without carrying a full material parameter block per voxel:
 

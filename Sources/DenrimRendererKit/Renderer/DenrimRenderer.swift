@@ -36,6 +36,7 @@ public final class DenrimRenderer {
     private let simpleSpatialDenoisePipeline: MTLComputePipelineState?
     private let svgfDepthNormalPipeline: MTLComputePipelineState?
     private let svgfOutputCopyPipeline: MTLComputePipelineState?
+    private let distanceFieldBakePipeline: MTLComputePipelineState?
 
     /// Creates a renderer using the supplied Metal device or the system default device.
     public init(device: MTLDevice? = MTLCreateSystemDefaultDevice()) throws {
@@ -73,6 +74,11 @@ public final class DenrimRenderer {
             self.svgfDepthNormalPipeline = nil
             self.svgfOutputCopyPipeline = nil
         }
+        if let bakeFunction = library.makeFunction(name: "sdfBakeKernel") {
+            self.distanceFieldBakePipeline = try device.makeComputePipelineState(function: bakeFunction)
+        } else {
+            self.distanceFieldBakePipeline = nil
+        }
     }
 
     private static func makeLibrary(device: MTLDevice) throws -> MTLLibrary {
@@ -80,7 +86,8 @@ public final class DenrimRenderer {
            library.makeFunction(name: "pathTraceKernel") != nil,
            library.makeFunction(name: "simpleSpatialDenoiseKernel") != nil,
            library.makeFunction(name: "packSVGFDepthNormalKernel") != nil,
-           library.makeFunction(name: "copySVGFOutputKernel") != nil {
+           library.makeFunction(name: "copySVGFOutputKernel") != nil,
+           library.makeFunction(name: "sdfBakeKernel") != nil {
             return library
         }
 
@@ -101,7 +108,7 @@ public final class DenrimRenderer {
     }
 
     private static func shaderSourceURLs() -> [URL] {
-        let names = ["Denoise", "PathTrace"]
+        let names = ["Denoise", "PathTrace", "SDFBake"]
         var urls: [URL] = []
 
         for name in names {
@@ -156,6 +163,39 @@ public final class DenrimRenderer {
             scene: scene,
             settings: settings,
             accelerationMode: accelerationMode
+        )
+    }
+
+    /// Creates a live progressive viewport that owns a scene snapshot and session.
+    ///
+    /// Use this for interactive integrations that need to rebuild the session and
+    /// restart accumulation when fields, settings, or the scene change.
+    public func makeViewport(
+        scene: RenderScene,
+        settings: RenderSettings = RenderSettings(),
+        accelerationMode: RenderAccelerationMode = .automatic
+    ) throws -> RenderViewport {
+        try RenderViewport(
+            renderer: self,
+            scene: scene,
+            settings: settings,
+            accelerationMode: accelerationMode
+        )
+    }
+
+    /// Creates a distance-field baker backed by this renderer's Metal device.
+    ///
+    /// The baker is the shared API for SceneScript and procedural products such
+    /// as Denrim Form. It currently uses Metal for supported primitive graphs
+    /// and falls back to the CPU reference baker for unsupported graph features.
+    public func makeDistanceFieldBaker(
+        preferredBackend: DistanceFieldBakeBackend = .automatic
+    ) -> DistanceFieldBaker {
+        DistanceFieldBaker(
+            preferredBackend: preferredBackend,
+            device: device,
+            commandQueue: commandQueue,
+            pipeline: distanceFieldBakePipeline
         )
     }
 }

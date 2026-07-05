@@ -25,8 +25,8 @@ Example:
 #        [quality preview|interactive|final] [maxBounces n]
 #        [backend automatic|flat-bvh|metal-ray-tracing]
 #        [sampleRadianceClamp value] [transparentBackground 0|1]
-#        [denoise none|simple|apple-svgf]
-render output Renders/Scene.png size hd spp 512 quality final
+#        [denoise none|simple|apple-svgf] [sdfResolution n]
+render output Renders/Scene.png size hd spp 512 quality final sdfResolution 72
 
 # camera origin(x, y, z) target(x, y, z) fov(degrees)
 camera origin(0, 1.4, 4.0) target(0, 0.6, 0) fov(42)
@@ -119,13 +119,18 @@ instance dragon brushedGold position(0, 0, 0) scale(1, 1, 1) rotationY(0.25)
 instance mesh(dragon) material(brushedGold) position(0, 0, 0) scale(1, 1, 1) rotationY(0.25)
 
 # SDF model volumes can be built inline as dense fields or sparse bricks.
-# sdf [name] dense|sparse material name resolution n [brickSize n] [narrowBand value]
+# sdf [name] dense|sparse material name [resolution n] [brickSize n] [narrowBand value]
 #     [attributes channel ...] [boundsMin(x, y, z)] [boundsMax(x, y, z)]
 #     sphere material name radius value [position(x, y, z)] [smooth value]
 #            [attr channel value] [baseColor r g b] [opacity value]
 #            [roughness value] [metallic value] [transmission value]
 #     box material name size(x, y, z) [cornerRadius value] [position(x, y, z)]
-#         [rotationY value] [smooth value] [attr channel value]
+#         [rotationX value] [rotationY value] [rotationZ value]
+#         [smooth value] [attr channel value]
+#     cylinder material name radius value height value [position(x, y, z)]
+#         [rotationX value] [rotationY value] [rotationZ value] [smooth value]
+#     subtract box material name size(x, y, z) [cornerRadius value] [position(x, y, z)]
+#     sphere material name radius value [worldToLocal(m00 ... m33)]
 sdf organics sparse material mossy resolution 40 brickSize 8 narrowBand 0.22 attributes growthAge wetness mossAmount cavity polish boundsMin -1 -1 -1 boundsMax 1 1 1 sphere material mossy radius 0.56 attr growthAge 0.92 attr wetness 0.78 attr mossAmount 1 attr cavity 0.35 sphere material wet radius 0.36 position 0.42 0.04 0.02 smooth 0.22 attr wetness 1 attr mossAmount 0.25 opacity 0.58 transmission 0.42 box material crystal size 0.42 0.42 0.42 position -0.42 -0.02 0.03 rotationY 0.55 smooth 0.14 attr polish 0.95 attr wetness 0.2 transmission 0.82
 ```
 
@@ -154,9 +159,13 @@ swift run denrim -- ./Scenes/scene.denrim --output ./ScriptedScene.png --samples
 
 When a script contains `render` defaults, `denrim` uses them for omitted CLI options. Explicit CLI flags still win. `SceneScript.parse(contentsOf:)` resolves a render default output path relative to the script file; `SceneScript.parse(_:)` without a base URL preserves the authored relative path.
 
+`render sdfResolution n` sets the default build resolution for every `sdf` / `volume` command that omits its own `resolution n`. Per-SDF `resolution n` remains useful for intentionally lower- or higher-detail fields. The CLI flag `--sdf-resolution n` overrides both script defaults and per-SDF values at parse time, so it changes the actual baked dense fields or sparse bricks.
+
+The `denrim` CLI passes a renderer-backed `DistanceFieldBaker` into SceneScript parsing. Bakeable primitive SDF scenes use the Metal compute baker during scene load; scripts with compact attributes or baked material fields fall back to the CPU reference baker until those lanes are implemented on the GPU.
+
 Denoising is off by default. `--denoise apple-svgf` and `--denoise experimental-simple` are explicit opt-in comparison modes, not baseline output modes.
 
-The repository includes a self-contained material-variant script template at `Examples/SceneScripts/MaterialVariants/material-variants.denrim`. It uses a bundled toy PLY mesh so tests can run without external assets. `Examples/SceneScripts/SDF/semantic-sdf.denrim` is the current scripted validation scene for sparse SDF bricks, semantic materials, compact volume attributes, smooth primitive blending, and baked material field overrides.
+The repository includes a self-contained material-variant script template at `Examples/SceneScripts/MaterialVariants/material-variants.denrim`. It uses a bundled toy PLY mesh so tests can run without external assets. `Examples/SceneScripts/SDF/semantic-sdf.denrim` is the current scripted validation scene for sparse SDF bricks, semantic materials, compact volume attributes, smooth primitive blending, and baked material field overrides. `Examples/SceneScripts/SDF/shadertoy-material-testball.denrim` is an SDF material-test scene derived from Markus Moenig's 2018 Shadertoy preview scene; it uses a rounded beveled SDF box environment, pedestal cylinders, sphere/cylinder CSG subtraction, and the original preview camera.
 
 The Stanford Dragon example lives at `Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim`. Run `./Examples/Tools/render-quality-examples.sh` to fetch the mesh if needed and render local comparison outputs into `/tmp/denrim-quality-examples`.
 
@@ -166,10 +175,11 @@ Render any `.denrim` file with the unified CLI:
 swift run denrim -- Examples/SceneScripts/MaterialVariants/material-variants.denrim \
     --output /tmp/material-variants.png \
     --samples 32 \
-    --quality interactive
+    --quality interactive \
+    --sdf-resolution 96
 ```
 
-`SceneScript.parse(contentsOf:)` resolves relative environment image paths, image texture paths, mesh paths, and include paths beside the script file. `SceneScript.parse(_:baseURL:assetCache:includeResolver:)` is still available for applications that want to provide script source, asset cache, and include policy themselves. If no base URL is passed, relative assets are resolved against the current process directory. Environment images are linear equirectangular maps; Radiance `.hdr` files are supported for material-preview lighting. Use `maxRadiance` to clamp very bright HDR texels for preview renders until the renderer has environment importance sampling. Image textures default to `color srgb` and `sampler linear`; generated solid/checker textures default to nearest sampling. `normalFrom` derives a tangent-space normal map from an existing texture's luminance, which is useful for reference assets that ship only albedo images. Mesh assets use `Mesh(contentsOf:)`, so the current script path supports OBJ and PLY files. Add `flipV` to a `mesh` command when an imported asset's texture coordinates were authored for bottom-left image origin but the source images are decoded top-down.
+`SceneScript.parse(contentsOf:)` resolves relative environment image paths, image texture paths, mesh paths, and include paths beside the script file. `SceneScript.parse(_:baseURL:assetCache:options:includeResolver:)` is still available for applications that want to provide script source, asset cache, parse-time overrides, and include policy themselves. If no base URL is passed, relative assets are resolved against the current process directory. Environment images are linear equirectangular maps; Radiance `.hdr` files are supported for material-preview lighting. Use `maxRadiance` to clamp very bright HDR texels for preview renders until the renderer has environment importance sampling. Image textures default to `color srgb` and `sampler linear`; generated solid/checker textures default to nearest sampling. `normalFrom` derives a tangent-space normal map from an existing texture's luminance, which is useful for reference assets that ship only albedo images. Mesh assets use `Mesh(contentsOf:)`, so the current script path supports OBJ and PLY files. Add `flipV` to a `mesh` command when an imported asset's texture coordinates were authored for bottom-left image origin but the source images are decoded top-down.
 
 Grouped numeric arguments may use commas or whitespace inside parentheses. The older positional forms, such as `quad floor -2 0 2 ...` and `instance dragon clay 0 0 0 1 1 1`, remain supported for compatibility, but examples should prefer named groups because they are easier to read and review.
 

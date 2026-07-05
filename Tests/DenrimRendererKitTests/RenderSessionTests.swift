@@ -132,6 +132,91 @@ final class RenderSessionTests: XCTestCase {
         XCTAssertTrue(hasVolumeNormal)
     }
 
+    func testRenderViewportRebuildsOnFieldReplacementAndRestartsAccumulation() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        var scene = RenderScene(
+            camera: Camera(
+                origin: SIMD3<Float>(0, 0, 3),
+                target: SIMD3<Float>(0, 0, 0),
+                projection: .orthographic(verticalScale: 2.4)
+            )
+        )
+        let material = scene.addMaterial(SemanticMaterial.moss())
+        let initialBundle = RenderFieldBundle(
+            dense: DistanceVolume.sphere(resolution: 12, radius: 0.5),
+            fallbackMaterial: material
+        )
+        let fieldID = scene.add(fieldBundle: initialBundle)
+        let renderer = try DenrimRenderer(device: device)
+        let viewport = try renderer.makeViewport(
+            scene: scene,
+            settings: RenderSettings(width: 16, height: 16, maxBounces: 1),
+            accelerationMode: .flatBVH
+        )
+
+        try viewport.renderNextSample()
+        let previousSession = viewport.session
+
+        let replacementBundle = RenderFieldBundle(
+            dense: DistanceVolume.sphere(resolution: 14, radius: 0.65),
+            fallbackMaterial: material
+        )
+        let replaced = try viewport.replaceField(fieldID, with: replacementBundle)
+
+        XCTAssertTrue(replaced)
+        XCTAssertFalse(viewport.session === previousSession)
+        XCTAssertEqual(viewport.sampleCount, 0)
+        XCTAssertEqual(viewport.scene.volumeInstances[0].volume.dimensions, SIMD3<Int>(14, 14, 14))
+
+        try viewport.renderNextSample()
+        XCTAssertEqual(viewport.sampleCount, 1)
+    }
+
+    func testRenderViewportKeepsCurrentSessionWhenFieldHandleIsInvalid() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        var scene = RenderScene(
+            camera: Camera(
+                origin: SIMD3<Float>(0, 0, 3),
+                target: SIMD3<Float>(0, 0, 0),
+                projection: .orthographic(verticalScale: 2.4)
+            )
+        )
+        let material = scene.addMaterial(SemanticMaterial.moss())
+        let fieldID = scene.add(fieldBundle: RenderFieldBundle(
+            dense: DistanceVolume.sphere(resolution: 12, radius: 0.5),
+            fallbackMaterial: material
+        ))
+        XCTAssertEqual(fieldID.storage, .dense)
+
+        let renderer = try DenrimRenderer(device: device)
+        let viewport = try renderer.makeViewport(
+            scene: scene,
+            settings: RenderSettings(width: 16, height: 16, maxBounces: 1),
+            accelerationMode: .flatBVH
+        )
+        try viewport.renderNextSample()
+        let currentSession = viewport.session
+
+        let didReplace = try viewport.replaceField(
+            RenderFieldID(storage: .sparse, index: 0),
+            with: RenderFieldBundle(
+                dense: DistanceVolume.sphere(resolution: 14, radius: 0.65),
+                fallbackMaterial: material
+            )
+        )
+
+        XCTAssertFalse(didReplace)
+        XCTAssertTrue(viewport.session === currentSession)
+        XCTAssertEqual(viewport.sampleCount, 1)
+        XCTAssertEqual(viewport.scene.volumeInstances[0].volume.dimensions, SIMD3<Int>(12, 12, 12))
+    }
+
     func testVolumeMaterialFieldsOverrideAlbedoAOV() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw XCTSkip("No Metal device available.")

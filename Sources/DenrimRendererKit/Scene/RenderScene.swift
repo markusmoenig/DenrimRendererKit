@@ -36,6 +36,9 @@ public struct RenderDefaults: Sendable {
     /// Default denoising settings.
     public var denoise: DenoiseSettings?
 
+    /// Default SDF volume build resolution for scene-script volumes.
+    public var sdfResolution: Int?
+
     /// Creates empty render defaults.
     public init(
         outputPath: String? = nil,
@@ -48,7 +51,8 @@ public struct RenderDefaults: Sendable {
         accelerationMode: RenderAccelerationMode? = nil,
         sampleRadianceClamp: Float? = nil,
         transparentBackground: Bool? = nil,
-        denoise: DenoiseSettings? = nil
+        denoise: DenoiseSettings? = nil,
+        sdfResolution: Int? = nil
     ) {
         self.outputPath = outputPath
         self.output = output
@@ -61,6 +65,7 @@ public struct RenderDefaults: Sendable {
         self.sampleRadianceClamp = sampleRadianceClamp
         self.transparentBackground = transparentBackground
         self.denoise = denoise
+        self.sdfResolution = sdfResolution
     }
 }
 
