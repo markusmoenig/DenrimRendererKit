@@ -60,6 +60,10 @@ Current test foundation:
 * BVH flattener tests validate GPU node metadata, primitive index buffers, emissive light-record compilation, HDRI environment importance distributions, instance acceleration records, top-level instance bounds, acceleration backend output, and guarded Metal ray tracing BLAS/TLAS resource builds.
 * Metal ray tracing traversal probe tests compare hardware TLAS traversal against the CPU triangle intersector on supported devices.
 * Render session tests validate that Metal sessions prepare acceleration buffers, expose public acceleration backend diagnostics, and select the production hardware traversal path on supported devices.
+* Render session tests validate that automatic sessions can dispatch with empty optional shader-resource arrays, so no-texture scenes still bind the Metal buffer slots required by the hardware and flat BVH kernels.
+* Render session tests validate that the public Metal texture output APIs expose accumulated output textures with the expected dimensions and format for GPU-side app presentation.
+* Render session tests validate that app-owned command buffers can encode progressive samples through `encodeNextSample(into:)`, fetch the raw `liveMetalTexture(for:)` before commit for same-frame presentation, and then read back finite beauty output after the caller commits and waits.
+* API tests validate that perspective and orthographic `CameraProjection` values generate the expected GPU camera plane dimensions and projection flag.
 * Hardware traversal parity tests force both hardware TLAS and flat BVH backends, then compare primary depth, normal, albedo, material ID, and object ID AOVs for simple, Cornell Box, and material reference scenes.
 * Beauty parity metrics compare average and maximum RGB differences between hardware TLAS and flat BVH reference-scene renders.
 * Reference render metrics cover the MIS-adjusted energy distribution for Cornell Box and material scenes.

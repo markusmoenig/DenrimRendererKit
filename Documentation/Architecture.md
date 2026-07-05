@@ -102,6 +102,7 @@ The first path tracing kernel supports:
 * ImageIO texture asset loading with explicit sRGB or linear import into `Texture2D`.
 * Radiance `.hdr` texture loading for equirectangular environment lighting.
 * HDRI importance sampling and MIS for direct environment lighting.
+* Host-authored mesh light rigs by adding emissive triangle meshes or `QuadLight` instances to the scene. RendererKit does not add default lights to an empty `RenderScene`.
 * Byte-scanned Wavefront OBJ import for large text meshes.
 * Imported vertex normals are preserved when meshes are converted to GPU triangles.
 * Packed texture nearest and bilinear filtering shared by flat BVH and hardware TLAS kernels.
@@ -137,3 +138,9 @@ The albedo output preserves primary material opacity in alpha. Fully transparent
 They are used for tests, simple spatial denoising, export groundwork, and public output readback.
 
 The public API exposes these outputs through `RenderOutput`. Applications can read exact floating-point pixels or export selected outputs to visualization PNGs. The PNG path uses output-specific encoding: ACES-fitted beauty tonemapping with alpha preservation, display gamma and opacity alpha preservation for albedo, display gamma for normals, dynamic visible-depth normalization, deterministic palette colors for material/object IDs, and neutral-gray signed motion-vector visualization. Denoising is off by default. When `RenderSettings.denoise` is explicitly set to `.appleSVGF`, beauty readback/export is sourced from Apple's MPS SVGF denoiser using packed depth/normal guidance and preserved beauty alpha. `.simpleSpatial` remains available as an internal experimental comparison filter, while the auxiliary outputs remain raw guidance buffers.
+
+For app integrations that already own a Metal presentation path, `RenderSession.encodeNextSample(into:)` and `RenderSession.liveMetalTexture(for:)` expose a GPU-only live viewport path. This keeps progressive render modes, such as Denrim Forge's camera-only Render mode, on the GPU: the app can encode one renderer sample into its frame command buffer, fetch the raw beauty texture without launching hidden renderer work, and composite or blit it into its own viewport before presenting. These textures remain owned by the render session; public callers should treat them as read-only presentation resources rather than mutable render targets. `RenderSession.metalTexture(for:)` remains the synchronous access path for callers that want denoised beauty output resolved before using the texture.
+
+The Metal camera packs perspective and orthographic projection into the same `GPUCamera` argument layout. Perspective cameras place the image plane one unit in front of the origin and use `origin.w == 0`. Orthographic cameras place the image plane at the camera origin, scale it by the requested vertical world-space size and aspect ratio, and use `origin.w == 1` so the shader emits parallel rays from per-pixel plane positions. This lets Forge pass its isometric camera scale directly instead of approximating an orthographic viewport with a distant perspective camera.
+
+The Metal path binds placeholder buffers for optional shader arrays such as texture descriptors, texture pixels, explicit lights, and environment samples when their logical counts are zero. This keeps hardware validation satisfied for kernels that declare those argument slots while preserving zero-count shader branches and public scene behavior.

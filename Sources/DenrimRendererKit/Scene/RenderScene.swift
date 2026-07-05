@@ -118,6 +118,21 @@ public struct RenderScene: Sendable {
         ))
     }
 
+    /// Adds an app-authored quad area light.
+    ///
+    /// RendererKit does not create lights by default. Host applications can use this
+    /// helper to express rectangular area lights without manually creating the
+    /// emissive material and quad mesh.
+    @discardableResult
+    public mutating func addQuadLight(_ light: QuadLight) -> MaterialID {
+        let material = addMaterial(light.material)
+        add(
+            mesh: .quad(light.a, light.b, light.c, light.d),
+            material: material
+        )
+        return material
+    }
+
     /// Creates the built-in Cornell Box reference scene.
     public static func cornellBox() -> RenderScene {
         var scene = RenderScene(

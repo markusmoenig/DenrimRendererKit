@@ -1,13 +1,82 @@
 import Foundation
+import simd
 import XCTest
 @testable import DenrimRendererKit
 
 final class APITests: XCTestCase {
+    func testPerspectiveCameraGeneratesPerspectiveGPUCamera() {
+        let camera = Camera(
+            origin: SIMD3<Float>(0, 0, 3),
+            target: SIMD3<Float>(0, 0, 0),
+            verticalFieldOfViewDegrees: 90
+        )
+
+        let gpu = camera.gpuCamera(width: 200, height: 100)
+
+        XCTAssertEqual(gpu.origin.w, 0, accuracy: 0.0001)
+        XCTAssertEqual(gpu.origin.z, 3, accuracy: 0.0001)
+        XCTAssertEqual(gpu.lowerLeft.z, 2, accuracy: 0.0001)
+        XCTAssertEqual(simd_length(gpu.horizontal.xyz), 4, accuracy: 0.0001)
+        XCTAssertEqual(simd_length(gpu.vertical.xyz), 2, accuracy: 0.0001)
+    }
+
+    func testOrthographicCameraGeneratesOrthographicGPUCamera() {
+        let camera = Camera(
+            origin: SIMD3<Float>(0, 0, 3),
+            target: SIMD3<Float>(0, 0, 2),
+            projection: .orthographic(verticalScale: 6)
+        )
+
+        let gpu = camera.gpuCamera(width: 200, height: 100)
+
+        XCTAssertEqual(gpu.origin.w, 1, accuracy: 0.0001)
+        XCTAssertEqual(gpu.origin.z, 3, accuracy: 0.0001)
+        XCTAssertEqual(gpu.lowerLeft.x, -6, accuracy: 0.0001)
+        XCTAssertEqual(gpu.lowerLeft.y, -3, accuracy: 0.0001)
+        XCTAssertEqual(gpu.lowerLeft.z, 3, accuracy: 0.0001)
+        XCTAssertEqual(simd_length(gpu.horizontal.xyz), 12, accuracy: 0.0001)
+        XCTAssertEqual(simd_length(gpu.vertical.xyz), 6, accuracy: 0.0001)
+    }
+
     func testCornellBoxSceneCompiles() throws {
         let scene = RenderScene.cornellBox()
 
         XCTAssertEqual(scene.materials.count, 4)
         XCTAssertEqual(scene.meshInstances.count, 6)
+    }
+
+    func testEmptyRenderSceneDoesNotCreateDefaultLights() {
+        let scene = RenderScene()
+
+        XCTAssertTrue(scene.materials.isEmpty)
+        XCTAssertTrue(scene.meshInstances.isEmpty)
+    }
+
+    func testQuadLightAPIAddsAppAuthoredEmissiveLight() throws {
+        var scene = RenderScene()
+        scene.addQuadLight(QuadLight(
+            SIMD3<Float>(-1, 2, -1),
+            SIMD3<Float>(1, 2, -1),
+            SIMD3<Float>(1, 2, 1),
+            SIMD3<Float>(-1, 2, 1),
+            color: SIMD3<Float>(1, 0.8, 0.6),
+            intensity: 12
+        ))
+
+        let build = try LinearTriangleAccelerationBackend().build(scene: scene)
+
+        XCTAssertEqual(scene.materials.count, 1)
+        XCTAssertEqual(scene.meshInstances.count, 1)
+        XCTAssertEqual(build.triangles.count, 2)
+        XCTAssertEqual(build.lights.count, 2)
+        XCTAssertTrue(build.lights.allSatisfy { light in
+            light.materialIndex == 0
+        })
+        let material = try XCTUnwrap(build.materials.first)
+        XCTAssertEqual(material.emission.x, 12, accuracy: 0.0001)
+        XCTAssertEqual(material.emission.y, 9.6, accuracy: 0.0001)
+        XCTAssertEqual(material.emission.z, 7.2, accuracy: 0.0001)
+        XCTAssertEqual(material.emission.w, 0, accuracy: 0.0001)
     }
 
     func testMaterialReferenceSceneCompiles() throws {

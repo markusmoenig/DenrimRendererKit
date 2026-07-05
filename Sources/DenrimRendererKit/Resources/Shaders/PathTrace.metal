@@ -932,21 +932,26 @@ static bool projectToScreen(
 ) {
     float3 forward = normalize(cross(camera.vertical.xyz, camera.horizontal.xyz));
     float3 planeCenter = camera.lowerLeft.xyz + camera.horizontal.xyz * 0.5f + camera.vertical.xyz * 0.5f;
-    float3 toPoint = worldPosition - camera.origin.xyz;
-    float denominator = dot(toPoint, forward);
+    float3 planePoint;
+    if (camera.origin.w > 0.5f) {
+        planePoint = worldPosition - forward * dot(worldPosition - planeCenter, forward);
+    } else {
+        float3 toPoint = worldPosition - camera.origin.xyz;
+        float denominator = dot(toPoint, forward);
 
-    if (fabs(denominator) <= 1e-5f) {
-        return false;
+        if (fabs(denominator) <= 1e-5f) {
+            return false;
+        }
+
+        float planeDistance = dot(planeCenter - camera.origin.xyz, forward);
+        float planeT = planeDistance / denominator;
+
+        if (planeT <= 0.0f) {
+            return false;
+        }
+
+        planePoint = camera.origin.xyz + toPoint * planeT;
     }
-
-    float planeDistance = dot(planeCenter - camera.origin.xyz, forward);
-    float planeT = planeDistance / denominator;
-
-    if (planeT <= 0.0f) {
-        return false;
-    }
-
-    float3 planePoint = camera.origin.xyz + toPoint * planeT;
     float3 relative = planePoint - camera.lowerLeft.xyz;
     float u = dot(relative, camera.horizontal.xyz) / max(dot(camera.horizontal.xyz, camera.horizontal.xyz), 1e-5f);
     float v = dot(relative, camera.vertical.xyz) / max(dot(camera.vertical.xyz, camera.vertical.xyz), 1e-5f);
@@ -1746,8 +1751,14 @@ static Ray makeCameraRay(GPUCamera camera, uint width, uint height, uint2 gid, f
     float v = 1.0f - (((float)gid.y + jitterY) / (float)height);
 
     Ray ray;
-    ray.origin = camera.origin.xyz;
-    ray.direction = normalize(camera.lowerLeft.xyz + u * camera.horizontal.xyz + v * camera.vertical.xyz - ray.origin);
+    float3 planePoint = camera.lowerLeft.xyz + u * camera.horizontal.xyz + v * camera.vertical.xyz;
+    if (camera.origin.w > 0.5f) {
+        ray.origin = planePoint;
+        ray.direction = normalize(cross(camera.vertical.xyz, camera.horizontal.xyz));
+    } else {
+        ray.origin = camera.origin.xyz;
+        ray.direction = normalize(planePoint - ray.origin);
+    }
     return ray;
 }
 

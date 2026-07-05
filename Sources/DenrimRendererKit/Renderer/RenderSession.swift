@@ -56,10 +56,10 @@ public final class RenderSession {
     private let previousCamera: GPUCamera
     private let triangleBuffer: MTLBuffer
     private let materialBuffer: MTLBuffer
-    private let textureDescriptorBuffer: MTLBuffer?
-    private let texturePixelBuffer: MTLBuffer?
-    private let lightBuffer: MTLBuffer?
-    private let environmentSampleBuffer: MTLBuffer?
+    private let textureDescriptorBuffer: MTLBuffer
+    private let texturePixelBuffer: MTLBuffer
+    private let lightBuffer: MTLBuffer
+    private let environmentSampleBuffer: MTLBuffer
     private let accelerationNodeBuffer: MTLBuffer?
     private let primitiveIndexBuffer: MTLBuffer?
     private let accumulationTexture: MTLTexture
@@ -237,19 +237,19 @@ public final class RenderSession {
             length: MemoryLayout<GPUMaterial>.stride * compiled.materials.count,
             options: .storageModeShared
         )!
-        self.textureDescriptorBuffer = Self.makeBuffer(
+        self.textureDescriptorBuffer = try Self.makeRequiredShaderBindingBuffer(
             device: device,
             values: compiled.textureDescriptors
         )
-        self.texturePixelBuffer = Self.makeBuffer(
+        self.texturePixelBuffer = try Self.makeRequiredShaderBindingBuffer(
             device: device,
             values: compiled.texturePixels
         )
-        self.lightBuffer = Self.makeBuffer(
+        self.lightBuffer = try Self.makeRequiredShaderBindingBuffer(
             device: device,
             values: compiled.lights
         )
-        self.environmentSampleBuffer = Self.makeBuffer(
+        self.environmentSampleBuffer = try Self.makeRequiredShaderBindingBuffer(
             device: device,
             values: compiled.environmentSamples
         )
@@ -332,8 +332,27 @@ public final class RenderSession {
 
     /// Renders one additional progressive sample.
     public func renderNextSample() throws {
-        guard let commandBuffer = commandQueue.makeCommandBuffer(),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+        let previousSampleCount = sampleCount
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            throw DenrimRendererError.commandBufferFailed("Could not create command buffer.")
+        }
+
+        try encodeNextSample(into: commandBuffer)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        if let error = commandBuffer.error {
+            sampleCount = previousSampleCount
+            throw DenrimRendererError.commandBufferFailed(error.localizedDescription)
+        }
+    }
+
+    /// Encodes one additional progressive sample into an application-owned command buffer.
+    ///
+    /// Use this from live Metal integrations that want renderer work and presentation work ordered
+    /// in the same frame without blocking on `waitUntilCompleted()`.
+    public func encodeNextSample(into commandBuffer: MTLCommandBuffer) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw DenrimRendererError.commandBufferFailed("Could not create command encoder.")
         }
 
@@ -395,13 +414,6 @@ public final class RenderSession {
         encoder.dispatchThreads(grid, threadsPerThreadgroup: threadgroup)
         encoder.endEncoding()
 
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-
-        if let error = commandBuffer.error {
-            throw DenrimRendererError.commandBufferFailed(error.localizedDescription)
-        }
-
         sampleCount += 1
         denoisedBeautyIsCurrent = false
     }
@@ -438,6 +450,25 @@ public final class RenderSession {
         try TextureReadback.floatPixels(from: texture(for: output), device: device)
     }
 
+    /// Returns the current Metal texture for a render output.
+    ///
+    /// Host applications can use this for live progressive display without forcing a CPU readback.
+    /// For `.beauty`, this returns the denoised texture when denoising is enabled and current;
+    /// otherwise it returns the accumulated beauty texture.
+    public func metalTexture(for output: RenderOutput = .beauty) throws -> MTLTexture {
+        try texture(for: output)
+    }
+
+    /// Returns the current Metal texture without encoding any additional renderer work.
+    ///
+    /// Use this immediately after `encodeNextSample(into:)` when the caller owns a frame command
+    /// buffer and wants to sample the renderer output later in that same command buffer. For
+    /// `.beauty`, this always returns the raw accumulated beauty texture instead of launching a
+    /// denoise pass on a separate command buffer.
+    public func liveMetalTexture(for output: RenderOutput = .beauty) -> MTLTexture {
+        rawTexture(for: output)
+    }
+
     func debugAOVPixels() throws -> (
         depth: [RenderOutputPixel],
         normal: [RenderOutputPixel],
@@ -459,6 +490,25 @@ public final class RenderSession {
             } else {
                 return accumulationTexture
             }
+        case .depth:
+            return depthTexture
+        case .normal:
+            return normalTexture
+        case .albedo:
+            return albedoTexture
+        case .materialID:
+            return materialIDTexture
+        case .objectID:
+            return objectIDTexture
+        case .motionVector:
+            return motionVectorTexture
+        }
+    }
+
+    private func rawTexture(for output: RenderOutput) -> MTLTexture {
+        switch output {
+        case .beauty:
+            return accumulationTexture
         case .depth:
             return depthTexture
         case .normal:
@@ -546,5 +596,21 @@ public final class RenderSession {
                 options: .storageModeShared
             )
         }
+    }
+
+    private static func makeRequiredShaderBindingBuffer<T>(
+        device: MTLDevice,
+        values: [T]
+    ) throws -> MTLBuffer {
+        if let buffer = makeBuffer(device: device, values: values) {
+            return buffer
+        }
+        guard let buffer = device.makeBuffer(
+            length: max(MemoryLayout<T>.stride, 1),
+            options: .storageModeShared
+        ) else {
+            throw DenrimRendererError.commandBufferFailed("Could not create empty shader binding buffer.")
+        }
+        return buffer
     }
 }

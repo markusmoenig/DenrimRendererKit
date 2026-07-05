@@ -46,12 +46,14 @@ Initial public types:
 * `RenderOutputPixel`
 * `RenderScene`
 * `Environment`
+* `QuadLight`
 * `Camera`
 * `Transform`
 * `SceneScript`
 * `SceneAssetCache`
 * `Ray`
 * `SurfaceHit`
+* `CameraProjection`
 * `Mesh`
 * `MeshInstance`
 * `MeshLoadingError`
@@ -94,6 +96,22 @@ let scene = RenderScene.materialVariantReference(mesh: mesh)
 OBJ and PLY import are intentionally the first small import paths. The OBJ loader uses byte-scanned parsing for large text assets. Imported vertex normals and UVs are preserved when meshes are converted to GPU triangles. The PLY loader supports ASCII and binary little-endian meshes with vertex positions, optional normals / UVs, and polygon face lists. glTF/GLB import is future work. Common benchmark assets such as the Stanford Dragon should be supplied by the caller or test environment rather than vendored in the package unless their license allows redistribution in Denrim products.
 
 Scene compilation now builds an internal instance acceleration model with local mesh records, transformed instance records, and a top-level instance BVH. The current compute backend still materializes transformed triangles for its flat GPU BVH, while future acceleration backends can preserve transforms for TLAS / BLAS style instancing without changing this public API.
+
+## Cameras
+
+`Camera` supports perspective and orthographic projection. Perspective is the default and uses `verticalFieldOfViewDegrees`. Orthographic projection uses a vertical world-space scale and keeps ray direction constant across the image, which is useful for Denrim Forge's isometric Render mode:
+
+```swift
+scene.camera = Camera(
+    origin: SIMD3<Float>(0, 4, 6),
+    target: SIMD3<Float>(0, 0, 0),
+    up: SIMD3<Float>(0, 1, 0),
+    verticalFieldOfViewDegrees: 55,
+    projection: .orthographic(verticalScale: 5.0)
+)
+```
+
+For viewport integrations, build `origin`, `target`, and `up` from the application's actual camera basis rather than reconstructing yaw and pitch through a different convention. `CameraProjection.orthographic(verticalScale:)` maps to the same vertical scale convention used by Forge's old render viewport: horizontal scale is derived from render width divided by render height.
 
 ## Materials and Textures
 
@@ -175,6 +193,8 @@ let thumbnailPath = preview?.thumbnailPath
 
 Preset identifiers are stable strings such as `matte.clay`, `metal.brushed-aluminum`, `coating.iridescent-amber`, `glass.thin-pane`, `ceramic.white`, and `emission.warm-panel`. Lookup is case-insensitive and treats underscores like hyphens. `BuiltInMaterialLibrary.previews` exposes the same ordered identifiers with display name, category, description, and repository-relative generated thumbnail path for material-browser UIs.
 
+Denrim product integrations should prefer these presets as material-family baselines rather than recreating simple one-off materials in each app. A product can tint the preset by replacing `baseColor` and can override simple user-facing controls such as roughness, while leaving renderer-owned lobe weights for metallic, transmission, subsurface, clearcoat, and emission behavior in the preset. Denrim Forge's Render-mode bridge follows this pattern: Matte uses `matte.clay`, Plastic uses `plastic.gloss-white`, Metal uses `metal.brushed-aluminum`, Glass uses `glass.clear`, Wax uses `subsurface.wax-cream`, and Emission uses `emission.warm-panel`, with Forge color and roughness layered on top.
+
 Future procedural material APIs should mirror SceneScript procedural commands. Denrim apps should be able to build typed procedural values in Swift, bind them to Standard Surface parameters, and get the same renderer behavior as script-authored scenes:
 
 ```swift
@@ -211,11 +231,36 @@ Outputs can be read back as floating-point RGBA pixels:
 let pixels = try session.pixels(for: .albedo)
 ```
 
+Applications that already render with Metal can display outputs directly without CPU readback:
+
+```swift
+try session.renderNextSample()
+let liveTexture = try session.metalTexture(for: .beauty)
+```
+
+`metalTexture(for:)` returns the current Metal texture for the requested `RenderOutput`; for `.beauty`, it resolves denoising first when denoising is enabled, otherwise it returns the raw accumulated beauty texture. The returned texture is owned by the render session and should be treated as read-only by host applications.
+
+For app viewports that already own a frame command buffer, encode the sample into that command buffer before drawing the texture:
+
+```swift
+let commandBuffer = commandQueue.makeCommandBuffer()!
+try session.encodeNextSample(into: commandBuffer)
+let liveTexture = session.liveMetalTexture(for: .beauty)
+
+// Encode the app's full-screen draw or compositing pass that samples liveTexture.
+commandBuffer.present(drawable)
+commandBuffer.commit()
+```
+
+`encodeNextSample(into:)` is nonblocking. It increments the session sample count after encoding the compute pass and leaves command-buffer commit, presentation, and error handling to the host application. `liveMetalTexture(for:)` never encodes additional work, so it is safe to call before the app commits the command buffer that contains the sample pass. For `.beauty`, it returns the raw accumulated beauty texture. Use `renderNextSample()` and `metalTexture(for:)` for simple synchronous tools, tests, and CLIs; use `encodeNextSample(into:)` with `liveMetalTexture(for:)` for live viewport loops where the renderer and presentation work should remain ordered on the GPU.
+
 Outputs can also be exported as PNG files:
 
 ```swift
 try session.writePNG(output: .normal, to: normalURL)
 ```
+
+Use `pixels(for:)` for tests, analysis, custom CPU encoders, and exact output inspection. Use `metalTexture(for:)` for synchronous GPU access that may resolve denoised beauty output, and `liveMetalTexture(for:)` for app render loops that need to sample progressive textures in an already-open frame.
 
 Motion vectors use `RenderSettings.previousCamera` and store previous-screen minus current-screen movement in pixels in the red and green channels. If no previous camera is provided, the current scene camera is used and motion resolves to zero.
 
@@ -257,6 +302,21 @@ let unclampedReference = RenderSettings(
 For an explicit denoiser comparison pass, set `denoise: .appleSVGF` or `denoise: .simpleSpatial`.
 
 Fully transparent material surfaces act as camera-ray cutouts, allowing primary rays to continue to the next visible surface. Transmissive material surfaces sample dielectric reflection/refraction with roughness, measured exit absorption for solid visible paths and direct-light shadows, thin-walled straight-through transmission for sheet materials, and shadow transparency. Semi-transparent blending, nested dielectric priority, caustics behavior, and layered material behavior are future material transport work.
+
+RendererKit does not create scene lights by default. Host applications are responsible for authoring lighting, either by adding emissive materials to ordinary meshes or by using the quad-light convenience API:
+
+```swift
+scene.addQuadLight(QuadLight(
+    SIMD3<Float>(-1, 3, -1),
+    SIMD3<Float>(1, 3, -1),
+    SIMD3<Float>(1, 3, 1),
+    SIMD3<Float>(-1, 3, 1),
+    color: SIMD3<Float>(1, 0.92, 0.78),
+    intensity: 20
+))
+```
+
+`QuadLight` is still represented as an emissive quad internally, so scene compilation includes its two triangles in direct-light sampling. This API is a host-authored lighting primitive, not a default render setup.
 
 PNG export is visualization-oriented. Beauty output uses an ACES-fitted filmic tonemap with alpha preservation, albedo output is gamma encoded with material opacity alpha preservation, normal output is gamma encoded for display, depth output is normalized across visible primary-hit depth values, material/object ID outputs use deterministic palette colors, and motion vectors are visualized around neutral gray. When denoising is enabled, `RenderOutput.beauty` readback and PNG export return the denoised beauty texture after at least one rendered sample; the guiding AOV outputs remain raw. Use `pixels(for:)` when exact floating-point AOV values are needed.
 

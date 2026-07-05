@@ -41,6 +41,25 @@ final class RenderSessionTests: XCTestCase {
         }
     }
 
+    func testAutomaticSessionRendersWithEmptyOptionalShaderResources() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer(device: device)
+        let session = try renderer.makeSession(
+            scene: .cornellBox(),
+            settings: RenderSettings(width: 16, height: 16, maxBounces: 1)
+        )
+
+        try session.renderNextSample()
+
+        XCTAssertEqual(session.sampleCount, 1)
+        let texture = session.liveMetalTexture(for: .beauty)
+        XCTAssertEqual(texture.width, 16)
+        XCTAssertEqual(texture.height, 16)
+    }
+
     func testForcedFlatBVHSessionPreparesFallbackAccelerationBuffers() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw XCTSkip("No Metal device available.")
@@ -80,6 +99,65 @@ final class RenderSessionTests: XCTestCase {
         let pixels = try session.pixels(for: .beauty)
 
         XCTAssertEqual(session.sampleCount, 1)
+        XCTAssertTrue(pixels.contains { pixel in
+            pixel.r.isFinite && pixel.g.isFinite && pixel.b.isFinite
+                && (pixel.r > 0 || pixel.g > 0 || pixel.b > 0)
+            })
+    }
+
+    func testMetalTextureOutputExposesLiveAccumulationTexture() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer(device: device)
+        let session = try renderer.makeSession(
+            scene: .cornellBox(),
+            settings: RenderSettings(width: 18, height: 14, maxBounces: 1),
+            accelerationMode: .flatBVH
+        )
+
+        try session.renderNextSample()
+        let texture = try session.metalTexture(for: .beauty)
+        let liveTexture = session.liveMetalTexture(for: .beauty)
+
+        XCTAssertEqual(session.sampleCount, 1)
+        XCTAssertEqual(texture.width, 18)
+        XCTAssertEqual(texture.height, 14)
+        XCTAssertEqual(texture.pixelFormat, .rgba32Float)
+        XCTAssertEqual(liveTexture.width, 18)
+        XCTAssertEqual(liveTexture.height, 14)
+        XCTAssertEqual(liveTexture.pixelFormat, .rgba32Float)
+    }
+
+    func testEncodeNextSampleUsesApplicationCommandBuffer() throws {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let commandQueue = device.makeCommandQueue(),
+              let commandBuffer = commandQueue.makeCommandBuffer()
+        else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer(device: device)
+        let session = try renderer.makeSession(
+            scene: .cornellBox(),
+            settings: RenderSettings(width: 18, height: 14, maxBounces: 1),
+            accelerationMode: .flatBVH
+        )
+
+        try session.encodeNextSample(into: commandBuffer)
+        let liveTexture = session.liveMetalTexture(for: .beauty)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        if let error = commandBuffer.error {
+            XCTFail("Command buffer failed: \(error.localizedDescription)")
+        }
+        XCTAssertEqual(session.sampleCount, 1)
+        XCTAssertEqual(liveTexture.width, 18)
+        XCTAssertEqual(liveTexture.height, 14)
+
+        let pixels = try session.pixels(for: .beauty)
         XCTAssertTrue(pixels.contains { pixel in
             pixel.r.isFinite && pixel.g.isFinite && pixel.b.isFinite
                 && (pixel.r > 0 || pixel.g > 0 || pixel.b > 0)
