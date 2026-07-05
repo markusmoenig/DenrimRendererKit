@@ -62,6 +62,43 @@ struct GPUEnvironmentSample {
     var distribution: SIMD2<Float>
 }
 
+struct GPUVolumeDescriptor {
+    var worldBoundsMin: SIMD4<Float>
+    var worldBoundsMax: SIMD4<Float>
+    var localBoundsMin: SIMD4<Float>
+    var localBoundsMax: SIMD4<Float>
+    var dimensions: SIMD4<UInt32>
+    var metadata: SIMD4<UInt32>
+    var worldToLocal0: SIMD4<Float>
+    var worldToLocal1: SIMD4<Float>
+    var worldToLocal2: SIMD4<Float>
+    var worldToLocal3: SIMD4<Float>
+    var normalTransform0: SIMD4<Float>
+    var normalTransform1: SIMD4<Float>
+    var normalTransform2: SIMD4<Float>
+    var normalTransform3: SIMD4<Float>
+}
+
+struct GPUVolumeSample {
+    var distance: Float
+    var materialA: UInt32
+    var materialB: UInt32
+    var materialBlend: Float
+    var baseColorOpacity: SIMD4<Float>
+    var emissionTransmission: SIMD4<Float>
+    var surface: SIMD4<Float>
+    var materialFieldFlags: SIMD4<UInt32>
+}
+
+struct GPUVolumeBrickDescriptor {
+    var worldBoundsMin: SIMD4<Float>
+    var worldBoundsMax: SIMD4<Float>
+    var localBoundsMin: SIMD4<Float>
+    var localBoundsMax: SIMD4<Float>
+    var gridOriginAndVolume: SIMD4<UInt32>
+    var dimensionsAndSampleOffset: SIMD4<UInt32>
+}
+
 struct GPUAccelerationNode: Equatable {
     var boundsMin: SIMD4<Float>
     var boundsMax: SIMD4<Float>
@@ -72,6 +109,7 @@ struct GPURenderConstants {
     var width: UInt32
     var height: UInt32
     var triangleCount: UInt32
+    var volumeCount: UInt32
     var materialCount: UInt32
     var sampleIndex: UInt32
     var maxBounces: UInt32
@@ -85,7 +123,10 @@ struct GPURenderConstants {
     var environmentRotationY: Float
     var environmentMaxRadiance: Float
     var sampleRadianceClamp: Float
+    var volumeSampleCount: UInt32
     var padding1: UInt32
+    var volumeBrickCount: UInt32
+    var volumeBrickSampleCount: UInt32
 }
 
 struct GPURayTracingInstance {

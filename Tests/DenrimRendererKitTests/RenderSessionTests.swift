@@ -83,6 +83,137 @@ final class RenderSessionTests: XCTestCase {
         XCTAssertFalse(session.metalRayTracingDebugInfo.usesProductionHardwareTraversal)
     }
 
+    func testVolumeOnlySceneRendersOnFlatPath() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        var scene = RenderScene(
+            camera: Camera(
+                origin: SIMD3<Float>(0, 0, 3),
+                target: SIMD3<Float>(0, 0, 0),
+                projection: .orthographic(verticalScale: 2.4)
+            )
+        )
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.85, 0.18, 0.12), roughness: 0.7))
+        scene.add(volume: DistanceVolume.sphere(resolution: 20, radius: 0.55), material: material)
+
+        let renderer = try DenrimRenderer(device: device)
+        let session = try renderer.makeSession(
+            scene: scene,
+            settings: RenderSettings(width: 20, height: 20, maxBounces: 1),
+            accelerationMode: .automatic
+        )
+
+        XCTAssertEqual(session.accelerationInfo.activeMode, RenderAccelerationMode.flatBVH)
+        XCTAssertFalse(session.accelerationInfo.hasFlatBVH)
+
+        try session.renderNextSample()
+        let beauty = try session.pixels(for: RenderOutput.beauty)
+        let albedo = try session.pixels(for: RenderOutput.albedo)
+        let normal = try session.pixels(for: RenderOutput.normal)
+
+        XCTAssertEqual(session.sampleCount, 1)
+        let hasBeauty = beauty.contains { pixel in
+            pixel.r.isFinite && pixel.g.isFinite && pixel.b.isFinite
+                && (pixel.r > 0 || pixel.g > 0 || pixel.b > 0)
+        }
+        let hasVolumeAlbedo = albedo.contains { pixel in
+            pixel.r > 0.5 && pixel.g < 0.3 && pixel.b < 0.25 && pixel.a > 0.9
+        }
+        let hasVolumeNormal = normal.contains { pixel in
+            pixel.a > 0.9
+                && (abs(pixel.r - 0.5) > 0.01
+                    || abs(pixel.g - 0.5) > 0.01
+                    || abs(pixel.b - 0.5) > 0.01)
+        }
+        XCTAssertTrue(hasBeauty)
+        XCTAssertTrue(hasVolumeAlbedo)
+        XCTAssertTrue(hasVolumeNormal)
+    }
+
+    func testVolumeMaterialFieldsOverrideAlbedoAOV() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        var scene = RenderScene(
+            camera: Camera(
+                origin: SIMD3<Float>(0, 0, 3),
+                target: SIMD3<Float>(0, 0, 0),
+                projection: .orthographic(verticalScale: 2.4)
+            )
+        )
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.05, 0.05), roughness: 0.7))
+        var volume = DistanceVolume.sphere(resolution: 20, radius: 0.55)
+        volume.materialSamples = [DistanceVolumeMaterialSample](
+            repeating: DistanceVolumeMaterialSample(
+                materialA: material,
+                fields: DistanceVolumeMaterialFields(
+                    baseColor: SIMD3<Float>(0.08, 0.82, 0.24),
+                    opacity: 0.64
+                )
+            ),
+            count: volume.distances.count
+        )
+        scene.add(volume: volume, material: material)
+
+        let renderer = try DenrimRenderer(device: device)
+        let session = try renderer.makeSession(
+            scene: scene,
+            settings: RenderSettings(width: 20, height: 20, maxBounces: 1),
+            accelerationMode: .automatic
+        )
+
+        try session.renderNextSample()
+        let albedo = try session.pixels(for: RenderOutput.albedo)
+
+        XCTAssertTrue(albedo.contains { pixel in
+            pixel.r < 0.2 && pixel.g > 0.7 && pixel.b > 0.15 && pixel.b < 0.35 && pixel.a > 0.55 && pixel.a < 0.75
+        })
+    }
+
+    func testSparseVolumeOnlySceneRendersThroughBrickPathOnFlatPath() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        var scene = RenderScene(
+            camera: Camera(
+                origin: SIMD3<Float>(0, 0, 3),
+                target: SIMD3<Float>(0, 0, 0),
+                projection: .orthographic(verticalScale: 2.4)
+            )
+        )
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.2, 0.65, 0.9), roughness: 0.55))
+        let model = SDFModel(primitives: [
+            SDFPrimitive(shape: .sphere(radius: 0.55), material: material)
+        ])
+        let sparse = try DistanceVolumeBuilder.buildSparse(
+            model: model,
+            settings: SparseDistanceVolumeBuildSettings(resolution: 20, brickSize: 5, narrowBand: 0.3)
+        )
+        scene.add(sparseVolume: sparse, material: material)
+
+        let renderer = try DenrimRenderer(device: device)
+        let session = try renderer.makeSession(
+            scene: scene,
+            settings: RenderSettings(width: 20, height: 20, maxBounces: 1),
+            accelerationMode: .automatic
+        )
+
+        XCTAssertEqual(session.accelerationInfo.activeMode, RenderAccelerationMode.flatBVH)
+        XCTAssertFalse(session.accelerationInfo.hasFlatBVH)
+
+        try session.renderNextSample()
+        let albedo = try session.pixels(for: RenderOutput.albedo)
+
+        XCTAssertEqual(session.sampleCount, 1)
+        XCTAssertTrue(albedo.contains { pixel in
+            pixel.r < 0.35 && pixel.g > 0.45 && pixel.b > 0.65 && pixel.a > 0.9
+        })
+    }
+
     func testDeepFlatBVHRenderUsesEnergyPreservingTerminationPath() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw XCTSkip("No Metal device available.")

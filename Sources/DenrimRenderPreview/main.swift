@@ -170,6 +170,10 @@ case "script", "scene-script", "scenescript":
     scene = try SceneScript.parse(contentsOf: URL(fileURLWithPath: assetPath))
 case "transparent-materials", "transparent-material-reference", "transparency":
     scene = .transparentMaterialReference()
+case "distance-volumes", "distance-volume-reference", "volumes", "sdf":
+    scene = .distanceVolumeReference()
+case "sparse-distance-volumes", "sparse-distance-volume-reference", "sparse-volumes", "sparse-sdf", "sdf-bricks":
+    scene = .sparseDistanceVolumeReference()
 case "cornell", "cornell-box":
     scene = .cornellBox()
 default:

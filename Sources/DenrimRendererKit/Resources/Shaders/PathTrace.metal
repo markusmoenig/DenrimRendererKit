@@ -70,10 +70,48 @@ struct GPUEnvironmentSample {
     float2 distribution;
 };
 
+struct GPUVolumeDescriptor {
+    float4 worldBoundsMin;
+    float4 worldBoundsMax;
+    float4 localBoundsMin;
+    float4 localBoundsMax;
+    uint4 dimensions;
+    uint4 metadata;
+    float4 worldToLocal0;
+    float4 worldToLocal1;
+    float4 worldToLocal2;
+    float4 worldToLocal3;
+    float4 normalTransform0;
+    float4 normalTransform1;
+    float4 normalTransform2;
+    float4 normalTransform3;
+};
+
+struct GPUVolumeSample {
+    float distance;
+    uint materialA;
+    uint materialB;
+    float materialBlend;
+    float4 baseColorOpacity;
+    float4 emissionTransmission;
+    float4 surface;
+    uint4 materialFieldFlags;
+};
+
+struct GPUVolumeBrickDescriptor {
+    float4 worldBoundsMin;
+    float4 worldBoundsMax;
+    float4 localBoundsMin;
+    float4 localBoundsMax;
+    uint4 gridOriginAndVolume;
+    uint4 dimensionsAndSampleOffset;
+};
+
 struct GPURenderConstants {
     uint width;
     uint height;
     uint triangleCount;
+    uint volumeCount;
     uint materialCount;
     uint sampleIndex;
     uint maxBounces;
@@ -87,7 +125,10 @@ struct GPURenderConstants {
     float environmentRotationY;
     float environmentMaxRadiance;
     float sampleRadianceClamp;
+    uint volumeSampleCount;
     uint padding1;
+    uint volumeBrickCount;
+    uint volumeBrickSampleCount;
 };
 
 struct GPURayTracingInstance {
@@ -112,10 +153,23 @@ struct Hit {
     float3 tangent;
     float3 bitangent;
     uint materialID;
+    uint materialID2;
+    float materialBlend;
+    float4 volumeBaseColorOpacity;
+    float4 volumeEmissionTransmission;
+    float4 volumeSurface;
+    uint volumeMaterialFieldFlags;
     uint objectID;
     uint primitiveID;
     bool frontFacing;
 };
+
+constant uint volumeMaterialFieldBaseColor = 1u << 0;
+constant uint volumeMaterialFieldOpacity = 1u << 1;
+constant uint volumeMaterialFieldEmission = 1u << 2;
+constant uint volumeMaterialFieldRoughness = 1u << 3;
+constant uint volumeMaterialFieldMetallic = 1u << 4;
+constant uint volumeMaterialFieldTransmission = 1u << 5;
 
 static uint hash(uint value) {
     value ^= value >> 16;
@@ -394,6 +448,66 @@ static bool materialHasVolumeScattering(GPUMaterial material) {
     return materialTransmission(material) > 0.0f
         && !materialThinWalled(material)
         && materialVolumeScattering(material) > 0.0f;
+}
+
+static GPUMaterial blendMaterials(GPUMaterial a, GPUMaterial b, float blend) {
+    float t = clamp(blend, 0.0f, 1.0f);
+    a.baseColor = mix(a.baseColor, b.baseColor, t);
+    a.emission = mix(a.emission, b.emission, t);
+    a.parameters = mix(a.parameters, b.parameters, t);
+    a.parameters2 = mix(a.parameters2, b.parameters2, t);
+    a.specularColor = mix(a.specularColor, b.specularColor, t);
+    a.sheenColor = mix(a.sheenColor, b.sheenColor, t);
+    a.transmissionColor = mix(a.transmissionColor, b.transmissionColor, t);
+    a.parameters3 = mix(a.parameters3, b.parameters3, t);
+    a.clearcoatColor = mix(a.clearcoatColor, b.clearcoatColor, t);
+    a.clearcoatAttenuation = mix(a.clearcoatAttenuation, b.clearcoatAttenuation, t);
+    a.transmissionAbsorption = mix(a.transmissionAbsorption, b.transmissionAbsorption, t);
+    a.thinFilm = mix(a.thinFilm, b.thinFilm, t);
+    a.subsurfaceColor = mix(a.subsurfaceColor, b.subsurfaceColor, t);
+    a.subsurfaceRadius = mix(a.subsurfaceRadius, b.subsurfaceRadius, t);
+    a.subsurfaceParameters = mix(a.subsurfaceParameters, b.subsurfaceParameters, t);
+    a.volumeScattering = mix(a.volumeScattering, b.volumeScattering, t);
+    a.volumeParameters = mix(a.volumeParameters, b.volumeParameters, t);
+    return a;
+}
+
+static GPUMaterial applyVolumeMaterialFields(GPUMaterial material, Hit hit) {
+    uint flags = hit.volumeMaterialFieldFlags;
+    if ((flags & volumeMaterialFieldBaseColor) != 0u) {
+        material.baseColor.xyz = max(hit.volumeBaseColorOpacity.xyz, float3(0.0f));
+    }
+    if ((flags & volumeMaterialFieldOpacity) != 0u) {
+        material.baseColor.w = clamp(hit.volumeBaseColorOpacity.w, 0.0f, 1.0f);
+    }
+    if ((flags & volumeMaterialFieldEmission) != 0u) {
+        material.emission.xyz = max(hit.volumeEmissionTransmission.xyz, float3(0.0f));
+    }
+    if ((flags & volumeMaterialFieldTransmission) != 0u) {
+        material.emission.w = clamp(hit.volumeEmissionTransmission.w, 0.0f, 1.0f);
+    }
+    if ((flags & volumeMaterialFieldRoughness) != 0u) {
+        material.parameters.x = clamp(hit.volumeSurface.x, 0.02f, 1.0f);
+    }
+    if ((flags & volumeMaterialFieldMetallic) != 0u) {
+        material.parameters.y = clamp(hit.volumeSurface.y, 0.0f, 1.0f);
+    }
+    return material;
+}
+
+static GPUMaterial materialForHit(
+    Hit hit,
+    constant GPUMaterial *materials,
+    uint materialCount
+) {
+    uint materialA = min(hit.materialID, materialCount - 1u);
+    GPUMaterial material = materials[materialA];
+    if (hit.materialBlend > 0.0f) {
+        uint materialB = min(hit.materialID2, materialCount - 1u);
+        material = blendMaterials(material, materials[materialB], hit.materialBlend);
+    }
+
+    return applyVolumeMaterialFields(material, hit);
 }
 
 static float3 materialVolumeSigmaS(GPUMaterial material) {
@@ -1122,6 +1236,24 @@ static bool intersectBounds(Ray ray, constant GPUAccelerationNode &node, float c
     return tNear <= tFar;
 }
 
+static bool intersectAABB(
+    Ray ray,
+    float3 boundsMin,
+    float3 boundsMax,
+    float closestT,
+    thread float &tNear,
+    thread float &tFar
+) {
+    float3 invDirection = 1.0f / ray.direction;
+    float3 t0 = (boundsMin - ray.origin) * invDirection;
+    float3 t1 = (boundsMax - ray.origin) * invDirection;
+    float3 tNear3 = min(t0, t1);
+    float3 tFar3 = max(t0, t1);
+    tNear = max(max(tNear3.x, tNear3.y), max(tNear3.z, 0.0005f));
+    tFar = min(min(tFar3.x, tFar3.y), min(tFar3.z, closestT));
+    return tNear <= tFar;
+}
+
 static Hit emptyHit() {
     Hit closest;
     closest.hit = false;
@@ -1132,9 +1264,547 @@ static Hit emptyHit() {
     closest.tangent = float3(1, 0, 0);
     closest.bitangent = float3(0, 0, 1);
     closest.materialID = 0;
+    closest.materialID2 = 0;
+    closest.materialBlend = 0.0f;
+    closest.volumeBaseColorOpacity = float4(0);
+    closest.volumeEmissionTransmission = float4(0);
+    closest.volumeSurface = float4(0);
+    closest.volumeMaterialFieldFlags = 0u;
     closest.objectID = 0;
     closest.primitiveID = 0;
     closest.frontFacing = true;
+    return closest;
+}
+
+static float4x4 matrixFromColumns(float4 c0, float4 c1, float4 c2, float4 c3) {
+    return float4x4(c0, c1, c2, c3);
+}
+
+static float sampleVolumeDistance(
+    constant GPUVolumeDescriptor &volume,
+    constant GPUVolumeSample *volumeSamples,
+    uint volumeSampleCount,
+    float3 localPosition
+) {
+    uint3 dimensions = uint3(volume.dimensions.xyz);
+    uint sampleOffset = volume.metadata.x;
+    uint sampleCount = dimensions.x * dimensions.y * dimensions.z;
+    if (sampleOffset >= volumeSampleCount || sampleOffset + sampleCount > volumeSampleCount) {
+        return INFINITY;
+    }
+
+    float3 localMin = volume.localBoundsMin.xyz;
+    float3 localMax = volume.localBoundsMax.xyz;
+    float3 extent = max(localMax - localMin, float3(1e-6f));
+    float3 uvw = clamp((localPosition - localMin) / extent, float3(0.0f), float3(1.0f));
+    float3 grid = uvw * float3(dimensions - uint3(1));
+    uint3 base = uint3(floor(grid));
+    uint3 next = min(base + uint3(1), dimensions - uint3(1));
+    float3 fraction = grid - float3(base);
+
+    uint strideY = dimensions.x;
+    uint strideZ = dimensions.x * dimensions.y;
+    uint i000 = sampleOffset + base.x + base.y * strideY + base.z * strideZ;
+    uint i100 = sampleOffset + next.x + base.y * strideY + base.z * strideZ;
+    uint i010 = sampleOffset + base.x + next.y * strideY + base.z * strideZ;
+    uint i110 = sampleOffset + next.x + next.y * strideY + base.z * strideZ;
+    uint i001 = sampleOffset + base.x + base.y * strideY + next.z * strideZ;
+    uint i101 = sampleOffset + next.x + base.y * strideY + next.z * strideZ;
+    uint i011 = sampleOffset + base.x + next.y * strideY + next.z * strideZ;
+    uint i111 = sampleOffset + next.x + next.y * strideY + next.z * strideZ;
+
+    float c00 = mix(volumeSamples[i000].distance, volumeSamples[i100].distance, fraction.x);
+    float c10 = mix(volumeSamples[i010].distance, volumeSamples[i110].distance, fraction.x);
+    float c01 = mix(volumeSamples[i001].distance, volumeSamples[i101].distance, fraction.x);
+    float c11 = mix(volumeSamples[i011].distance, volumeSamples[i111].distance, fraction.x);
+    float c0 = mix(c00, c10, fraction.y);
+    float c1 = mix(c01, c11, fraction.y);
+    return mix(c0, c1, fraction.z);
+}
+
+static GPUVolumeSample sampleVolumeMaterial(
+    constant GPUVolumeDescriptor &volume,
+    constant GPUVolumeSample *volumeSamples,
+    uint volumeSampleCount,
+    float3 localPosition
+) {
+    uint3 dimensions = uint3(volume.dimensions.xyz);
+    uint sampleOffset = volume.metadata.x;
+    uint sampleCount = dimensions.x * dimensions.y * dimensions.z;
+    if (sampleOffset >= volumeSampleCount || sampleOffset + sampleCount > volumeSampleCount) {
+        GPUVolumeSample fallback;
+        fallback.distance = INFINITY;
+        fallback.materialA = volume.dimensions.w;
+        fallback.materialB = volume.dimensions.w;
+        fallback.materialBlend = 0.0f;
+        fallback.baseColorOpacity = float4(0);
+        fallback.emissionTransmission = float4(0);
+        fallback.surface = float4(0);
+        fallback.materialFieldFlags = uint4(0);
+        return fallback;
+    }
+
+    float3 extent = max(volume.localBoundsMax.xyz - volume.localBoundsMin.xyz, float3(1e-6f));
+    float3 uvw = clamp((localPosition - volume.localBoundsMin.xyz) / extent, float3(0.0f), float3(1.0f));
+    uint3 nearest = min(uint3(round(uvw * float3(dimensions - uint3(1)))), dimensions - uint3(1));
+    uint index = sampleOffset + nearest.x + nearest.y * dimensions.x + nearest.z * dimensions.x * dimensions.y;
+    return volumeSamples[index];
+}
+
+static float3 volumeNormal(
+    constant GPUVolumeDescriptor &volume,
+    constant GPUVolumeSample *volumeSamples,
+    uint volumeSampleCount,
+    float3 localPosition
+) {
+    float3 extent = max(volume.localBoundsMax.xyz - volume.localBoundsMin.xyz, float3(1e-6f));
+    float3 spacing = extent / max(float3(volume.dimensions.xyz) - float3(1.0f), float3(1.0f));
+    float dx = sampleVolumeDistance(volume, volumeSamples, volumeSampleCount, localPosition + float3(spacing.x, 0, 0))
+        - sampleVolumeDistance(volume, volumeSamples, volumeSampleCount, localPosition - float3(spacing.x, 0, 0));
+    float dy = sampleVolumeDistance(volume, volumeSamples, volumeSampleCount, localPosition + float3(0, spacing.y, 0))
+        - sampleVolumeDistance(volume, volumeSamples, volumeSampleCount, localPosition - float3(0, spacing.y, 0));
+    float dz = sampleVolumeDistance(volume, volumeSamples, volumeSampleCount, localPosition + float3(0, 0, spacing.z))
+        - sampleVolumeDistance(volume, volumeSamples, volumeSampleCount, localPosition - float3(0, 0, spacing.z));
+    float3 localNormal = float3(dx, dy, dz);
+    if (dot(localNormal, localNormal) <= 1e-10f) {
+        localNormal = float3(0, 1, 0);
+    }
+
+    float4x4 normalTransform = matrixFromColumns(
+        volume.normalTransform0,
+        volume.normalTransform1,
+        volume.normalTransform2,
+        volume.normalTransform3
+    );
+    return normalize((normalTransform * float4(normalize(localNormal), 0.0f)).xyz);
+}
+
+static float sampleVolumeBrickDistance(
+    constant GPUVolumeDescriptor &volume,
+    constant GPUVolumeBrickDescriptor &brick,
+    constant GPUVolumeSample *brickSamples,
+    uint brickSampleCount,
+    float3 localPosition
+) {
+    uint3 dimensions = uint3(brick.dimensionsAndSampleOffset.xyz);
+    uint sampleOffset = brick.dimensionsAndSampleOffset.w;
+    uint sampleCount = dimensions.x * dimensions.y * dimensions.z;
+    if (dimensions.x < 2u || dimensions.y < 2u || dimensions.z < 2u
+        || sampleOffset >= brickSampleCount
+        || sampleOffset + sampleCount > brickSampleCount) {
+        return INFINITY;
+    }
+
+    float3 volumeExtent = max(volume.localBoundsMax.xyz - volume.localBoundsMin.xyz, float3(1e-6f));
+    float3 volumeDenominator = max(float3(volume.dimensions.xyz) - float3(1.0f), float3(1.0f));
+    float3 sampleMin = volume.localBoundsMin.xyz
+        + volumeExtent * (float3(brick.gridOriginAndVolume.xyz) / volumeDenominator);
+    float3 sampleMax = volume.localBoundsMin.xyz
+        + volumeExtent * ((float3(brick.gridOriginAndVolume.xyz) + float3(dimensions - uint3(1))) / volumeDenominator);
+    float3 extent = max(sampleMax - sampleMin, float3(1e-6f));
+    float3 uvw = clamp((localPosition - sampleMin) / extent, float3(0.0f), float3(1.0f));
+    float3 grid = uvw * float3(dimensions - uint3(1));
+    uint3 base = uint3(floor(grid));
+    uint3 next = min(base + uint3(1), dimensions - uint3(1));
+    float3 fraction = grid - float3(base);
+
+    uint strideY = dimensions.x;
+    uint strideZ = dimensions.x * dimensions.y;
+    uint i000 = sampleOffset + base.x + base.y * strideY + base.z * strideZ;
+    uint i100 = sampleOffset + next.x + base.y * strideY + base.z * strideZ;
+    uint i010 = sampleOffset + base.x + next.y * strideY + base.z * strideZ;
+    uint i110 = sampleOffset + next.x + next.y * strideY + base.z * strideZ;
+    uint i001 = sampleOffset + base.x + base.y * strideY + next.z * strideZ;
+    uint i101 = sampleOffset + next.x + base.y * strideY + next.z * strideZ;
+    uint i011 = sampleOffset + base.x + next.y * strideY + next.z * strideZ;
+    uint i111 = sampleOffset + next.x + next.y * strideY + next.z * strideZ;
+
+    float c00 = mix(brickSamples[i000].distance, brickSamples[i100].distance, fraction.x);
+    float c10 = mix(brickSamples[i010].distance, brickSamples[i110].distance, fraction.x);
+    float c01 = mix(brickSamples[i001].distance, brickSamples[i101].distance, fraction.x);
+    float c11 = mix(brickSamples[i011].distance, brickSamples[i111].distance, fraction.x);
+    float c0 = mix(c00, c10, fraction.y);
+    float c1 = mix(c01, c11, fraction.y);
+    return mix(c0, c1, fraction.z);
+}
+
+static GPUVolumeSample sampleVolumeBrickMaterial(
+    constant GPUVolumeDescriptor &volume,
+    constant GPUVolumeBrickDescriptor &brick,
+    constant GPUVolumeSample *brickSamples,
+    uint brickSampleCount,
+    float3 localPosition
+) {
+    uint3 dimensions = uint3(brick.dimensionsAndSampleOffset.xyz);
+    uint sampleOffset = brick.dimensionsAndSampleOffset.w;
+    uint sampleCount = dimensions.x * dimensions.y * dimensions.z;
+    if (dimensions.x < 1u || dimensions.y < 1u || dimensions.z < 1u
+        || sampleOffset >= brickSampleCount
+        || sampleOffset + sampleCount > brickSampleCount) {
+        GPUVolumeSample fallback;
+        fallback.distance = INFINITY;
+        fallback.materialA = volume.dimensions.w;
+        fallback.materialB = volume.dimensions.w;
+        fallback.materialBlend = 0.0f;
+        fallback.baseColorOpacity = float4(0);
+        fallback.emissionTransmission = float4(0);
+        fallback.surface = float4(0);
+        fallback.materialFieldFlags = uint4(0);
+        return fallback;
+    }
+
+    float3 volumeExtent = max(volume.localBoundsMax.xyz - volume.localBoundsMin.xyz, float3(1e-6f));
+    float3 volumeDenominator = max(float3(volume.dimensions.xyz) - float3(1.0f), float3(1.0f));
+    float3 sampleMin = volume.localBoundsMin.xyz
+        + volumeExtent * (float3(brick.gridOriginAndVolume.xyz) / volumeDenominator);
+    float3 sampleMax = volume.localBoundsMin.xyz
+        + volumeExtent * ((float3(brick.gridOriginAndVolume.xyz) + float3(dimensions - uint3(1))) / volumeDenominator);
+    float3 extent = max(sampleMax - sampleMin, float3(1e-6f));
+    float3 uvw = clamp((localPosition - sampleMin) / extent, float3(0.0f), float3(1.0f));
+    uint3 nearest = min(uint3(round(uvw * float3(dimensions - uint3(1)))), dimensions - uint3(1));
+    uint index = sampleOffset + nearest.x + nearest.y * dimensions.x + nearest.z * dimensions.x * dimensions.y;
+    return brickSamples[index];
+}
+
+static float3 volumeBrickNormal(
+    constant GPUVolumeDescriptor &volume,
+    constant GPUVolumeBrickDescriptor &brick,
+    constant GPUVolumeSample *brickSamples,
+    uint brickSampleCount,
+    float3 localPosition
+) {
+    float3 volumeExtent = max(volume.localBoundsMax.xyz - volume.localBoundsMin.xyz, float3(1e-6f));
+    float3 spacing = volumeExtent / max(float3(volume.dimensions.xyz) - float3(1.0f), float3(1.0f));
+    float dx = sampleVolumeBrickDistance(volume, brick, brickSamples, brickSampleCount, localPosition + float3(spacing.x, 0, 0))
+        - sampleVolumeBrickDistance(volume, brick, brickSamples, brickSampleCount, localPosition - float3(spacing.x, 0, 0));
+    float dy = sampleVolumeBrickDistance(volume, brick, brickSamples, brickSampleCount, localPosition + float3(0, spacing.y, 0))
+        - sampleVolumeBrickDistance(volume, brick, brickSamples, brickSampleCount, localPosition - float3(0, spacing.y, 0));
+    float dz = sampleVolumeBrickDistance(volume, brick, brickSamples, brickSampleCount, localPosition + float3(0, 0, spacing.z))
+        - sampleVolumeBrickDistance(volume, brick, brickSamples, brickSampleCount, localPosition - float3(0, 0, spacing.z));
+    float3 localNormal = float3(dx, dy, dz);
+    if (dot(localNormal, localNormal) <= 1e-10f) {
+        localNormal = float3(0, 1, 0);
+    }
+
+    float4x4 normalTransform = matrixFromColumns(
+        volume.normalTransform0,
+        volume.normalTransform1,
+        volume.normalTransform2,
+        volume.normalTransform3
+    );
+    return normalize((normalTransform * float4(normalize(localNormal), 0.0f)).xyz);
+}
+
+static bool intersectVolume(
+    Ray ray,
+    constant GPUVolumeDescriptor &volume,
+    constant GPUVolumeSample *volumeSamples,
+    uint volumeSampleCount,
+    float closestT,
+    thread Hit &hit
+) {
+    float tNear;
+    float tFar;
+    if (!intersectAABB(ray, volume.worldBoundsMin.xyz, volume.worldBoundsMax.xyz, closestT, tNear, tFar)) {
+        return false;
+    }
+
+    float4x4 worldToLocal = matrixFromColumns(
+        volume.worldToLocal0,
+        volume.worldToLocal1,
+        volume.worldToLocal2,
+        volume.worldToLocal3
+    );
+    float3 localRayStep = (worldToLocal * float4(ray.direction, 0.0f)).xyz;
+    float localUnitsPerWorldUnit = max(length(localRayStep), 1e-6f);
+    float3 extent = max(volume.localBoundsMax.xyz - volume.localBoundsMin.xyz, float3(1e-6f));
+    float cellSize = min(extent.x / max((float)volume.dimensions.x - 1.0f, 1.0f),
+        min(extent.y / max((float)volume.dimensions.y - 1.0f, 1.0f),
+            extent.z / max((float)volume.dimensions.z - 1.0f, 1.0f)));
+    float minimumStep = max(cellSize * 0.10f / localUnitsPerWorldUnit, 0.0005f);
+
+    float previousT = tNear;
+    float3 previousWorldPosition = ray.origin + ray.direction * previousT;
+    float3 previousLocalPosition = (worldToLocal * float4(previousWorldPosition, 1.0f)).xyz;
+    float previousDistance = sampleVolumeDistance(
+        volume,
+        volumeSamples,
+        volumeSampleCount,
+        previousLocalPosition
+    );
+    if (!isfinite(previousDistance)) {
+        return false;
+    }
+
+    float t = previousT + max(fabs(previousDistance) / localUnitsPerWorldUnit * 0.9f, minimumStep);
+    for (uint step = 0u; step < 512u && t <= tFar && t < closestT; ++step) {
+        float3 worldPosition = ray.origin + ray.direction * t;
+        float3 localPosition = (worldToLocal * float4(worldPosition, 1.0f)).xyz;
+        float distance = sampleVolumeDistance(volume, volumeSamples, volumeSampleCount, localPosition);
+        if (!isfinite(distance)) {
+            return false;
+        }
+
+        bool crossedSurface = (previousDistance > 0.0f && distance <= 0.0f)
+            || (previousDistance < 0.0f && distance >= 0.0f);
+        if (crossedSurface) {
+            float lowT = previousT;
+            float highT = t;
+            float lowDistance = previousDistance;
+            float3 refinedLocalPosition = localPosition;
+            float refinedT = t;
+            for (uint refine = 0u; refine < 10u; ++refine) {
+                float midT = 0.5f * (lowT + highT);
+                float3 midWorldPosition = ray.origin + ray.direction * midT;
+                float3 midLocalPosition = (worldToLocal * float4(midWorldPosition, 1.0f)).xyz;
+                float midDistance = sampleVolumeDistance(volume, volumeSamples, volumeSampleCount, midLocalPosition);
+                if ((lowDistance > 0.0f && midDistance > 0.0f)
+                    || (lowDistance < 0.0f && midDistance < 0.0f)) {
+                    lowT = midT;
+                    lowDistance = midDistance;
+                } else {
+                    highT = midT;
+                    refinedLocalPosition = midLocalPosition;
+                }
+                refinedT = 0.5f * (lowT + highT);
+            }
+
+            float3 refinedWorldPosition = ray.origin + ray.direction * refinedT;
+            refinedLocalPosition = (worldToLocal * float4(refinedWorldPosition, 1.0f)).xyz;
+            float3 normal = volumeNormal(volume, volumeSamples, volumeSampleCount, refinedLocalPosition);
+            bool frontFacing = dot(normal, ray.direction) <= 0.0f;
+            if (!frontFacing) {
+                normal = -normal;
+            }
+
+            hit.hit = true;
+            hit.t = refinedT;
+            hit.position = refinedWorldPosition;
+            hit.normal = normal;
+            hit.uv = float2(0.0f);
+            hit.tangent = normalize(cross(fabs(normal.y) < 0.999f ? float3(0, 1, 0) : float3(1, 0, 0), normal));
+            hit.bitangent = normalize(cross(normal, hit.tangent));
+            GPUVolumeSample materialSample = sampleVolumeMaterial(
+                volume,
+                volumeSamples,
+                volumeSampleCount,
+                refinedLocalPosition
+            );
+            hit.materialID = materialSample.materialA;
+            hit.materialID2 = materialSample.materialB;
+            hit.materialBlend = clamp(materialSample.materialBlend, 0.0f, 1.0f);
+            hit.volumeBaseColorOpacity = materialSample.baseColorOpacity;
+            hit.volumeEmissionTransmission = materialSample.emissionTransmission;
+            hit.volumeSurface = materialSample.surface;
+            hit.volumeMaterialFieldFlags = materialSample.materialFieldFlags.x;
+            hit.objectID = volume.metadata.y;
+            hit.primitiveID = volume.metadata.z;
+            hit.frontFacing = frontFacing;
+            return true;
+        }
+
+        previousT = t;
+        previousDistance = distance;
+        t += max(fabs(distance) / localUnitsPerWorldUnit * 0.8f, minimumStep);
+    }
+
+    return false;
+}
+
+static bool intersectVolumeBrick(
+    Ray ray,
+    constant GPUVolumeDescriptor &volume,
+    constant GPUVolumeBrickDescriptor &brick,
+    constant GPUVolumeSample *brickSamples,
+    uint brickSampleCount,
+    float closestT,
+    thread Hit &hit
+) {
+    float tNear;
+    float tFar;
+    if (!intersectAABB(ray, brick.worldBoundsMin.xyz, brick.worldBoundsMax.xyz, closestT, tNear, tFar)) {
+        return false;
+    }
+
+    float4x4 worldToLocal = matrixFromColumns(
+        volume.worldToLocal0,
+        volume.worldToLocal1,
+        volume.worldToLocal2,
+        volume.worldToLocal3
+    );
+    float3 localRayStep = (worldToLocal * float4(ray.direction, 0.0f)).xyz;
+    float localUnitsPerWorldUnit = max(length(localRayStep), 1e-6f);
+    float3 volumeExtent = max(volume.localBoundsMax.xyz - volume.localBoundsMin.xyz, float3(1e-6f));
+    float3 volumeSpacing = volumeExtent / max(float3(volume.dimensions.xyz) - float3(1.0f), float3(1.0f));
+    float cellSize = min(volumeSpacing.x, min(volumeSpacing.y, volumeSpacing.z));
+    float minimumStep = max(cellSize * 0.10f / localUnitsPerWorldUnit, 0.0005f);
+
+    float previousT = tNear;
+    float3 previousWorldPosition = ray.origin + ray.direction * previousT;
+    float3 previousLocalPosition = (worldToLocal * float4(previousWorldPosition, 1.0f)).xyz;
+    float previousDistance = sampleVolumeBrickDistance(
+        volume,
+        brick,
+        brickSamples,
+        brickSampleCount,
+        previousLocalPosition
+    );
+    if (!isfinite(previousDistance)) {
+        return false;
+    }
+
+    float originalEntryT = previousT;
+    if (previousDistance <= 0.0f) {
+        float backStep = max(cellSize / localUnitsPerWorldUnit * 0.5f, minimumStep);
+        float searchT = previousT;
+        for (uint backtrack = 0u; backtrack < 12u; ++backtrack) {
+            searchT = max(searchT - backStep, 0.0005f);
+            float3 searchWorldPosition = ray.origin + ray.direction * searchT;
+            float3 searchLocalPosition = (worldToLocal * float4(searchWorldPosition, 1.0f)).xyz;
+            float searchDistance = sampleVolumeBrickDistance(
+                volume,
+                brick,
+                brickSamples,
+                brickSampleCount,
+                searchLocalPosition
+            );
+            if (!isfinite(searchDistance)) {
+                break;
+            }
+            if (searchDistance > 0.0f) {
+                previousT = searchT;
+                previousLocalPosition = searchLocalPosition;
+                previousDistance = searchDistance;
+                break;
+            }
+            if (searchT <= 0.0005f) {
+                break;
+            }
+        }
+    }
+
+    float t = max(originalEntryT, previousT + max(fabs(previousDistance) / localUnitsPerWorldUnit * 0.9f, minimumStep));
+    for (uint step = 0u; step < 192u && t <= tFar && t < closestT; ++step) {
+        float3 worldPosition = ray.origin + ray.direction * t;
+        float3 localPosition = (worldToLocal * float4(worldPosition, 1.0f)).xyz;
+        float distance = sampleVolumeBrickDistance(volume, brick, brickSamples, brickSampleCount, localPosition);
+        if (!isfinite(distance)) {
+            return false;
+        }
+
+        bool crossedSurface = (previousDistance > 0.0f && distance <= 0.0f)
+            || (previousDistance < 0.0f && distance >= 0.0f);
+        if (crossedSurface) {
+            float lowT = previousT;
+            float highT = t;
+            float lowDistance = previousDistance;
+            float3 refinedLocalPosition = localPosition;
+            float refinedT = t;
+            for (uint refine = 0u; refine < 8u; ++refine) {
+                float midT = 0.5f * (lowT + highT);
+                float3 midWorldPosition = ray.origin + ray.direction * midT;
+                float3 midLocalPosition = (worldToLocal * float4(midWorldPosition, 1.0f)).xyz;
+                float midDistance = sampleVolumeBrickDistance(volume, brick, brickSamples, brickSampleCount, midLocalPosition);
+                if ((lowDistance > 0.0f && midDistance > 0.0f)
+                    || (lowDistance < 0.0f && midDistance < 0.0f)) {
+                    lowT = midT;
+                    lowDistance = midDistance;
+                } else {
+                    highT = midT;
+                    refinedLocalPosition = midLocalPosition;
+                }
+                refinedT = 0.5f * (lowT + highT);
+            }
+
+            float3 refinedWorldPosition = ray.origin + ray.direction * refinedT;
+            refinedLocalPosition = (worldToLocal * float4(refinedWorldPosition, 1.0f)).xyz;
+            float3 normal = volumeBrickNormal(volume, brick, brickSamples, brickSampleCount, refinedLocalPosition);
+            bool frontFacing = dot(normal, ray.direction) <= 0.0f;
+            if (!frontFacing) {
+                normal = -normal;
+            }
+
+            hit.hit = true;
+            hit.t = refinedT;
+            hit.position = refinedWorldPosition;
+            hit.normal = normal;
+            hit.uv = float2(0.0f);
+            hit.tangent = normalize(cross(fabs(normal.y) < 0.999f ? float3(0, 1, 0) : float3(1, 0, 0), normal));
+            hit.bitangent = normalize(cross(normal, hit.tangent));
+            GPUVolumeSample materialSample = sampleVolumeBrickMaterial(
+                volume,
+                brick,
+                brickSamples,
+                brickSampleCount,
+                refinedLocalPosition
+            );
+            hit.materialID = materialSample.materialA;
+            hit.materialID2 = materialSample.materialB;
+            hit.materialBlend = clamp(materialSample.materialBlend, 0.0f, 1.0f);
+            hit.volumeBaseColorOpacity = materialSample.baseColorOpacity;
+            hit.volumeEmissionTransmission = materialSample.emissionTransmission;
+            hit.volumeSurface = materialSample.surface;
+            hit.volumeMaterialFieldFlags = materialSample.materialFieldFlags.x;
+            hit.objectID = volume.metadata.y;
+            hit.primitiveID = volume.metadata.z;
+            hit.frontFacing = frontFacing;
+            return true;
+        }
+
+        previousT = t;
+        previousDistance = distance;
+        previousLocalPosition = localPosition;
+        t += max(fabs(distance) / localUnitsPerWorldUnit * 0.8f, minimumStep);
+    }
+
+    return false;
+}
+
+static Hit closestVolumeHit(
+    Ray ray,
+    constant GPURenderConstants &constants,
+    constant GPUVolumeDescriptor *volumes,
+    constant GPUVolumeSample *volumeSamples,
+    constant GPUVolumeBrickDescriptor *volumeBricks,
+    constant GPUVolumeSample *volumeBrickSamples,
+    float closestT
+) {
+    Hit closest = emptyHit();
+    closest.t = closestT;
+    for (uint index = 0; index < constants.volumeCount; ++index) {
+        if (volumes[index].metadata.w != 0u) {
+            continue;
+        }
+        Hit candidate = emptyHit();
+        if (intersectVolume(
+            ray,
+            volumes[index],
+            volumeSamples,
+            constants.volumeSampleCount,
+            closest.t,
+            candidate
+        ) && candidate.t < closest.t) {
+            closest = candidate;
+        }
+    }
+    for (uint index = 0; index < constants.volumeBrickCount; ++index) {
+        uint volumeIndex = volumeBricks[index].gridOriginAndVolume.w;
+        if (volumeIndex >= constants.volumeCount || volumes[volumeIndex].metadata.w != 1u) {
+            continue;
+        }
+        Hit candidate = emptyHit();
+        if (intersectVolumeBrick(
+            ray,
+            volumes[volumeIndex],
+            volumeBricks[index],
+            volumeBrickSamples,
+            constants.volumeBrickSampleCount,
+            closest.t,
+            candidate
+        ) && candidate.t < closest.t) {
+            closest = candidate;
+        }
+    }
     return closest;
 }
 
@@ -1156,6 +1826,8 @@ static Hit intersectSceneLinear(Ray ray, constant GPURenderConstants &constants,
             closest.tangent = tangent;
             closest.bitangent = bitangent;
             closest.materialID = triangles[index].materialID;
+            closest.materialID2 = triangles[index].materialID;
+            closest.materialBlend = 0.0f;
             closest.objectID = triangles[index].objectID;
             closest.primitiveID = index;
             closest.frontFacing = frontFacing;
@@ -1170,13 +1842,19 @@ static Hit intersectScene(
     constant GPURenderConstants &constants,
     constant GPUTriangle *triangles,
     constant GPUAccelerationNode *nodes,
-    constant uint *primitiveIndices
+    constant uint *primitiveIndices,
+    constant GPUVolumeDescriptor *volumes,
+    constant GPUVolumeSample *volumeSamples,
+    constant GPUVolumeBrickDescriptor *volumeBricks,
+    constant GPUVolumeSample *volumeBrickSamples
 ) {
+    Hit closest = emptyHit();
     if (constants.accelerationNodeCount == 0 || nodes == nullptr || primitiveIndices == nullptr) {
-        return intersectSceneLinear(ray, constants, triangles);
+        closest = intersectSceneLinear(ray, constants, triangles);
+        Hit volumeHit = closestVolumeHit(ray, constants, volumes, volumeSamples, volumeBricks, volumeBrickSamples, closest.t);
+        return volumeHit.hit ? volumeHit : closest;
     }
 
-    Hit closest = emptyHit();
     uint stack[64];
     uint stackCount = 0;
     stack[stackCount++] = 0;
@@ -1217,6 +1895,8 @@ static Hit intersectScene(
                     closest.tangent = tangent;
                     closest.bitangent = bitangent;
                     closest.materialID = triangles[triangleIndex].materialID;
+                    closest.materialID2 = triangles[triangleIndex].materialID;
+                    closest.materialBlend = 0.0f;
                     closest.objectID = triangles[triangleIndex].objectID;
                     closest.primitiveID = triangleIndex;
                     closest.frontFacing = frontFacing;
@@ -1230,6 +1910,11 @@ static Hit intersectScene(
                 stack[stackCount++] = leftChild;
             }
         }
+    }
+
+    Hit volumeHit = closestVolumeHit(ray, constants, volumes, volumeSamples, volumeBricks, volumeBrickSamples, closest.t);
+    if (volumeHit.hit) {
+        closest = volumeHit;
     }
 
     return closest;
@@ -1287,6 +1972,12 @@ static Hit intersectSceneHardware(
     hit.tangent = transformRayTracingNormal(instance, triangle.tangent.xyz);
     hit.bitangent = transformRayTracingNormal(instance, triangle.bitangent.xyz);
     hit.materialID = instance.metadata.y;
+    hit.materialID2 = instance.metadata.y;
+    hit.materialBlend = 0.0f;
+    hit.volumeBaseColorOpacity = float4(0);
+    hit.volumeEmissionTransmission = float4(0);
+    hit.volumeSurface = float4(0);
+    hit.volumeMaterialFieldFlags = 0u;
     hit.objectID = instance.metadata.z;
     hit.primitiveID = triangleIndex;
     return hit;
@@ -1334,6 +2025,10 @@ static bool continueSubsurfaceRandomWalk(
     constant GPUTriangle *triangles,
     constant GPUAccelerationNode *nodes,
     constant uint *primitiveIndices,
+    constant GPUVolumeDescriptor *volumes,
+    constant GPUVolumeSample *volumeSamples,
+    constant GPUVolumeBrickDescriptor *volumeBricks,
+    constant GPUVolumeSample *volumeBrickSamples,
     thread Ray &ray,
     thread float3 &throughput,
     thread float &previousBSDFPDF,
@@ -1357,7 +2052,17 @@ static bool continueSubsurfaceRandomWalk(
     float anisotropy = materialSubsurfaceAnisotropy(material);
 
     for (uint step = 0u; step < 8u; ++step) {
-        Hit boundaryHit = intersectScene(mediumRay, constants, triangles, nodes, primitiveIndices);
+        Hit boundaryHit = intersectScene(
+            mediumRay,
+            constants,
+            triangles,
+            nodes,
+            primitiveIndices,
+            volumes,
+            volumeSamples,
+            volumeBricks,
+            volumeBrickSamples
+        );
         if (!boundaryHit.hit) {
             return false;
         }
@@ -1768,6 +2473,10 @@ static bool tracePrimaryAOV(
     constant GPUTriangle *triangles,
     constant GPUAccelerationNode *nodes,
     constant uint *primitiveIndices,
+    constant GPUVolumeDescriptor *volumes,
+    constant GPUVolumeSample *volumeSamples,
+    constant GPUVolumeBrickDescriptor *volumeBricks,
+    constant GPUVolumeSample *volumeBrickSamples,
     constant GPUMaterial *materials,
     constant GPUTextureDescriptor *textureDescriptors,
     constant float4 *texturePixels,
@@ -1775,12 +2484,22 @@ static bool tracePrimaryAOV(
     thread GPUMaterial &primaryMaterial
 ) {
     for (uint pass = 0; pass < 32u; ++pass) {
-        Hit hit = intersectScene(ray, constants, triangles, nodes, primitiveIndices);
+        Hit hit = intersectScene(
+            ray,
+            constants,
+            triangles,
+            nodes,
+            primitiveIndices,
+            volumes,
+            volumeSamples,
+            volumeBricks,
+            volumeBrickSamples
+        );
         if (!hit.hit) {
             return false;
         }
 
-        GPUMaterial material = materials[min(hit.materialID, constants.materialCount - 1u)];
+        GPUMaterial material = materialForHit(hit, materials, constants.materialCount);
         hit = applyNormalMap(hit, material, textureDescriptors, texturePixels, ray.direction);
         material = applyBaseColorTexture(material, hit, textureDescriptors, texturePixels);
         if (material.baseColor.w <= 0.001f) {
@@ -1814,7 +2533,7 @@ static bool tracePrimaryAOVHardware(
             return false;
         }
 
-        GPUMaterial material = materials[min(hit.materialID, materialCount - 1u)];
+        GPUMaterial material = materialForHit(hit, materials, materialCount);
         hit = applyNormalMap(hit, material, textureDescriptors, texturePixels, ray.direction);
         material = applyBaseColorTexture(material, hit, textureDescriptors, texturePixels);
         if (material.baseColor.w <= 0.001f) {
@@ -1838,16 +2557,30 @@ static bool shadowOccluded(
     constant GPUMaterial *materials,
     constant GPUAccelerationNode *nodes,
     constant uint *primitiveIndices,
+    constant GPUVolumeDescriptor *volumes,
+    constant GPUVolumeSample *volumeSamples,
+    constant GPUVolumeBrickDescriptor *volumeBricks,
+    constant GPUVolumeSample *volumeBrickSamples,
     thread float3 &transmittance
 ) {
     float traveled = 0.0f;
     for (uint step = 0; step < 8u; ++step) {
-        Hit shadowHit = intersectScene(shadowRay, constants, triangles, nodes, primitiveIndices);
+        Hit shadowHit = intersectScene(
+            shadowRay,
+            constants,
+            triangles,
+            nodes,
+            primitiveIndices,
+            volumes,
+            volumeSamples,
+            volumeBricks,
+            volumeBrickSamples
+        );
         if (!shadowHit.hit || traveled + shadowHit.t >= maxDistance) {
             return false;
         }
 
-        GPUMaterial shadowMaterial = materials[min(shadowHit.materialID, constants.materialCount - 1u)];
+        GPUMaterial shadowMaterial = materialForHit(shadowHit, materials, constants.materialCount);
         if (shadowMaterial.baseColor.w <= 0.001f) {
             traveled += shadowHit.t;
             shadowRay.origin = shadowHit.position + shadowRay.direction * 0.001f;
@@ -1892,7 +2625,7 @@ static bool shadowOccludedHardware(
             return false;
         }
 
-        GPUMaterial shadowMaterial = materials[min(shadowHit.materialID, constants.materialCount - 1u)];
+        GPUMaterial shadowMaterial = materialForHit(shadowHit, materials, constants.materialCount);
         if (shadowMaterial.baseColor.w <= 0.001f) {
             traveled += shadowHit.t;
             shadowRay.origin = shadowHit.position + shadowRay.direction * 0.001f;
@@ -1929,6 +2662,10 @@ static float3 sampleDirectLighting(
     constant GPUMaterial *materials,
     constant GPUAccelerationNode *nodes,
     constant uint *primitiveIndices,
+    constant GPUVolumeDescriptor *volumes,
+    constant GPUVolumeSample *volumeSamples,
+    constant GPUVolumeBrickDescriptor *volumeBricks,
+    constant GPUVolumeSample *volumeBrickSamples,
     constant GPULightRecord *lights,
     constant GPUEnvironmentSample *environmentSamples,
     constant GPUTextureDescriptor *textureDescriptors,
@@ -1983,6 +2720,10 @@ static float3 sampleDirectLighting(
                         materials,
                         nodes,
                         primitiveIndices,
+                        volumes,
+                        volumeSamples,
+                        volumeBricks,
+                        volumeBrickSamples,
                         shadowTransmittance
                     )) {
                         float geometryTerm = cosSurface * cosLight * area / max(distanceSquared, 1e-6f);
@@ -2035,6 +2776,10 @@ static float3 sampleDirectLighting(
                 materials,
                 nodes,
                 primitiveIndices,
+                volumes,
+                volumeSamples,
+                volumeBricks,
+                volumeBrickSamples,
                 shadowTransmittance
             )) {
                 float3 brdf = evaluateMaterialBRDF(
@@ -2220,6 +2965,10 @@ kernel void pathTraceKernel(
     constant float4 *texturePixels [[buffer(11)]],
     constant GPULightRecord *lights [[buffer(12)]],
     constant GPUEnvironmentSample *environmentSamples [[buffer(13)]],
+    constant GPUVolumeDescriptor *volumes [[buffer(14)]],
+    constant GPUVolumeSample *volumeSamples [[buffer(15)]],
+    constant GPUVolumeBrickDescriptor *volumeBricks [[buffer(16)]],
+    constant GPUVolumeSample *volumeBrickSamples [[buffer(17)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     if (gid.x >= constants.width || gid.y >= constants.height) {
@@ -2265,7 +3014,17 @@ kernel void pathTraceKernel(
     primaryMaterial.volumeParameters = float4(0);
 
     for (uint bounce = 0; bounce < constants.maxBounces; ++bounce) {
-        Hit hit = intersectScene(ray, constants, triangles, nodes, primitiveIndices);
+        Hit hit = intersectScene(
+            ray,
+            constants,
+            triangles,
+            nodes,
+            primitiveIndices,
+            volumes,
+            volumeSamples,
+            volumeBricks,
+            volumeBrickSamples
+        );
         if (!hit.hit) {
             if (constants.transparentBackground != 0u) {
                 if (bounce == 0u) {
@@ -2293,7 +3052,7 @@ kernel void pathTraceKernel(
             break;
         }
 
-        GPUMaterial material = materials[min(hit.materialID, constants.materialCount - 1u)];
+        GPUMaterial material = materialForHit(hit, materials, constants.materialCount);
         hit = applyNormalMap(hit, material, textureDescriptors, texturePixels, ray.direction);
         material = applyBaseColorTexture(material, hit, textureDescriptors, texturePixels);
         if (material.baseColor.w <= 0.001f) {
@@ -2321,6 +3080,10 @@ kernel void pathTraceKernel(
                 triangles,
                 nodes,
                 primitiveIndices,
+                volumes,
+                volumeSamples,
+                volumeBricks,
+                volumeBrickSamples,
                 ray,
                 throughput,
                 previousBSDFPDF,
@@ -2367,6 +3130,10 @@ kernel void pathTraceKernel(
             materials,
             nodes,
             primitiveIndices,
+            volumes,
+            volumeSamples,
+            volumeBricks,
+            volumeBrickSamples,
             lights,
             environmentSamples,
             textureDescriptors,
@@ -2489,6 +3256,10 @@ kernel void pathTraceKernel(
             triangles,
             nodes,
             primitiveIndices,
+            volumes,
+            volumeSamples,
+            volumeBricks,
+            volumeBrickSamples,
             materials,
             textureDescriptors,
             texturePixels,
@@ -2624,7 +3395,7 @@ kernel void pathTraceHardwareKernel(
             break;
         }
 
-        GPUMaterial material = materials[min(hit.materialID, constants.materialCount - 1u)];
+        GPUMaterial material = materialForHit(hit, materials, constants.materialCount);
         hit = applyNormalMap(hit, material, textureDescriptors, texturePixels, ray.direction);
         material = applyBaseColorTexture(material, hit, textureDescriptors, texturePixels);
         if (material.baseColor.w <= 0.001f) {

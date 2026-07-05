@@ -55,6 +55,10 @@ public final class RenderSession {
     private let camera: GPUCamera
     private let previousCamera: GPUCamera
     private let triangleBuffer: MTLBuffer
+    private let volumeBuffer: MTLBuffer
+    private let volumeSampleBuffer: MTLBuffer
+    private let volumeBrickBuffer: MTLBuffer
+    private let volumeBrickSampleBuffer: MTLBuffer
     private let materialBuffer: MTLBuffer
     private let textureDescriptorBuffer: MTLBuffer
     private let texturePixelBuffer: MTLBuffer
@@ -71,6 +75,10 @@ public final class RenderSession {
     private let objectIDTexture: MTLTexture
     private let motionVectorTexture: MTLTexture
     private let triangleCount: Int
+    private let volumeCount: Int
+    private let volumeSampleCount: Int
+    private let volumeBrickCount: Int
+    private let volumeBrickSampleCount: Int
     private let materialCount: Int
     private let textureDescriptorCount: Int
     private let texturePixelCount: Int
@@ -185,6 +193,8 @@ public final class RenderSession {
         let canBuildHardwareAcceleration = hardwareRayTracingPipeline != nil
             && device.supportsRaytracing
             && accelerationMode != .flatBVH
+            && scene.volumeInstances.isEmpty
+            && scene.sparseVolumeInstances.isEmpty
         let accelerationBackend: AccelerationBackend = canBuildHardwareAcceleration
             ? MetalRayTracingAccelerationBackend(
                 device: device,
@@ -193,8 +203,8 @@ public final class RenderSession {
             )
             : LinearTriangleAccelerationBackend()
         let compiled = try accelerationBackend.build(scene: scene)
-        guard !compiled.triangles.isEmpty else {
-            throw DenrimRendererError.invalidScene("Scene contains no triangles.")
+        guard !compiled.triangles.isEmpty || !compiled.volumes.isEmpty else {
+            throw DenrimRendererError.invalidScene("Scene contains no renderable geometry.")
         }
         guard !compiled.materials.isEmpty else {
             throw DenrimRendererError.invalidScene("Scene contains no materials.")
@@ -215,6 +225,10 @@ public final class RenderSession {
             height: settings.height
         )
         self.triangleCount = compiled.triangles.count
+        self.volumeCount = compiled.volumes.count
+        self.volumeSampleCount = compiled.volumeSamples.count
+        self.volumeBrickCount = compiled.volumeBricks.count
+        self.volumeBrickSampleCount = compiled.volumeBrickSamples.count
         self.materialCount = compiled.materials.count
         self.textureDescriptorCount = compiled.textureDescriptors.count
         self.texturePixelCount = compiled.texturePixels.count
@@ -227,11 +241,26 @@ public final class RenderSession {
         self.accelerationNodeCount = compiled.bvh.nodes.count
         self.metalRayTracingExperiment = compiled.metalRayTracingExperiment
 
-        self.triangleBuffer = device.makeBuffer(
-            bytes: compiled.triangles,
-            length: MemoryLayout<GPUTriangle>.stride * compiled.triangles.count,
-            options: .storageModeShared
-        )!
+        self.triangleBuffer = try Self.makeRequiredShaderBindingBuffer(
+            device: device,
+            values: compiled.triangles
+        )
+        self.volumeBuffer = try Self.makeRequiredShaderBindingBuffer(
+            device: device,
+            values: compiled.volumes
+        )
+        self.volumeSampleBuffer = try Self.makeRequiredShaderBindingBuffer(
+            device: device,
+            values: compiled.volumeSamples
+        )
+        self.volumeBrickBuffer = try Self.makeRequiredShaderBindingBuffer(
+            device: device,
+            values: compiled.volumeBricks
+        )
+        self.volumeBrickSampleBuffer = try Self.makeRequiredShaderBindingBuffer(
+            device: device,
+            values: compiled.volumeBrickSamples
+        )
         self.materialBuffer = device.makeBuffer(
             bytes: compiled.materials,
             length: MemoryLayout<GPUMaterial>.stride * compiled.materials.count,
@@ -360,6 +389,7 @@ public final class RenderSession {
             width: UInt32(settings.width),
             height: UInt32(settings.height),
             triangleCount: UInt32(triangleCount),
+            volumeCount: UInt32(volumeCount),
             materialCount: UInt32(materialCount),
             sampleIndex: UInt32(sampleCount),
             maxBounces: UInt32(max(1, settings.maxBounces)),
@@ -373,7 +403,10 @@ public final class RenderSession {
             environmentRotationY: environmentRotationY,
             environmentMaxRadiance: environmentMaxRadiance,
             sampleRadianceClamp: settings.resolvedSampleRadianceClamp,
-            padding1: settings.denoise.denoiser == .none ? 0 : 1
+            volumeSampleCount: UInt32(volumeSampleCount),
+            padding1: settings.denoise.denoiser == .none ? 0 : 1,
+            volumeBrickCount: UInt32(volumeBrickCount),
+            volumeBrickSampleCount: UInt32(volumeBrickSampleCount)
         )
         var camera = camera
         var previousCamera = previousCamera
@@ -398,6 +431,10 @@ public final class RenderSession {
         encoder.setBuffer(texturePixelBuffer, offset: 0, index: 11)
         encoder.setBuffer(lightBuffer, offset: 0, index: 12)
         encoder.setBuffer(environmentSampleBuffer, offset: 0, index: 13)
+        encoder.setBuffer(volumeBuffer, offset: 0, index: 14)
+        encoder.setBuffer(volumeSampleBuffer, offset: 0, index: 15)
+        encoder.setBuffer(volumeBrickBuffer, offset: 0, index: 16)
+        encoder.setBuffer(volumeBrickSampleBuffer, offset: 0, index: 17)
         if useHardwareRayTracing,
            let tlasResource = metalRayTracingExperiment?.tlasResource,
            let sceneBuffers = metalRayTracingExperiment?.sceneBuffers {

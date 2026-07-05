@@ -149,6 +149,10 @@ func loadScene(named sceneName: String, assetPath: String?) throws -> RenderScen
         return try SceneScript.parse(contentsOf: URL(fileURLWithPath: assetPath))
     case "transparent-materials", "transparent-material-reference", "transparency":
         return .transparentMaterialReference()
+    case "distance-volumes", "distance-volume-reference", "volumes", "sdf":
+        return .distanceVolumeReference()
+    case "sparse-distance-volumes", "sparse-distance-volume-reference", "sparse-volumes", "sparse-sdf", "sdf-bricks":
+        return .sparseDistanceVolumeReference()
     case "cornell", "cornell-box":
         return .cornellBox()
     default:

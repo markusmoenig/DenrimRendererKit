@@ -50,6 +50,29 @@ final class APITests: XCTestCase {
 
         XCTAssertTrue(scene.materials.isEmpty)
         XCTAssertTrue(scene.meshInstances.isEmpty)
+        XCTAssertTrue(scene.volumeInstances.isEmpty)
+        XCTAssertTrue(scene.sparseVolumeInstances.isEmpty)
+    }
+
+    func testDistanceVolumeSceneCompiles() throws {
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.25, 0.18)))
+        scene.add(
+            volume: .sphere(resolution: 12, radius: 0.55),
+            material: material,
+            transform: .translation(SIMD3<Float>(0, 0.5, 0))
+        )
+
+        let build = try LinearTriangleAccelerationBackend().build(scene: scene)
+
+        XCTAssertEqual(scene.materials.count, 1)
+        XCTAssertTrue(scene.meshInstances.isEmpty)
+        XCTAssertEqual(scene.volumeInstances.count, 1)
+        XCTAssertTrue(build.triangles.isEmpty)
+        XCTAssertEqual(build.volumes.count, 1)
+        XCTAssertEqual(build.volumeSamples.count, 12 * 12 * 12)
+        XCTAssertEqual(build.volumes[0].dimensions.w, material.rawValue)
+        XCTAssertEqual(build.volumes[0].metadata.y, 0)
     }
 
     func testQuadLightAPIAddsAppAuthoredEmissiveLight() throws {
@@ -116,6 +139,273 @@ final class APITests: XCTestCase {
         XCTAssertTrue(scene.materials.contains { $0.transmission > 0 })
         XCTAssertTrue(scene.materials.contains { $0.transmissionAbsorptionDistance > 0 })
         XCTAssertTrue(scene.materials.contains { $0.emissionStrength > 0 })
+    }
+
+    func testDistanceVolumeReferenceSceneCompiles() throws {
+        let scene = RenderScene.distanceVolumeReference()
+        let compiled = try scene.compileForGPU()
+
+        XCTAssertEqual(scene.volumeInstances.count, 1)
+        XCTAssertEqual(compiled.volumes.count, 1)
+        XCTAssertEqual(compiled.volumeSamples.count, 48 * 36 * 32)
+        XCTAssertFalse(compiled.triangles.isEmpty)
+        XCTAssertTrue(scene.materials.contains { $0.opacity > 0 && $0.opacity < 1 })
+        XCTAssertTrue(scene.materials.contains { $0.transmission > 0 })
+        XCTAssertTrue(scene.materials.contains { $0.metallic > 0 })
+    }
+
+    func testSDFModelCompilesMultiplePrimitivesIntoOneMaterialAwareVolume() throws {
+        var scene = RenderScene()
+        let red = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.1, 0.1)))
+        let blue = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.1, 0.2, 0.9)))
+        let model = SDFModel(primitives: [
+            SDFPrimitive(
+                shape: .sphere(radius: 0.55),
+                material: red,
+                transform: .translation(SIMD3<Float>(-0.22, 0, 0))
+            ),
+            SDFPrimitive(
+                shape: .sphere(radius: 0.55),
+                material: blue,
+                transform: .translation(SIMD3<Float>(0.22, 0, 0)),
+                smoothUnionRadius: 0.22
+            )
+        ])
+
+        let volume = try DistanceVolumeBuilder.build(
+            model: model,
+            settings: DistanceVolumeBuildSettings(resolution: 20)
+        )
+        scene.add(volume: volume, material: red)
+        let build = try LinearTriangleAccelerationBackend().build(scene: scene)
+
+        XCTAssertEqual(scene.volumeInstances.count, 1)
+        XCTAssertEqual(build.volumes.count, 1)
+        XCTAssertEqual(build.volumeSamples.count, 20 * 20 * 20)
+        XCTAssertTrue(build.volumeSamples.contains { sample in
+            sample.materialA == red.rawValue && sample.materialB == blue.rawValue && sample.materialBlend > 0 && sample.materialBlend < 1
+        })
+    }
+
+    func testDistanceVolumeMaterialFieldsReachGPUVolumeSamples() throws {
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.1, 0.1)))
+        let sampleCount = 4 * 4 * 4
+        let fields = DistanceVolumeMaterialFields(
+            baseColor: SIMD3<Float>(0.1, 0.8, 0.25),
+            opacity: 0.42,
+            emission: SIMD3<Float>(1.5, 0.2, 0.1),
+            roughness: 0.87,
+            metallic: 0.23,
+            transmission: 0.31
+        )
+        let volume = DistanceVolume(
+            width: 4,
+            height: 4,
+            depth: 4,
+            distances: [Float](repeating: 1, count: sampleCount),
+            materialSamples: [DistanceVolumeMaterialSample](
+                repeating: DistanceVolumeMaterialSample(materialA: material, fields: fields),
+                count: sampleCount
+            )
+        )
+        scene.add(volume: volume, material: material)
+
+        let compiled = try scene.compileForGPU()
+        let sample = try XCTUnwrap(compiled.volumeSamples.first)
+
+        XCTAssertEqual(sample.baseColorOpacity.x, 0.1, accuracy: 0.0001)
+        XCTAssertEqual(sample.baseColorOpacity.y, 0.8, accuracy: 0.0001)
+        XCTAssertEqual(sample.baseColorOpacity.z, 0.25, accuracy: 0.0001)
+        XCTAssertEqual(sample.baseColorOpacity.w, 0.42, accuracy: 0.0001)
+        XCTAssertEqual(sample.emissionTransmission.x, 1.5, accuracy: 0.0001)
+        XCTAssertEqual(sample.emissionTransmission.w, 0.31, accuracy: 0.0001)
+        XCTAssertEqual(sample.surface.x, 0.87, accuracy: 0.0001)
+        XCTAssertEqual(sample.surface.y, 0.23, accuracy: 0.0001)
+        XCTAssertNotEqual(sample.materialFieldFlags.x & DistanceVolumeMaterialFields.baseColorFlag, 0)
+        XCTAssertNotEqual(sample.materialFieldFlags.x & DistanceVolumeMaterialFields.opacityFlag, 0)
+        XCTAssertNotEqual(sample.materialFieldFlags.x & DistanceVolumeMaterialFields.emissionFlag, 0)
+        XCTAssertNotEqual(sample.materialFieldFlags.x & DistanceVolumeMaterialFields.roughnessFlag, 0)
+        XCTAssertNotEqual(sample.materialFieldFlags.x & DistanceVolumeMaterialFields.metallicFlag, 0)
+        XCTAssertNotEqual(sample.materialFieldFlags.x & DistanceVolumeMaterialFields.transmissionFlag, 0)
+    }
+
+    func testSDFPrimitiveMaterialFieldsBakeIntoDenseAndSparseVolumes() throws {
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.1, 0.1)))
+        let fields = DistanceVolumeMaterialFields(
+            baseColor: SIMD3<Float>(0.15, 0.72, 0.32),
+            roughness: 0.91,
+            metallic: 0.12
+        )
+        let model = SDFModel(primitives: [
+            SDFPrimitive(
+                shape: .sphere(radius: 0.55),
+                material: material,
+                materialFields: fields
+            )
+        ])
+
+        let dense = try DistanceVolumeBuilder.build(
+            model: model,
+            settings: DistanceVolumeBuildSettings(resolution: 12)
+        )
+        let sparse = try DistanceVolumeBuilder.buildSparse(
+            model: model,
+            settings: SparseDistanceVolumeBuildSettings(resolution: 12, brickSize: 4, narrowBand: 0.4)
+        )
+        scene.add(sparseVolume: sparse, material: material)
+        let compiled = try scene.compileForGPU()
+
+        XCTAssertTrue(dense.materialSamples.contains { sample in
+            sample.fields.baseColor == fields.baseColor
+                && sample.fields.roughness == fields.roughness
+                && sample.fields.metallic == fields.metallic
+        })
+        XCTAssertTrue(sparse.bricks.flatMap(\.materialSamples).contains { sample in
+            sample.fields.baseColor == fields.baseColor
+                && sample.fields.roughness == fields.roughness
+                && sample.fields.metallic == fields.metallic
+        })
+        let bakedColor = try XCTUnwrap(fields.baseColor)
+        let bakedRoughness = try XCTUnwrap(fields.roughness)
+        let bakedMetallic = try XCTUnwrap(fields.metallic)
+        XCTAssertTrue(compiled.volumeBrickSamples.contains { sample in
+            sample.baseColorOpacity.x == bakedColor.x
+                && sample.baseColorOpacity.y == bakedColor.y
+                && sample.baseColorOpacity.z == bakedColor.z
+                && sample.surface.x == bakedRoughness
+                && sample.surface.y == bakedMetallic
+                && sample.materialFieldFlags.x & DistanceVolumeMaterialFields.baseColorFlag != 0
+                && sample.materialFieldFlags.x & DistanceVolumeMaterialFields.roughnessFlag != 0
+                && sample.materialFieldFlags.x & DistanceVolumeMaterialFields.metallicFlag != 0
+        })
+    }
+
+    func testSparseSDFBuildStoresOnlyActiveBricks() throws {
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.15, 0.08)))
+        let model = SDFModel(primitives: [
+            SDFPrimitive(shape: .sphere(radius: 0.45), material: material)
+        ])
+        let settings = SparseDistanceVolumeBuildSettings(
+            denseSettings: DistanceVolumeBuildSettings(
+                dimensions: SIMD3<Int>(32, 32, 32),
+                boundsMin: SIMD3<Float>(repeating: -4),
+                boundsMax: SIMD3<Float>(repeating: 4)
+            ),
+            brickSize: SIMD3<Int>(repeating: 8),
+            narrowBand: 0.35
+        )
+
+        let sparse = try DistanceVolumeBuilder.buildSparse(model: model, settings: settings)
+        let dense = sparse.denseVolume()
+
+        XCTAssertGreaterThan(sparse.bricks.count, 0)
+        XCTAssertLessThan(sparse.bricks.count, 64)
+        XCTAssertEqual(dense.dimensions, SIMD3<Int>(32, 32, 32))
+        XCTAssertEqual(dense.distances.count, 32 * 32 * 32)
+        XCTAssertEqual(dense.materialSamples.count, 32 * 32 * 32)
+        XCTAssertTrue(sparse.bricks.flatMap(\.distances).contains { $0 < 0 })
+        XCTAssertTrue(dense.distances.contains { $0 < 0 })
+    }
+
+    func testSparseSDFBuildPreservesMaterialBlendSamples() throws {
+        var scene = RenderScene()
+        let red = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.1, 0.1)))
+        let blue = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.1, 0.2, 0.9)))
+        let model = SDFModel(primitives: [
+            SDFPrimitive(
+                shape: .sphere(radius: 0.55),
+                material: red,
+                transform: .translation(SIMD3<Float>(-0.22, 0, 0))
+            ),
+            SDFPrimitive(
+                shape: .sphere(radius: 0.55),
+                material: blue,
+                transform: .translation(SIMD3<Float>(0.22, 0, 0)),
+                smoothUnionRadius: 0.22
+            )
+        ])
+
+        let sparse = try DistanceVolumeBuilder.buildSparse(
+            model: model,
+            settings: SparseDistanceVolumeBuildSettings(resolution: 20, brickSize: 5, narrowBand: 1.5)
+        )
+
+        XCTAssertTrue(sparse.bricks.flatMap(\.materialSamples).contains { sample in
+            sample.materialA == red && sample.materialB == blue && sample.blend > 0 && sample.blend < 1
+        })
+    }
+
+    func testSparseSDFBuildCanRoundTripThroughDenseVolume() throws {
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.25, 0.8, 0.55)))
+        let model = SDFModel(primitives: [
+            SDFPrimitive(
+                shape: .box(halfExtents: SIMD3<Float>(0.42, 0.32, 0.28), cornerRadius: 0.08),
+                material: material,
+                transform: .translation(SIMD3<Float>(0.08, -0.04, 0.03))
+            )
+        ])
+        let denseSettings = DistanceVolumeBuildSettings(
+            dimensions: SIMD3<Int>(18, 16, 14),
+            boundsMin: SIMD3<Float>(repeating: -1),
+            boundsMax: SIMD3<Float>(repeating: 1)
+        )
+
+        let dense = try DistanceVolumeBuilder.build(model: model, settings: denseSettings)
+        let sparse = try DistanceVolumeBuilder.buildSparse(
+            model: model,
+            settings: SparseDistanceVolumeBuildSettings(
+                denseSettings: denseSettings,
+                brickSize: SIMD3<Int>(5, 6, 4),
+                narrowBand: 10
+            )
+        )
+        let reconstructed = sparse.denseVolume()
+
+        XCTAssertEqual(sparse.bricks.count, 4 * 3 * 4)
+        XCTAssertEqual(reconstructed.dimensions, dense.dimensions)
+        XCTAssertEqual(reconstructed.materialSamples, dense.materialSamples)
+        XCTAssertEqual(reconstructed.distances.count, dense.distances.count)
+        for index in dense.distances.indices {
+            XCTAssertEqual(reconstructed.distances[index], dense.distances[index], accuracy: 0.000001)
+        }
+    }
+
+    func testSparseDistanceVolumeSceneCompilesBrickBuffers() throws {
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.85, 0.25, 0.18)))
+        let model = SDFModel(primitives: [
+            SDFPrimitive(shape: .sphere(radius: 0.48), material: material)
+        ])
+        let sparse = try DistanceVolumeBuilder.buildSparse(
+            model: model,
+            settings: SparseDistanceVolumeBuildSettings(resolution: 24, brickSize: 6, narrowBand: 0.35)
+        )
+
+        scene.add(
+            sparseVolume: sparse,
+            material: material,
+            transform: .translation(SIMD3<Float>(0.25, 0.5, 0))
+        )
+        let compiled = try scene.compileForGPU()
+
+        XCTAssertTrue(scene.volumeInstances.isEmpty)
+        XCTAssertEqual(scene.sparseVolumeInstances.count, 1)
+        XCTAssertEqual(compiled.volumes.count, 1)
+        XCTAssertEqual(compiled.volumeSamples.count, 0)
+        XCTAssertEqual(compiled.volumeBricks.count, sparse.bricks.count)
+        XCTAssertEqual(
+            compiled.volumeBrickSamples.count,
+            sparse.bricks.reduce(0) { total, brick in
+                total + brick.dimensions.x * brick.dimensions.y * brick.dimensions.z
+            }
+        )
+        XCTAssertEqual(compiled.volumeBricks.first?.gridOriginAndVolume.w, 0)
+        XCTAssertEqual(compiled.volumes[0].metadata.w, 1)
+        XCTAssertTrue(compiled.volumeBrickSamples.contains { $0.distance < 0 })
     }
 
     func testMaterialSpecularClearcoatSheenAndIORReachGPUParameters() {

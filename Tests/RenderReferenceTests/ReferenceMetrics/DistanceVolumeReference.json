@@ -1,0 +1,20 @@
+{
+  "scene": "distance-volumes",
+  "samples": 4,
+  "maxBounces": 3,
+  "metrics": {
+    "width": 56,
+    "height": 56,
+    "averageBrightness": 129.31,
+    "maxBrightness": 254.3,
+    "uniqueColorEstimate": 108,
+    "topCenterMaxBrightness": 254.3,
+    "bottomCenterMaxBrightness": 236.3
+  },
+  "tolerance": {
+    "averageBrightness": 22.0,
+    "maxBrightness": 35.0,
+    "uniqueColorEstimate": 40,
+    "regionalBrightness": 100.0
+  }
+}

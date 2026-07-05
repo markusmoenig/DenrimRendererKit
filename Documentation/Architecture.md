@@ -4,14 +4,14 @@ DenrimRendererKit keeps the public app-facing API separate from the internal ren
 
 The first implementation is intentionally small:
 
-* Public Swift scene types describe cameras, materials, meshes, and render settings.
+* Public Swift scene types describe cameras, materials, meshes, dense distance volumes, and render settings.
 * `RenderSession` owns a snapshot of the compiled scene.
 * Scene compilation now builds a BLAS/TLAS-style instance acceleration model before materializing triangles for the current GPU path.
-* The acceleration backend prepares triangle, material, texture, environment texture / importance distribution, emissive light-index, flat BVH node, and primitive-index GPU buffers.
+* The acceleration backend prepares triangle, dense distance-volume, material, texture, environment texture / importance distribution, emissive light-index, flat BVH node, and primitive-index GPU buffers.
 * `RenderSession` currently uses an experimental Metal ray tracing acceleration backend wrapper that builds guarded BLAS/TLAS resources while preserving the flat BVH fallback.
 * A small internal Metal ray tracing traversal probe can trace one ray against the TLAS for CPU-reference comparison.
 * Metal compute kernels trace rays, sample emissive triangles for direct lighting, accumulate samples, write an image, and record primary-surface AOVs.
-* The current render session uses the hardware TLAS traversal kernel when available and falls back to the flat BVH kernel otherwise.
+* The current render session uses the hardware TLAS traversal kernel when available for mesh-only scenes and falls back to the flat BVH / mixed volume kernel otherwise.
 * Internal render acceleration mode selection lets tests force either backend for parity checks.
 
 The important architectural boundary is the internal acceleration backend.
@@ -63,6 +63,18 @@ Later acceleration backends can use this boundary more directly:
 * CPU/GPU BVH traversal can move from one flat triangle BVH toward local mesh BVHs plus transformed top-level bounds.
 * Metal ray tracing can map records to TLAS / BLAS style instance acceleration.
 * Mixed geometry backends can keep per-object transforms for SDFs, heightmaps, and voxel objects.
+
+## Current Distance Volumes
+
+`RenderScene` supports dense signed-distance volumes through `DistanceVolume` and `DistanceVolumeInstance`.
+
+The implementation stores `GPUVolumeSample` records with distance plus a material field payload, alongside `GPUVolumeDescriptor` records containing world bounds, local bounds, transforms, sample offsets, and object IDs. The material payload starts with two blendable material IDs and can also carry baked per-sample channel overrides for base color, opacity, emission, roughness, metallic, and transmission. The flat Metal path traces triangles through the existing BVH, then raymarches bounded volumes only up to the nearest triangle candidate. Volume hits return the same shader `Hit` structure as triangles, so material evaluation, direct lighting, environment lighting, progressive accumulation, and primary AOV writes are shared.
+
+`SDFModel`, `SDFPrimitive`, and `DistanceVolumeBuilder` provide the first internal authoring/compiler layer: many primitives can be baked into one material-aware volume, including smooth-union material blends and constant primitive material fields. This is the preferred path for SDF modeling over one dense volume per primitive, and it is the renderer-side shape needed for procedural products where an editable operator graph bakes a distance field plus material fields for fast rendering.
+
+The compiler can now emit either a dense `DistanceVolume` or a CPU-side `SparseDistanceVolume` made of occupied sample bricks. Sparse bricks use the same evaluator as dense builds, preserve distance/material samples, and can expand back into a dense volume for CPU comparisons. `RenderScene` can carry sparse volume instances; scene compilation emits sparse volume descriptors, brick descriptors, and brick sample payloads.
+
+The flat Metal path renders dense volumes by raymarching dense volume buffers and sparse volumes by testing brick bounds before marching brick-local samples. The current sparse traversal uses a flat brick list; the next backend step is to replace that with a brick BVH or atlas indirection for larger edited fields. Metal ray tracing acceleration currently remains mesh-only; scenes containing distance volumes use the flat mixed-geometry path.
 
 ## Current Acceleration
 

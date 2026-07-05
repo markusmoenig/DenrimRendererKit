@@ -57,6 +57,19 @@ Initial public types:
 * `Mesh`
 * `MeshInstance`
 * `MeshLoadingError`
+* `DistanceVolume`
+* `DistanceVolumeInstance`
+* `DistanceVolumeMaterialFields`
+* `DistanceVolumeMaterialSample`
+* `SparseDistanceVolume`
+* `SparseDistanceVolumeBrick`
+* `SparseDistanceVolumeInstance`
+* `SDFModel`
+* `SDFPrimitive`
+* `SDFPrimitiveShape`
+* `DistanceVolumeBuildSettings`
+* `SparseDistanceVolumeBuildSettings`
+* `DistanceVolumeBuilder`
 * `Material`
 * `MaterialID`
 * `BuiltInMaterialLibrary`
@@ -85,6 +98,73 @@ scene.add(
     transform: .translation(SIMD3<Float>(0, 1, 0))
 )
 ```
+
+Dense signed-distance volumes can be added with the same material and transform pattern:
+
+```swift
+let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.8, 0.2, 0.1)))
+let volume = DistanceVolume(
+    width: 32,
+    height: 32,
+    depth: 32,
+    distances: samples,
+    boundsMin: SIMD3<Float>(repeating: -1),
+    boundsMax: SIMD3<Float>(repeating: 1)
+)
+
+scene.add(
+    volume: volume,
+    material: material,
+    transform: .translation(SIMD3<Float>(0, 1, 0))
+)
+```
+
+`DistanceVolume` stores dense row-major X-fastest signed-distance samples in local object space. The current Metal path renders the zero crossing as a surface, computes normals from the distance gradient, and reuses the regular material, lighting, and AOV path.
+
+`DistanceVolumeMaterialSample` can carry a two-material blend plus optional baked `DistanceVolumeMaterialFields`. These fields override selected material channels after material-ID blending, which lets procedural SDF systems bake color, opacity, emission, roughness, metallic, and transmission fields without generating a unique static material for every voxel.
+
+Multiple SDF primitives can be compiled into one material-aware dense volume before adding it to a scene:
+
+```swift
+let red = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.1, 0.1)))
+let blue = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.1, 0.2, 0.9)))
+let model = SDFModel(primitives: [
+    SDFPrimitive(
+        shape: .sphere(radius: 0.55),
+        material: red,
+        materialFields: DistanceVolumeMaterialFields(baseColor: SIMD3<Float>(0.9, 0.16, 0.08), roughness: 0.82),
+        transform: .translation(SIMD3<Float>(-0.25, 0, 0))
+    ),
+    SDFPrimitive(shape: .sphere(radius: 0.55), material: blue, transform: .translation(SIMD3<Float>(0.25, 0, 0)), smoothUnionRadius: 0.2)
+])
+let field = try DistanceVolumeBuilder.build(model: model, settings: DistanceVolumeBuildSettings(resolution: 48))
+scene.add(volume: field, material: red)
+```
+
+The dense builder writes distance plus material payload samples. Smooth unions can produce two-material blend weights so material transitions follow the same blend region as the distance field. Primitive material fields are baked into the volume samples and can be blended when both sides contribute the same channel. The scene instance material remains the fallback for manually authored single-material volumes.
+
+For larger or editable SDF compositions, the same model can be compiled into sparse CPU-side bricks:
+
+```swift
+let sparse = try DistanceVolumeBuilder.buildSparse(
+    model: model,
+    settings: SparseDistanceVolumeBuildSettings(
+        denseSettings: DistanceVolumeBuildSettings(resolution: 96),
+        brickSize: SIMD3<Int>(repeating: 8),
+        narrowBand: 0.12
+    )
+)
+let previewField = sparse.denseVolume()
+scene.add(volume: previewField, material: red)
+```
+
+`SparseDistanceVolume` stores only bricks that overlap the signed-distance narrow band. Sparse volumes can also be added directly to a scene:
+
+```swift
+scene.add(sparseVolume: sparse, material: red)
+```
+
+Scene compilation emits sparse brick descriptors and brick sample payloads. The flat Metal path traces dense volumes through dense buffers and sparse volumes through brick bounds plus brick-local samples, so sparse SDF scenes no longer need to be densified for rendering. A future optimization can replace the flat brick list with a brick BVH or atlas indirection without changing the scene API.
 
 Wavefront OBJ and PLY meshes can be loaded from disk:
 
@@ -322,14 +402,15 @@ PNG export is visualization-oriented. Beauty output uses an ACES-fitted filmic t
 
 ## Built-In Reference Scenes
 
-The package currently includes three built-in scenes:
+The package currently includes built-in reference scenes:
 
 * `RenderScene.cornellBox()` for global illumination, color bleeding, area light orientation, and camera sanity checks.
 * `RenderScene.materialReference()` for the current diffuse, GGX-style rough metallic, and emissive material baseline.
 * `RenderScene.materialVariantReference(mesh:)` for rendering one caller-supplied mesh through multiple material variants, suitable for local benchmark meshes such as a Stanford Dragon PLY or OBJ.
 * `RenderScene.transparentMaterialReference()` for opacity, cutout, and transparent / refractive material planning.
+* `RenderScene.distanceVolumeReference()` for one compiled dense SDF volume containing multiple primitives, transformed primitive bounds, transparent / transmissive volume surfaces, and volume AOV validation.
 
-The material reference scenes are intentionally small. They should grow as the renderer gains semi-transparent blending, nested dielectric priority, layered materials, and richer texture reference coverage.
+The reference scenes are intentionally small. They should grow as the renderer gains semi-transparent blending, nested dielectric priority, layered materials, sparse distance-volume bricks, and richer texture reference coverage.
 
 ## Scene Scripting
 

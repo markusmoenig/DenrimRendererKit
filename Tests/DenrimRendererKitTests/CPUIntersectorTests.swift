@@ -68,4 +68,23 @@ final class CPUIntersectorTests: XCTestCase {
         XCTAssertEqual(hit.position.x, 2, accuracy: 0.0001)
         XCTAssertEqual(hit.position.z, 0, accuracy: 0.0001)
     }
+
+    func testRayHitsDistanceVolumeSphere() throws {
+        let volume = DistanceVolume.sphere(resolution: 24, radius: 0.5)
+        let ray = Ray(
+            origin: SIMD3<Float>(0, 0, 2),
+            direction: SIMD3<Float>(0, 0, -1)
+        )
+
+        let hit = try XCTUnwrap(CPUIntersector.closestHit(
+            ray: ray,
+            volume: volume,
+            material: MaterialID(rawValue: 3)
+        ))
+
+        XCTAssertEqual(hit.material.rawValue, 3)
+        XCTAssertEqual(hit.distance, 1.5, accuracy: 0.08)
+        XCTAssertEqual(hit.position.z, 0.5, accuracy: 0.08)
+        XCTAssertEqual(hit.normal.z, 1, accuracy: 0.08)
+    }
 }

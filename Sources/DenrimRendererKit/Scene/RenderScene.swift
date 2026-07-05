@@ -64,7 +64,7 @@ public struct RenderDefaults: Sendable {
     }
 }
 
-/// A renderable scene containing camera, materials, and mesh instances.
+/// A renderable scene containing camera, materials, mesh instances, and distance volumes.
 public struct RenderScene: Sendable {
     /// Scene camera.
     public var camera: Camera
@@ -74,6 +74,12 @@ public struct RenderScene: Sendable {
 
     /// Mesh instances in the scene.
     public private(set) var meshInstances: [MeshInstance]
+
+    /// Distance-volume instances in the scene.
+    public private(set) var volumeInstances: [DistanceVolumeInstance]
+
+    /// Sparse distance-volume instances in the scene.
+    public private(set) var sparseVolumeInstances: [SparseDistanceVolumeInstance]
 
     /// Environment lighting sampled by rays that miss scene geometry.
     public var environment: Environment
@@ -95,6 +101,8 @@ public struct RenderScene: Sendable {
         self.renderDefaults = renderDefaults
         self.materials = []
         self.meshInstances = []
+        self.volumeInstances = []
+        self.sparseVolumeInstances = []
     }
 
     /// Adds a material and returns its scene-local identifier.
@@ -113,6 +121,32 @@ public struct RenderScene: Sendable {
     ) {
         meshInstances.append(MeshInstance(
             mesh: mesh,
+            material: material,
+            transform: transform
+        ))
+    }
+
+    /// Adds a signed-distance volume instance using an existing material.
+    public mutating func add(
+        volume: DistanceVolume,
+        material: MaterialID,
+        transform: Transform = .identity
+    ) {
+        volumeInstances.append(DistanceVolumeInstance(
+            volume: volume,
+            material: material,
+            transform: transform
+        ))
+    }
+
+    /// Adds a sparse signed-distance volume instance using an existing material.
+    public mutating func add(
+        sparseVolume: SparseDistanceVolume,
+        material: MaterialID,
+        transform: Transform = .identity
+    ) {
+        sparseVolumeInstances.append(SparseDistanceVolumeInstance(
+            volume: sparseVolume,
             material: material,
             transform: transform
         ))
@@ -454,6 +488,160 @@ public struct RenderScene: Sendable {
         return scene
     }
 
+    private static func distanceVolumeReferenceContents() -> (
+        scene: RenderScene,
+        model: SDFModel,
+        settings: DistanceVolumeBuildSettings,
+        fallbackMaterial: MaterialID
+    ) {
+        var scene = RenderScene(
+            camera: Camera(
+                origin: SIMD3<Float>(0, 1.35, 4.8),
+                target: SIMD3<Float>(0, 0.68, 0),
+                verticalFieldOfViewDegrees: 38
+            )
+        )
+
+        let floor = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.58, 0.60, 0.56), roughness: 0.74))
+        let back = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.32, 0.37, 0.43), roughness: 0.82))
+        let red = scene.addMaterial(Material(
+            baseColor: SIMD3<Float>(0.92, 0.22, 0.14),
+            roughness: 0.62,
+            clearcoat: 0.18,
+            clearcoatRoughness: 0.08
+        ))
+        let transparent = scene.addMaterial(Material(
+            baseColor: SIMD3<Float>(0.18, 0.56, 0.95),
+            roughness: 0.08,
+            opacity: 0.42,
+            transmission: 0.82,
+            transmissionColor: SIMD3<Float>(0.62, 0.84, 1.0),
+            transmissionRoughness: 0.03,
+            transmissionIndexOfRefraction: 1.38,
+            transmissionAbsorptionColor: SIMD3<Float>(0.68, 0.84, 1.0),
+            transmissionAbsorptionDistance: 0.9
+        ))
+        let metal = scene.addMaterial(Material(
+            baseColor: SIMD3<Float>(0.74, 0.86, 0.95),
+            roughness: 0.18,
+            metallic: 1,
+            specularAnisotropy: 0.45,
+            clearcoat: 0.12,
+            clearcoatRoughness: 0.04
+        ))
+        let yellow = scene.addMaterial(Material(
+            baseColor: SIMD3<Float>(0.95, 0.72, 0.18),
+            roughness: 0.38,
+            sheen: 0.25,
+            sheenColor: SIMD3<Float>(1.0, 0.86, 0.42)
+        ))
+        let rearPanel = scene.addMaterial(Material(
+            baseColor: SIMD3<Float>(0.18, 0.84, 0.42),
+            emission: SIMD3<Float>(0.18, 0.84, 0.42),
+            emissionStrength: 0.7,
+            roughness: 0.65
+        ))
+        let light = scene.addMaterial(Material(
+            baseColor: SIMD3<Float>(1, 1, 1),
+            emission: SIMD3<Float>(1, 0.9, 0.72),
+            emissionStrength: 10
+        ))
+
+        scene.add(mesh: .quad(
+            SIMD3<Float>(-3.0, 0, 2.0),
+            SIMD3<Float>(3.0, 0, 2.0),
+            SIMD3<Float>(3.0, 0, -2.0),
+            SIMD3<Float>(-3.0, 0, -2.0)
+        ), material: floor)
+        scene.add(mesh: .quad(
+            SIMD3<Float>(-3.0, 0, -2.0),
+            SIMD3<Float>(3.0, 0, -2.0),
+            SIMD3<Float>(3.0, 2.5, -2.0),
+            SIMD3<Float>(-3.0, 2.5, -2.0)
+        ), material: back)
+        scene.add(mesh: .quad(
+            SIMD3<Float>(-0.8, 2.36, -0.75),
+            SIMD3<Float>(0.8, 2.36, -0.75),
+            SIMD3<Float>(0.8, 2.36, 0.25),
+            SIMD3<Float>(-0.8, 2.36, 0.25)
+        ), material: light)
+        scene.add(mesh: .quad(
+            SIMD3<Float>(-0.66, 0.16, -0.38),
+            SIMD3<Float>(0.36, 0.16, -0.38),
+            SIMD3<Float>(0.36, 1.16, -0.38),
+            SIMD3<Float>(-0.66, 1.16, -0.38)
+        ), material: rearPanel)
+
+        let model = SDFModel(primitives: [
+            SDFPrimitive(
+                shape: .sphere(radius: 0.5),
+                material: red,
+                transform: Transform.translation(SIMD3<Float>(-1.25, 0.55, 0.1))
+                    * Transform.scale(SIMD3<Float>(1.0, 1.1, 0.9))
+            ),
+            SDFPrimitive(
+                shape: .sphere(radius: 0.5),
+                material: transparent,
+                transform: Transform.translation(SIMD3<Float>(-0.2, 0.48, 0.0))
+                    * Transform.scale(SIMD3<Float>(0.88, 0.96, 0.88)),
+                smoothUnionRadius: 0.08
+            ),
+            SDFPrimitive(
+                shape: .sphere(radius: 0.5),
+                material: metal,
+                transform: Transform.translation(SIMD3<Float>(0.86, 0.42, 0.06))
+                    * Transform.scale(SIMD3<Float>(0.84, 0.84, 0.84))
+            ),
+            SDFPrimitive(
+                shape: .sphere(radius: 0.5),
+                material: yellow,
+                transform: Transform.translation(SIMD3<Float>(1.55, 0.26, 0.38))
+                    * Transform.scale(SIMD3<Float>(0.52, 0.52, 0.52))
+            ),
+            SDFPrimitive(
+                shape: .sphere(radius: 0.5),
+                material: yellow,
+                transform: Transform.translation(SIMD3<Float>(-1.85, 0.23, 0.62))
+                    * Transform.scale(SIMD3<Float>(0.46, 0.46, 0.46))
+            )
+        ])
+        let settings = DistanceVolumeBuildSettings(
+            dimensions: SIMD3<Int>(48, 36, 32),
+            boundsMin: SIMD3<Float>(-2.35, -0.02, -0.72),
+            boundsMax: SIMD3<Float>(2.1, 1.2, 0.92)
+        )
+
+        return (scene, model, settings, red)
+    }
+
+    /// Creates a built-in dense distance-volume reference scene for mixed SDF rendering checks.
+    public static func distanceVolumeReference() -> RenderScene {
+        var contents = distanceVolumeReferenceContents()
+        let volume = try! DistanceVolumeBuilder.build(
+            model: contents.model,
+            settings: contents.settings
+        )
+        contents.scene.add(volume: volume, material: contents.fallbackMaterial)
+
+        return contents.scene
+    }
+
+    /// Creates a built-in sparse-brick distance-volume reference scene for mixed SDF rendering checks.
+    public static func sparseDistanceVolumeReference() -> RenderScene {
+        var contents = distanceVolumeReferenceContents()
+        let volume = try! DistanceVolumeBuilder.buildSparse(
+            model: contents.model,
+            settings: SparseDistanceVolumeBuildSettings(
+                denseSettings: contents.settings,
+                brickSize: SIMD3<Int>(8, 8, 8),
+                narrowBand: 0.28
+            )
+        )
+        contents.scene.add(sparseVolume: volume, material: contents.fallbackMaterial)
+
+        return contents.scene
+    }
+
     private static func normalizedMeshTransform(mesh: Mesh, targetMaxExtent: Float) -> Transform {
         guard let bounds = meshBounds(mesh), targetMaxExtent > 0 else {
             return .identity
@@ -495,9 +683,16 @@ public struct RenderScene: Sendable {
 
         let instanceAcceleration = try InstanceAccelerationBuilder().build(scene: self)
 
+        let volumeResources = try LinearTriangleAccelerationBackend.gpuVolumes(scene: self)
+        let volumeBrickResources = try LinearTriangleAccelerationBackend.gpuVolumeBricks(scene: self)
+
         return SceneCompilation(
             triangles: instanceAcceleration.materializedTriangles(),
             materials: materials.map { $0.gpuMaterial() },
+            volumes: volumeResources.descriptors,
+            volumeSamples: volumeResources.samples,
+            volumeBricks: volumeBrickResources.descriptors,
+            volumeBrickSamples: volumeBrickResources.samples,
             instanceAcceleration: instanceAcceleration
         )
     }
@@ -506,5 +701,9 @@ public struct RenderScene: Sendable {
 struct SceneCompilation {
     var triangles: [GPUTriangle]
     var materials: [GPUMaterial]
+    var volumes: [GPUVolumeDescriptor]
+    var volumeSamples: [GPUVolumeSample]
+    var volumeBricks: [GPUVolumeBrickDescriptor]
+    var volumeBrickSamples: [GPUVolumeSample]
     var instanceAcceleration: InstanceAcceleration
 }

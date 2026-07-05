@@ -124,6 +124,7 @@ Current built-in material reference scenes:
 * `Examples/SceneScripts/MaterialTestBall/material-testball.denrim` uses the public-domain Material Test Ball mesh with a Poly Haven studio HDRI, floor, soft fill, and reflection cards for single-material preview thumbnails. HDRI importance sampling keeps the studio environment useful as lighting, not just reflections.
 * `Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim` applies the same material set to the Stanford Dragon after `./Examples/Tools/fetch-stanford-dragon.sh` downloads the benchmark mesh.
 * `RenderScene.transparentMaterialReference()` covers opacity planning, semi-transparent albedo alpha, fully transparent camera-ray cutout pass-through, measured absorption setup, and a rear visible surface for transmission / refraction comparison.
+* `RenderScene.distanceVolumeReference()` covers material and AOV behavior on one dense SDF volume compiled from multiple primitives, including semi-transparent / transmissive volume hits, material payload selection, and curved distance-gradient normals.
 
 Reusable built-in material presets are exposed through `BuiltInMaterialLibrary` and SceneScript's `material name preset preset-id` form. The first catalog includes matte surfaces, plastics, fabrics, metals, coated paints, `coating.iridescent-amber`, glass, water, ceramics, and emissive panels. These are renderer-native presets rather than a full MoonRay clone, but their identifiers are stable enough for Denrim product UIs to query and display.
 

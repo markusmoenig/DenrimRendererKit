@@ -77,7 +77,8 @@ Current test foundation:
 * The first render reference test renders a small Cornell Box PNG, verifies that the image is non-empty, checks basic color variation, and confirms that the ceiling light appears above the floor.
 * The material reference render test renders the built-in diffuse, GGX-style rough metallic, and emissive material scene and checks that the output is bright and colorful enough to catch blank or severely broken material rendering.
 * The transparent material reference render test verifies semi-transparent albedo alpha, cutout pass-through visibility, measured absorption setup, and rear-surface beauty contribution.
-* Cornell Box, material reference, scripted UV/normal-map, and transparent export tests compare rendered image or alpha metrics against stored tolerant baselines.
+* The distance-volume reference render test verifies one dense SDF volume compiled from multiple primitives, transformed primitive bounds, transparent / transmissive volume AOVs, curved SDF normals, and rear-surface beauty contribution through a volume hit path.
+* Cornell Box, material reference, distance-volume reference, scripted UV/normal-map, and transparent export tests compare rendered image or alpha metrics against stored tolerant baselines.
 
 Current visual reference scenes:
 
@@ -85,6 +86,7 @@ Current visual reference scenes:
 * `RenderScene.materialReference()`
 * `RenderScene.materialVariantReference(mesh:)`
 * `RenderScene.transparentMaterialReference()`
+* `RenderScene.distanceVolumeReference()`
 * Scripted UV/normal-map scene authored with `SceneScript`
 * Scripted image-texture quad scene authored with `SceneScript`
 * Scripted imported-mesh scene authored with `SceneScript`
