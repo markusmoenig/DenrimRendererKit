@@ -1,4 +1,5 @@
 import Foundation
+import simd
 
 /// Preset quality intent for render sessions.
 public enum RenderQuality: Sendable {
@@ -44,6 +45,16 @@ public struct RenderSettings: Sendable {
     /// Whether primary camera rays that miss the scene should export with zero alpha.
     public var transparentBackground: Bool
 
+    /// Whether primary camera rays that miss the scene should render the environment.
+    ///
+    /// When disabled, environment lighting, reflections, and refractions remain active after a
+    /// surface hit, but direct camera misses write `backgroundColor` with opaque alpha unless
+    /// `transparentBackground` is enabled.
+    public var showsEnvironmentBackground: Bool
+
+    /// Linear RGB color used for primary camera misses when the environment background is hidden.
+    public var backgroundColor: SIMD3<Float>
+
     /// Optional denoising applied to beauty output. Defaults to disabled.
     public var denoise: DenoiseSettings
 
@@ -51,6 +62,11 @@ public struct RenderSettings: Sendable {
     ///
     /// Use `nil` to inherit the value from `quality`, or `0` to disable clamping.
     public var sampleRadianceClamp: Float?
+
+    /// Enables SDF traversal counters for profiling sparse and dense volume paths.
+    ///
+    /// Disabled by default because the shader uses atomic increments while collecting stats.
+    public var collectsSDFTraversalStats: Bool
 
     /// Creates render settings.
     public init(
@@ -60,8 +76,11 @@ public struct RenderSettings: Sendable {
         quality: RenderQuality = .preview,
         previousCamera: Camera? = nil,
         transparentBackground: Bool = false,
+        showsEnvironmentBackground: Bool = true,
+        backgroundColor: SIMD3<Float> = SIMD3<Float>(0, 0, 0),
         denoise: DenoiseSettings = .none,
-        sampleRadianceClamp: Float? = nil
+        sampleRadianceClamp: Float? = nil,
+        collectsSDFTraversalStats: Bool = false
     ) {
         self.width = width
         self.height = height
@@ -69,11 +88,25 @@ public struct RenderSettings: Sendable {
         self.quality = quality
         self.previousCamera = previousCamera
         self.transparentBackground = transparentBackground
+        self.showsEnvironmentBackground = showsEnvironmentBackground
+        self.backgroundColor = backgroundColor
         self.denoise = denoise
         self.sampleRadianceClamp = sampleRadianceClamp
+        self.collectsSDFTraversalStats = collectsSDFTraversalStats
     }
 
     var resolvedSampleRadianceClamp: Float {
         sampleRadianceClamp ?? quality.defaultSampleRadianceClamp
+    }
+
+    var shaderQualityLevel: UInt32 {
+        switch quality {
+        case .preview:
+            return 0
+        case .interactive:
+            return 1
+        case .final:
+            return 2
+        }
     }
 }

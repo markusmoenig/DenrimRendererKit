@@ -35,6 +35,7 @@ Initial public types:
 
 * `DenrimRenderer`
 * `RenderSession`
+* `SDFTraversalStats`
 * `RenderViewport`
 * `RenderSettings`
 * `RenderAccelerationMode`
@@ -76,6 +77,9 @@ Initial public types:
 * `DistanceFieldBakeRequest`
 * `DistanceFieldBakeResult`
 * `DistanceFieldBakeStorage`
+* `RenderGPUSparseFieldResource`
+* `RenderGPUSparseFieldBrick`
+* `RenderGPUSparseFieldBrickUpdate`
 * `SparseDistanceVolume`
 * `SparseDistanceVolumeBrick`
 * `SparseDistanceVolumeInstance`
@@ -157,7 +161,7 @@ let baker = renderer.makeDistanceFieldBaker()
 let result = try baker.bake(DistanceFieldBakeRequest(
     graph: DistanceFieldBakeGraph(model: formCompiledModel),
     resolution: 64,
-    storage: .sparseBricks(brickSize: 8, narrowBand: 0.2),
+    storage: .sparseBricks(brickSize: 8, narrowBand: 0.2, sampleScale: 2),
     fallbackMaterial: moss
 ))
 let fieldID = scene.add(fieldBundle: result.bundle, transform: objectTransform)
@@ -165,7 +169,165 @@ let fieldID = scene.add(fieldBundle: result.bundle, transform: objectTransform)
 
 Form should own its editable timeline/operator document format. RendererKit owns the renderable field-bundle API and storage semantics. SceneScript can emit or load comparable scenes for debugging and fixtures, but it is not the realtime interchange layer between Form and RendererKit.
 
-`DistanceFieldBaker` is the shared bake service for SceneScript, Denrim Form, and other procedural hosts. It accepts a `DistanceFieldBakeGraph`, target bounds/resolution, and dense or sparse-brick storage. The current Metal compute path supports transformed spheres, rounded boxes, cylinders, union/subtract, smooth-union material IDs, and sparse-brick extraction. Graphs with compact attributes or baked material fields currently fall back to the CPU reference baker so semantic/material data is preserved. Future work should move those lanes, cache lookup, and dirty-brick rebuilds behind the same API.
+`DistanceFieldBaker` is the shared bake service for SceneScript, Denrim Form, and other procedural hosts. It accepts a `DistanceFieldBakeGraph`, target bounds/resolution, and dense or sparse-brick storage. `DistanceFieldBakeStorage.sparseBricks(..., sampleScale:)` requests refined sparse payloads for quality: the baker increases sample dimensions and brick payload size together while keeping the coarse brick grid stable. The current Metal compute path supports transformed spheres, rounded boxes, cylinders, union/subtract, smooth-union material IDs, sparse-brick extraction, and sample-scaled GPU-resident direct-grid bakes. Direct-grid `DistanceFieldProgram` bakes can keep compact attribute samples GPU-resident; generic `SDFModel` graphs with compact attributes or baked material fields still fall back to the CPU reference baker so semantic/material data is preserved. Future work should move those generic graph lanes and cache lookup behind the same API.
+
+`DistanceFieldProgram` is the first modular SDF IR for Form-style operator graphs. It is a small renderer-owned VM rather than arbitrary Metal source. Form should compile timeline modules into scalar/vector instructions and `emit` calls, so RendererKit does not need a new public SDF operation for every product-level component. The higher-level named operations are kept as conveniences and test fixtures, not as the main Form integration layer.
+
+An instruction program can define distance expressions directly:
+
+```swift
+let p = DistanceFieldVectorRegister(0)
+let distance = DistanceFieldScalarRegister(0)
+let radius = DistanceFieldScalarRegister(1)
+let finalDistance = DistanceFieldScalarRegister(2)
+
+let program = DistanceFieldProgram(instructions: [
+    .loadPosition(p),
+    .length(distance, p),
+    .setFloat(radius, 0.55),
+    .subtractFloat(finalDistance, distance, radius),
+    .emit(distance: finalDistance, material: materialID)
+])
+
+let result = try baker.bake(DistanceFieldBakeRequest(
+    graph: DistanceFieldBakeGraph(program: program),
+    resolution: 64,
+    storage: .sparseBricks(brickSize: 8, narrowBand: 0.2),
+    fallbackMaterial: materialID
+))
+```
+
+The instruction VM currently includes scalar/vector constants, arithmetic, min/max/abs, sin/cos, clamp/mix, vector compose/extract, length, box/cylinder distance intrinsics, field `emit` with union/subtract plus smooth-union material blending, and `writeAttribute(channel:value:)` for compact semantic fields such as growth age, wetness, moss amount, cavity, and similar Form data. Twist, bends, masks, and growth-style controls should be compiled from those generic instructions where possible. RendererKit should only grow new VM intrinsics when the math vocabulary itself is missing.
+
+```swift
+let layout = DistanceVolumeAttributeLayout(channels: [
+    DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
+    DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness)
+])
+
+let program = DistanceFieldProgram(
+    instructions: [
+        .loadPosition(.init(0)),
+        .length(.init(0), .init(0)),
+        .setFloat(.init(1), 0.55),
+        .subtractFloat(.init(2), .init(0), .init(1)),
+        .setFloat(.init(3), 0.75),
+        .writeAttribute(channel: 0, value: .init(3)),
+        .emit(distance: .init(2), material: materialID)
+    ],
+    attributeLayout: layout
+)
+```
+
+`program.optimized()` applies conservative constant folding. The baker runs the same optimizer before CPU/reference program baking and GPU instruction packing.
+
+The program path has a CPU/reference baker for dense and sparse validation fields, including sparse `sampleScale` payloads and compact attribute writes. It can also bake directly into GPU-resident sparse fields when using `GPUResidentSparseMetadataMode.directGridGPU`, including resident compact attribute sample buffers for `writeAttribute` instructions. That is the intended live-edit path for Form-style operator graphs. Existing `SDFModel` primitive graphs remain supported; compacted GPU-resident metadata for `DistanceFieldProgram` is not implemented yet.
+
+For live editors that can use RendererKit's Metal baker, `bakeGPUResident(_:)` avoids reading the baked sparse sample payload back to the CPU. RendererKit still keeps compact CPU brick metadata for bounds/grid setup, but the large `PackedDistanceVolumeSample` brick payload remains in an `MTLBuffer` and is bound directly by the render session:
+
+```swift
+let result = try baker.bakeGPUResident(DistanceFieldBakeRequest(
+    graph: DistanceFieldBakeGraph(model: formCompiledModel),
+    resolution: 96,
+    storage: .sparseBricks(brickSize: 8, narrowBand: 0.2),
+    fallbackMaterial: moss,
+    backend: .metalCompute
+))
+
+let fieldID = scene.add(fieldBundle: result.bundle)
+```
+
+The first GPU-resident version supports sparse-brick storage for graphs that the Metal baker can evaluate. It currently binds one GPU-resident sparse sample buffer per scene and cannot be mixed with CPU sparse fields in the same render session. That limitation keeps the shader layout stable while establishing the no-readback boundary Form needs.
+
+Live tools can over-allocate the first GPU-resident sample buffer and reuse it across later topology-changing bakes. If the new sparse payload fits in the old resource's `sampleCapacity`, RendererKit writes into the same `MTLBuffer`; otherwise it allocates a larger buffer:
+
+```swift
+let first = try baker.bakeGPUResident(
+    initialRequest,
+    sampleCapacityMultiplier: 2
+)
+
+let previous = scene.gpuSparseVolumeInstances[0].resource
+let next = try baker.bakeGPUResident(
+    editedRequest,
+    reusing: previous
+)
+```
+
+This is the first atlas-style residency layer. It keeps the heavy sample payload stable, while compact brick descriptors and sparse grids are still rebuilt from CPU-visible metadata. During `replaceGPUSparseFieldPreservingSession`, RendererKit also reuses the existing compact SDF metadata buffers when the replacement descriptor/grid payload fits their current capacity.
+
+For live editing where avoiding the CPU classification readback matters more than compact memory use, request direct-grid GPU metadata:
+
+```swift
+let live = try baker.bakeGPUResident(
+    editedRequest,
+    reusing: previous,
+    metadataMode: .directGridGPU
+)
+```
+
+This mode writes renderer-compatible brick descriptors, one grid, grid indices, and brick samples directly from Metal. It uses one potential brick slot per sparse grid cell, so inactive cells cost table/sample capacity but no CPU brick-list construction. The direct-grid kernels evaluate brick samples in parallel with one threadgroup per brick. Direct-grid metadata supports normal scene transforms and is patched with the scene-local volume index at compile time; the current renderer still supports one GPU-resident sparse field per scene.
+
+`DistanceFieldProgram` instruction graphs are supported on this direct-grid path:
+
+```swift
+let program = DistanceFieldProgram(instructions: [
+    .loadPosition(.init(0)),
+    .length(.init(0), .init(0)),
+    .setFloat(.init(1), 0.55),
+    .subtractFloat(.init(2), .init(0), .init(1)),
+    .emit(distance: .init(2), material: moss)
+])
+
+let result = try baker.bakeGPUResident(
+    DistanceFieldBakeRequest(
+        graph: DistanceFieldBakeGraph(program: program),
+        resolution: 96,
+        storage: .sparseBricks(brickSize: 8, narrowBand: 0.2),
+        fallbackMaterial: moss
+    ),
+    metadataMode: .directGridGPU
+)
+```
+
+For same-topology program edits, direct-grid resources can be updated by dirty brick index without rebuilding the resource:
+
+```swift
+let changedBrickIndices = try previousResource.directGridBrickIndices(
+    overlappingLocalBoundsMin: editBounds.min,
+    localBoundsMax: editBounds.max,
+    padding: editPadding
+)
+try baker.encodeUpdateGPUResidentProgramBricks(
+    previousResource,
+    program: updatedProgram,
+    brickIndices: changedBrickIndices,
+    narrowBand: 0.2,
+    fallbackMaterial: moss,
+    into: commandBuffer
+)
+```
+
+For material/attribute-only program edits where the active brick set is known to be unchanged, pass `updatesTopology: false` to skip the macro-grid rebuild:
+
+```swift
+let changedBrickIndices = try previousResource.directGridBrickIndices(
+    overlappingLocalBoundsMin: editBounds.min,
+    localBoundsMax: editBounds.max,
+    activeOnly: true
+)
+try baker.encodeUpdateGPUResidentProgramBricks(
+    previousResource,
+    program: updatedMaterialProgram,
+    brickIndices: changedBrickIndices,
+    narrowBand: 0.2,
+    fallbackMaterial: moss,
+    updatesTopology: false,
+    into: commandBuffer
+)
+```
+
+GPU-resident direct-grid program resources can carry a resident compact attribute sample buffer. Programs with `attributeLayout` write up to eight scalar channels as packed `float4` samples, and scene compilation binds that buffer to the same shader path used by CPU sparse attributes. GPU-resident material-field override lanes are still future work; use compact semantic attributes where possible for live Form-style materials.
 
 The first replacement API is whole-bundle based and uses the scene-local handle returned by `add(fieldBundle:)`:
 
@@ -173,7 +335,7 @@ The first replacement API is whole-bundle based and uses the scene-local handle 
 scene.replaceField(fieldID, with: updatedBundle)
 ```
 
-This is enough for early editor integration where Form rebuilds an affected field and recreates a render session. `RenderFieldID` is intentionally a lightweight scene handle; if the host rebuilds the scene, it should discard old handles. Dirty-brick GPU updates and atlas residency can be added later behind the same high-level bundle contract.
+This is enough for early editor integration where Form rebuilds an affected field and recreates a render session. `RenderFieldID` is intentionally a lightweight scene handle; if the host rebuilds the scene, it should discard old handles.
 
 For live accumulation, prefer `RenderViewport` over managing `RenderSession` directly. `RenderSession` is a compiled snapshot; `RenderViewport` owns the editable scene snapshot plus the current session and restarts accumulation when the scene changes:
 
@@ -193,6 +355,104 @@ try viewport.renderNextSample()
 ```
 
 `replaceField` is transactional: if the handle is invalid it returns `false`, and if rebuilding the session throws, the previous scene/session remain active. For app-owned Metal frame loops, call `viewport.encodeNextSample(into:)` and then sample `viewport.liveMetalTexture(for:)`.
+
+For UI-constrained editors, `RenderViewport` can accumulate one spiral-ordered tile per call instead of rendering a whole frame. The first tile starts near the center of the image, then tiles expand outward. `sampleCount` advances only after the final tile in the sweep, so every tile in that sweep uses the same accumulation weight:
+
+```swift
+let progress = try viewport.encodeNextTile(
+    tileWidth: 128,
+    tileHeight: 128,
+    into: commandBuffer
+)
+
+let texture = viewport.liveMetalTexture(for: .beauty)
+if progress.completedSample {
+    // One full-frame progressive sample is now complete.
+}
+```
+
+This is intended for Form-style viewports where the app wants to spend a small bounded amount of GPU work per display refresh, for example one 128x128 tile at 60 Hz. Full-frame `renderNextSample()` / `encodeNextSample(into:)` remain available and reset the tile cursor.
+
+For same-topology GPU-resident edits, Form can update dirty brick payloads without readback and without rebuilding the render session. Encode the bake kernels that write changed brick samples, then encode the RendererKit copy into the field resource, then continue rendering. `RenderViewport` preserves the current session and resets progressive accumulation:
+
+```swift
+let commandBuffer = commandQueue.makeCommandBuffer()!
+try viewport.encodeUpdateGPUSparseFieldBricks(
+    fieldID,
+    updates: [
+        RenderGPUSparseFieldBrickUpdate(
+            brickIndex: changedBrickIndex,
+            sourceBuffer: freshlyBakedBrickSamples
+        )
+    ],
+    into: commandBuffer
+)
+try viewport.encodeNextSample(into: commandBuffer)
+commandBuffer.commit()
+```
+
+For direct-grid `DistanceFieldProgram` fields, the viewport can map field-local edit bounds to brick slots and ask the baker to update only those slots:
+
+```swift
+let commandBuffer = commandQueue.makeCommandBuffer()!
+try viewport.encodeUpdateGPUResidentProgramBricks(
+    fieldID,
+    baker: baker,
+    program: updatedProgram,
+    overlappingLocalBoundsMin: editBounds.min,
+    localBoundsMax: editBounds.max,
+    padding: editPadding,
+    narrowBand: 0.2,
+    fallbackMaterial: moss,
+    into: commandBuffer
+)
+try viewport.encodeNextTile(tileWidth: 128, tileHeight: 128, into: commandBuffer)
+commandBuffer.commit()
+```
+
+If the edit bounds are already in scene/world space, use the world-bounds overload. The viewport expands the AABB by `padding` in world units, then transforms the eight corners through the field instance transform before selecting direct-grid brick slots:
+
+```swift
+try viewport.encodeUpdateGPUResidentProgramBricks(
+    fieldID,
+    baker: baker,
+    program: updatedProgram,
+    overlappingWorldBoundsMin: worldEditBounds.min,
+    worldBoundsMax: worldEditBounds.max,
+    padding: editPadding,
+    narrowBand: 0.2,
+    fallbackMaterial: moss,
+    into: commandBuffer
+)
+```
+
+For material/attribute-only edits where occupancy is unchanged, combine `activeOnly: true` with `updatesTopology: false`:
+
+```swift
+try viewport.encodeUpdateGPUResidentProgramBricks(
+    fieldID,
+    baker: baker,
+    program: updatedMaterialProgram,
+    overlappingLocalBoundsMin: editBounds.min,
+    localBoundsMax: editBounds.max,
+    activeOnly: true,
+    narrowBand: 0.2,
+    fallbackMaterial: moss,
+    updatesTopology: false,
+    into: commandBuffer
+)
+```
+
+Dirty-brick updates keep the sparse topology fixed: existing brick indices, dimensions, transforms, and sample counts must remain valid. If an edit adds or removes occupied bricks, changes the field bounds, or changes resolution/brick size, use `replaceField` with a freshly baked bundle.
+
+For topology-changing edits that still only replace a GPU-resident sparse field, `RenderViewport` can refresh the SDF buffers while preserving the current `RenderSession` object and render targets:
+
+```swift
+let updated = try baker.bakeGPUResident(updatedRequest)
+try viewport.replaceGPUSparseFieldPreservingSession(fieldID, with: updated.bundle)
+```
+
+This path refreshes volume descriptors, sparse brick descriptors, sparse grids, and the GPU sample buffer binding, then resets accumulation. It reuses existing render-side SDF buffers when the new compact payload fits; otherwise it grows only the buffers that need more capacity. Direct-grid GPU metadata resources can provide those descriptor/grid buffers directly. This path is meant for edits where the field's brick occupancy changes but the rest of the scene is stable. Use full `replaceField` / `replaceScene` if the edit also changes meshes, material tables, textures, lights, camera, or other non-field scene state.
 
 `DistanceVolumeAttributeLayout` declares compact scalar fields that operators and semantic materials can share. Samples are packed in `SIMD4<Float>` groups, so a Form-style object can store fields such as growth age, cavity, wetness, and moss amount without carrying a full material parameter block per voxel:
 
@@ -244,13 +504,32 @@ let previewField = sparse.denseVolume()
 scene.add(volume: previewField, material: red)
 ```
 
-`SparseDistanceVolume` stores only bricks that overlap the signed-distance narrow band. Sparse volumes can also be added directly to a scene:
+`SparseDistanceVolume` stores only bricks that overlap the signed-distance narrow band. `SparseDistanceVolumeBuildSettings.sampleScale` can be set above `1` for sparse builds that need better surface quality inside occupied bricks: the builder increases sample density and brick size together, keeping the coarse sparse grid roughly stable while storing more distance samples only where bricks exist. SceneScript exposes the same setting as `sampleScale` on sparse `sdf` lines, and `DistanceFieldBaker` applies the same layout rule to GPU-resident sparse fields. Sparse volumes can also be added directly to a scene:
 
 ```swift
 scene.add(sparseVolume: sparse, material: red)
 ```
 
 Scene compilation emits sparse brick descriptors, brick sample payloads, and brick attribute payloads. The flat Metal path traces dense volumes through dense buffers and sparse volumes through brick bounds plus brick-local samples, so sparse SDF scenes no longer need to be densified for rendering. A future optimization can replace the flat brick list with a brick BVH or atlas indirection without changing the scene API.
+
+`RenderSettings.collectsSDFTraversalStats` enables opt-in GPU counters for profiling dense and sparse SDF traversal. It is disabled by default because collection uses shader atomics. `RenderSession.sdfTraversalStats()` returns cumulative counters for the current session, and `resetSDFTraversalStats()` clears them before a profiling pass:
+
+```swift
+let session = try renderer.makeSession(
+    scene: scene,
+    settings: RenderSettings(
+        width: 512,
+        height: 512,
+        collectsSDFTraversalStats: true
+    )
+)
+
+session.resetSDFTraversalStats()
+try session.render(samples: 8)
+let stats = session.sdfTraversalStats()
+```
+
+The CLI exposes the same path with `--sdf-stats`, printing dense volume tests/march steps, sparse grid cells, derived empty grid cells, sparse macro skips, sparse brick tests, invalid/range-culled bricks, sparse brick marches, sparse brick march steps, sparse brick hits, and primary/bounce/shadow scene-query counts in the render report.
 
 Wavefront OBJ and PLY meshes can be loaded from disk:
 
@@ -444,7 +723,7 @@ Use `pixels(for:)` for tests, analysis, custom CPU encoders, and exact output in
 
 Motion vectors use `RenderSettings.previousCamera` and store previous-screen minus current-screen movement in pixels in the red and green channels. If no previous camera is provided, the current scene camera is used and motion resolves to zero.
 
-`RenderSettings.transparentBackground` makes primary camera rays that miss the scene write zero alpha to beauty output and PNG export. It defaults to `false`, preserving the opaque sky background.
+`RenderSettings.transparentBackground` makes primary camera rays that miss the scene write zero alpha to beauty output and PNG export. It defaults to `false`, preserving the opaque sky background. `RenderSettings.showsEnvironmentBackground` controls whether primary camera misses draw the environment when the background is opaque. Set it to `false` for viewports that want a controlled `backgroundColor` while keeping the environment active for lighting, reflections, and glass refraction after a surface hit.
 
 `RenderSettings.denoise` defaults to `.none`, and raw converged rendering is the default quality path. Denoisers are explicit opt-in experiments only because they can introduce visible reconstruction artifacts. Set it to `.appleSVGF` to run Apple's Metal Performance Shaders SVGF denoiser, or `.simpleSpatial` to run DenrimRendererKit's internal GPU bilateral filter for preview/debug comparisons. The Apple path packs Denrim's depth and normal AOVs into the layout expected by `MPSSVGFDenoiser`, keeps temporal depth-normal history, filters beauty RGB, and preserves the original beauty alpha:
 

@@ -37,6 +37,72 @@ public struct RenderAccelerationInfo: Sendable {
     public var flatBVHNodeCount: Int
 }
 
+/// Coarse GPU-side SDF traversal counters collected by a render session.
+public struct SDFTraversalStats: Sendable, Equatable, Codable {
+    public var denseVolumeTests: UInt32
+    public var denseMarchSteps: UInt32
+    public var sparseGridCellsVisited: UInt32
+    public var sparseGridEmptyCells: UInt32
+    public var sparseGridMacroSkips: UInt32
+    public var sparseBrickTests: UInt32
+    public var sparseBrickInvalid: UInt32
+    public var sparseBrickRangeCulls: UInt32
+    public var sparseBrickMarches: UInt32
+    public var sparseBrickMarchSteps: UInt32
+    public var sparseBrickHits: UInt32
+    public var primarySceneQueries: UInt32
+    public var bounceSceneQueries: UInt32
+    public var shadowSceneQueries: UInt32
+
+    public static let zero = SDFTraversalStats(
+        denseVolumeTests: 0,
+        denseMarchSteps: 0,
+        sparseGridCellsVisited: 0,
+        sparseGridEmptyCells: 0,
+        sparseGridMacroSkips: 0,
+        sparseBrickTests: 0,
+        sparseBrickInvalid: 0,
+        sparseBrickRangeCulls: 0,
+        sparseBrickMarches: 0,
+        sparseBrickMarchSteps: 0,
+        sparseBrickHits: 0,
+        primarySceneQueries: 0,
+        bounceSceneQueries: 0,
+        shadowSceneQueries: 0
+    )
+}
+
+private enum SDFTraversalCounter: Int, CaseIterable {
+    case denseVolumeTests
+    case denseMarchSteps
+    case sparseGridCellsVisited
+    case sparseGridMacroSkips
+    case sparseBrickTests
+    case sparseBrickInvalid
+    case sparseBrickRangeCulls
+    case sparseBrickMarches
+    case sparseBrickMarchSteps
+    case sparseBrickHits
+    case primarySceneQueries
+    case bounceSceneQueries
+    case shadowSceneQueries
+}
+
+/// Pixel rectangle rendered by a tiled progressive render call.
+public struct RenderTile: Sendable, Equatable {
+    public var x: Int
+    public var y: Int
+    public var width: Int
+    public var height: Int
+
+    public init(x: Int, y: Int, width: Int, height: Int) {
+        self.x = max(x, 0)
+        self.y = max(y, 0)
+        self.width = max(width, 0)
+        self.height = max(height, 0)
+    }
+}
+
 /// A progressive render session for one scene and settings snapshot.
 public final class RenderSession {
     /// Settings used by this session.
@@ -55,20 +121,26 @@ public final class RenderSession {
     private let camera: GPUCamera
     private let previousCamera: GPUCamera
     private let triangleBuffer: MTLBuffer
-    private let volumeBuffer: MTLBuffer
-    private let volumeSampleBuffer: MTLBuffer
-    private let volumeAttributeDescriptorBuffer: MTLBuffer
-    private let volumeAttributeSampleBuffer: MTLBuffer
-    private let volumeBrickBuffer: MTLBuffer
-    private let volumeBrickSampleBuffer: MTLBuffer
-    private let volumeBrickAttributeDescriptorBuffer: MTLBuffer
-    private let volumeBrickAttributeSampleBuffer: MTLBuffer
+    private var volumeBuffer: MTLBuffer
+    private var volumeSampleBuffer: MTLBuffer
+    private var volumeAttributeDescriptorBuffer: MTLBuffer
+    private var volumeAttributeSampleBuffer: MTLBuffer
+    private var volumeBrickBuffer: MTLBuffer
+    private var volumeBrickSampleBuffer: MTLBuffer
+    private var volumeBrickMaterialFieldSampleBuffer: MTLBuffer
+    private var volumeBrickAttributeDescriptorBuffer: MTLBuffer
+    private var volumeBrickAttributeSampleBuffer: MTLBuffer
+    private var volumeBrickBVHNodeBuffer: MTLBuffer
+    private var volumeBrickBVHIndexBuffer: MTLBuffer
+    private var volumeBrickGridBuffer: MTLBuffer
+    private var volumeBrickGridIndexBuffer: MTLBuffer
     private let materialBuffer: MTLBuffer
     private let materialSemanticBuffer: MTLBuffer
     private let textureDescriptorBuffer: MTLBuffer
     private let texturePixelBuffer: MTLBuffer
     private let lightBuffer: MTLBuffer
     private let environmentSampleBuffer: MTLBuffer
+    private let sdfTraversalStatsBuffer: MTLBuffer
     private let accelerationNodeBuffer: MTLBuffer?
     private let primitiveIndexBuffer: MTLBuffer?
     private let accumulationTexture: MTLTexture
@@ -80,12 +152,17 @@ public final class RenderSession {
     private let objectIDTexture: MTLTexture
     private let motionVectorTexture: MTLTexture
     private let triangleCount: Int
-    private let volumeCount: Int
-    private let volumeSampleCount: Int
-    private let volumeAttributeSampleCount: Int
-    private let volumeBrickCount: Int
-    private let volumeBrickSampleCount: Int
-    private let volumeBrickAttributeSampleCount: Int
+    private var volumeCount: Int
+    private var volumeSampleCount: Int
+    private var volumeAttributeSampleCount: Int
+    private var volumeBrickCount: Int
+    private var volumeBrickSampleCount: Int
+    private var volumeBrickMaterialFieldSampleCount: Int
+    private var volumeBrickAttributeSampleCount: Int
+    private var volumeBrickBVHNodeCount: Int
+    private var volumeBrickBVHIndexCount: Int
+    private var volumeBrickGridCount: Int
+    private var volumeBrickGridIndexCount: Int
     private let materialCount: Int
     private let textureDescriptorCount: Int
     private let texturePixelCount: Int
@@ -181,6 +258,28 @@ public final class RenderSession {
         )
     }
 
+    var sdfResourceDebugInfo: (
+        volumeBuffer: MTLBuffer,
+        volumeBrickBuffer: MTLBuffer,
+        volumeBrickSampleBuffer: MTLBuffer,
+        volumeBrickAttributeDescriptorBuffer: MTLBuffer,
+        volumeBrickGridBuffer: MTLBuffer,
+        volumeBrickGridIndexBuffer: MTLBuffer,
+        volumeBrickCount: Int,
+        volumeBrickGridIndexCount: Int
+    ) {
+        (
+            volumeBuffer,
+            volumeBrickBuffer,
+            volumeBrickSampleBuffer,
+            volumeBrickAttributeDescriptorBuffer,
+            volumeBrickGridBuffer,
+            volumeBrickGridIndexBuffer,
+            volumeBrickCount,
+            volumeBrickGridIndexCount
+        )
+    }
+
     init(
         device: MTLDevice,
         commandQueue: MTLCommandQueue,
@@ -202,13 +301,14 @@ public final class RenderSession {
             && accelerationMode != .flatBVH
             && scene.volumeInstances.isEmpty
             && scene.sparseVolumeInstances.isEmpty
+            && scene.gpuSparseVolumeInstances.isEmpty
         let accelerationBackend: AccelerationBackend = canBuildHardwareAcceleration
             ? MetalRayTracingAccelerationBackend(
                 device: device,
                 commandQueue: commandQueue,
                 buildsFlatBVH: false
             )
-            : LinearTriangleAccelerationBackend()
+            : LinearTriangleAccelerationBackend(buildsVolumeBrickBVH: false)
         let compiled = try accelerationBackend.build(scene: scene)
         guard !compiled.triangles.isEmpty || !compiled.volumes.isEmpty else {
             throw DenrimRendererError.invalidScene("Scene contains no renderable geometry.")
@@ -235,9 +335,14 @@ public final class RenderSession {
         self.volumeCount = compiled.volumes.count
         self.volumeSampleCount = compiled.volumeSamples.count
         self.volumeAttributeSampleCount = compiled.volumeAttributeSamples.count
-        self.volumeBrickCount = compiled.volumeBricks.count
-        self.volumeBrickSampleCount = compiled.volumeBrickSamples.count
-        self.volumeBrickAttributeSampleCount = compiled.volumeBrickAttributeSamples.count
+        self.volumeBrickCount = compiled.gpuVolumeBrickCount ?? compiled.volumeBricks.count
+        self.volumeBrickSampleCount = compiled.gpuVolumeBrickSampleCount ?? compiled.volumeBrickSamples.count
+        self.volumeBrickMaterialFieldSampleCount = compiled.volumeBrickMaterialFieldSamples.count
+        self.volumeBrickAttributeSampleCount = compiled.gpuVolumeBrickAttributeSampleCount ?? compiled.volumeBrickAttributeSamples.count
+        self.volumeBrickBVHNodeCount = compiled.volumeBrickBVH.nodes.count
+        self.volumeBrickBVHIndexCount = compiled.volumeBrickBVH.primitiveIndices.count
+        self.volumeBrickGridCount = compiled.gpuVolumeBrickGridCount ?? compiled.volumeBrickGrids.count
+        self.volumeBrickGridIndexCount = compiled.gpuVolumeBrickGridIndexCount ?? compiled.volumeBrickGridIndices.count
         self.materialCount = compiled.materials.count
         self.textureDescriptorCount = compiled.textureDescriptors.count
         self.texturePixelCount = compiled.texturePixels.count
@@ -270,22 +375,84 @@ public final class RenderSession {
             device: device,
             values: compiled.volumeAttributeSamples
         )
-        self.volumeBrickBuffer = try Self.makeRequiredShaderBindingBuffer(
+        if let gpuVolumeBrickBuffer = compiled.gpuVolumeBrickBuffer {
+            guard gpuVolumeBrickBuffer.device === device else {
+                throw DenrimRendererError.invalidScene("GPU sparse distance field brick metadata buffer belongs to a different Metal device.")
+            }
+            self.volumeBrickBuffer = gpuVolumeBrickBuffer
+        } else {
+            self.volumeBrickBuffer = try Self.makeRequiredShaderBindingBuffer(
+                device: device,
+                values: compiled.volumeBricks
+            )
+        }
+        if let gpuVolumeBrickSampleBuffer = compiled.gpuVolumeBrickSampleBuffer {
+            guard gpuVolumeBrickSampleBuffer.device === device else {
+                throw DenrimRendererError.invalidScene("GPU sparse distance field sample buffer belongs to a different Metal device.")
+            }
+            self.volumeBrickSampleBuffer = gpuVolumeBrickSampleBuffer
+        } else {
+            self.volumeBrickSampleBuffer = try Self.makeRequiredShaderBindingBuffer(
+                device: device,
+                values: compiled.volumeBrickSamples
+            )
+        }
+        self.volumeBrickMaterialFieldSampleBuffer = try Self.makeRequiredShaderBindingBuffer(
             device: device,
-            values: compiled.volumeBricks
+            values: compiled.volumeBrickMaterialFieldSamples
         )
-        self.volumeBrickSampleBuffer = try Self.makeRequiredShaderBindingBuffer(
+        if let gpuVolumeBrickAttributeDescriptorBuffer = compiled.gpuVolumeBrickAttributeDescriptorBuffer {
+            guard gpuVolumeBrickAttributeDescriptorBuffer.device === device else {
+                throw DenrimRendererError.invalidScene("GPU sparse distance field attribute metadata buffer belongs to a different Metal device.")
+            }
+            self.volumeBrickAttributeDescriptorBuffer = gpuVolumeBrickAttributeDescriptorBuffer
+        } else {
+            self.volumeBrickAttributeDescriptorBuffer = try Self.makeRequiredShaderBindingBuffer(
+                device: device,
+                values: compiled.volumeBrickAttributeDescriptors
+            )
+        }
+        if let gpuVolumeBrickAttributeSampleBuffer = compiled.gpuVolumeBrickAttributeSampleBuffer {
+            guard gpuVolumeBrickAttributeSampleBuffer.device === device else {
+                throw DenrimRendererError.invalidScene("GPU sparse distance field attribute sample buffer belongs to a different Metal device.")
+            }
+            self.volumeBrickAttributeSampleBuffer = gpuVolumeBrickAttributeSampleBuffer
+        } else {
+            self.volumeBrickAttributeSampleBuffer = try Self.makeRequiredShaderBindingBuffer(
+                device: device,
+                values: compiled.volumeBrickAttributeSamples
+            )
+        }
+        self.volumeBrickBVHNodeBuffer = try Self.makeRequiredShaderBindingBuffer(
             device: device,
-            values: compiled.volumeBrickSamples
+            values: compiled.volumeBrickBVH.nodes
         )
-        self.volumeBrickAttributeDescriptorBuffer = try Self.makeRequiredShaderBindingBuffer(
+        self.volumeBrickBVHIndexBuffer = try Self.makeRequiredShaderBindingBuffer(
             device: device,
-            values: compiled.volumeBrickAttributeDescriptors
+            values: compiled.volumeBrickBVH.primitiveIndices
         )
-        self.volumeBrickAttributeSampleBuffer = try Self.makeRequiredShaderBindingBuffer(
-            device: device,
-            values: compiled.volumeBrickAttributeSamples
-        )
+        if let gpuVolumeBrickGridBuffer = compiled.gpuVolumeBrickGridBuffer {
+            guard gpuVolumeBrickGridBuffer.device === device else {
+                throw DenrimRendererError.invalidScene("GPU sparse distance field grid metadata buffer belongs to a different Metal device.")
+            }
+            self.volumeBrickGridBuffer = gpuVolumeBrickGridBuffer
+        } else {
+            self.volumeBrickGridBuffer = try Self.makeRequiredShaderBindingBuffer(
+                device: device,
+                values: compiled.volumeBrickGrids
+            )
+        }
+        if let gpuVolumeBrickGridIndexBuffer = compiled.gpuVolumeBrickGridIndexBuffer {
+            guard gpuVolumeBrickGridIndexBuffer.device === device else {
+                throw DenrimRendererError.invalidScene("GPU sparse distance field grid index metadata buffer belongs to a different Metal device.")
+            }
+            self.volumeBrickGridIndexBuffer = gpuVolumeBrickGridIndexBuffer
+        } else {
+            self.volumeBrickGridIndexBuffer = try Self.makeRequiredShaderBindingBuffer(
+                device: device,
+                values: compiled.volumeBrickGridIndices
+            )
+        }
         self.materialBuffer = device.makeBuffer(
             bytes: compiled.materials,
             length: MemoryLayout<GPUMaterial>.stride * compiled.materials.count,
@@ -311,6 +478,14 @@ public final class RenderSession {
             device: device,
             values: compiled.environmentSamples
         )
+        guard let sdfTraversalStatsBuffer = device.makeBuffer(
+            length: MemoryLayout<UInt32>.stride * SDFTraversalCounter.allCases.count,
+            options: .storageModeShared
+        ) else {
+            throw DenrimRendererError.commandBufferFailed("Could not create SDF traversal stats buffer.")
+        }
+        memset(sdfTraversalStatsBuffer.contents(), 0, sdfTraversalStatsBuffer.length)
+        self.sdfTraversalStatsBuffer = sdfTraversalStatsBuffer
         self.accelerationNodeBuffer = try Self.makeRequiredShaderBindingBuffer(
             device: device,
             values: compiled.bvh.nodes
@@ -388,6 +563,207 @@ public final class RenderSession {
         #endif
     }
 
+    /// Resets accumulated SDF traversal counters to zero.
+    public func resetSDFTraversalStats() {
+        memset(sdfTraversalStatsBuffer.contents(), 0, sdfTraversalStatsBuffer.length)
+    }
+
+    /// Refreshes only mutable distance-volume buffers while preserving render targets and accumulated resources.
+    ///
+    /// This supports live topology edits for GPU-resident sparse fields. Geometry,
+    /// materials, lights, camera, textures, and triangle acceleration are expected
+    /// to remain compatible with the current session.
+    func replaceDistanceFieldResources(from scene: RenderScene) throws {
+        guard !scene.gpuSparseVolumeInstances.isEmpty else {
+            throw DenrimRendererError.invalidScene("In-place distance field replacement requires a GPU-resident sparse field.")
+        }
+
+        let compiled = try LinearTriangleAccelerationBackend(
+            buildsFlatBVH: false,
+            buildsVolumeBrickBVH: false
+        ).build(scene: scene)
+
+        guard compiled.triangles.count == triangleCount else {
+            throw DenrimRendererError.invalidScene("In-place distance field replacement cannot change triangle geometry.")
+        }
+        guard compiled.materials.count == materialCount,
+              compiled.textureDescriptors.count == textureDescriptorCount,
+              compiled.texturePixels.count == texturePixelCount,
+              compiled.environmentTextureIndexPlusOne == environmentTextureIndexPlusOne,
+              compiled.environmentSamples.count == environmentDistributionCount,
+              compiled.lights.count == lightCount else {
+            throw DenrimRendererError.invalidScene("In-place distance field replacement cannot change materials, textures, environment, or lights.")
+        }
+
+        let newVolumeBuffer = try Self.reuseOrMakeRequiredShaderBindingBuffer(
+            existing: volumeBuffer,
+            device: device,
+            values: compiled.volumes
+        )
+        let newVolumeSampleBuffer = try Self.reuseOrMakeRequiredShaderBindingBuffer(
+            existing: volumeSampleBuffer,
+            device: device,
+            values: compiled.volumeSamples
+        )
+        let newVolumeAttributeDescriptorBuffer = try Self.reuseOrMakeRequiredShaderBindingBuffer(
+            existing: volumeAttributeDescriptorBuffer,
+            device: device,
+            values: compiled.volumeAttributeDescriptors
+        )
+        let newVolumeAttributeSampleBuffer = try Self.reuseOrMakeRequiredShaderBindingBuffer(
+            existing: volumeAttributeSampleBuffer,
+            device: device,
+            values: compiled.volumeAttributeSamples
+        )
+        let newVolumeBrickBuffer: MTLBuffer
+        if let gpuVolumeBrickBuffer = compiled.gpuVolumeBrickBuffer {
+            guard gpuVolumeBrickBuffer.device === device else {
+                throw DenrimRendererError.invalidScene("GPU sparse distance field brick metadata buffer belongs to a different Metal device.")
+            }
+            newVolumeBrickBuffer = gpuVolumeBrickBuffer
+        } else {
+            newVolumeBrickBuffer = try Self.reuseOrMakeRequiredShaderBindingBuffer(
+                existing: volumeBrickBuffer,
+                device: device,
+                values: compiled.volumeBricks
+            )
+        }
+        let newVolumeBrickSampleBuffer: MTLBuffer
+        if let gpuVolumeBrickSampleBuffer = compiled.gpuVolumeBrickSampleBuffer {
+            guard gpuVolumeBrickSampleBuffer.device === device else {
+                throw DenrimRendererError.invalidScene("GPU sparse distance field sample buffer belongs to a different Metal device.")
+            }
+            newVolumeBrickSampleBuffer = gpuVolumeBrickSampleBuffer
+        } else {
+            newVolumeBrickSampleBuffer = try Self.reuseOrMakeRequiredShaderBindingBuffer(
+                existing: volumeBrickSampleBuffer,
+                device: device,
+                values: compiled.volumeBrickSamples
+            )
+        }
+        let newVolumeBrickMaterialFieldSampleBuffer = try Self.reuseOrMakeRequiredShaderBindingBuffer(
+            existing: volumeBrickMaterialFieldSampleBuffer,
+            device: device,
+            values: compiled.volumeBrickMaterialFieldSamples
+        )
+        let newVolumeBrickAttributeDescriptorBuffer: MTLBuffer
+        if let gpuVolumeBrickAttributeDescriptorBuffer = compiled.gpuVolumeBrickAttributeDescriptorBuffer {
+            guard gpuVolumeBrickAttributeDescriptorBuffer.device === device else {
+                throw DenrimRendererError.invalidScene("GPU sparse distance field attribute metadata buffer belongs to a different Metal device.")
+            }
+            newVolumeBrickAttributeDescriptorBuffer = gpuVolumeBrickAttributeDescriptorBuffer
+        } else {
+            newVolumeBrickAttributeDescriptorBuffer = try Self.reuseOrMakeRequiredShaderBindingBuffer(
+                existing: volumeBrickAttributeDescriptorBuffer,
+                device: device,
+                values: compiled.volumeBrickAttributeDescriptors
+            )
+        }
+        let newVolumeBrickAttributeSampleBuffer: MTLBuffer
+        if let gpuVolumeBrickAttributeSampleBuffer = compiled.gpuVolumeBrickAttributeSampleBuffer {
+            guard gpuVolumeBrickAttributeSampleBuffer.device === device else {
+                throw DenrimRendererError.invalidScene("GPU sparse distance field attribute sample buffer belongs to a different Metal device.")
+            }
+            newVolumeBrickAttributeSampleBuffer = gpuVolumeBrickAttributeSampleBuffer
+        } else {
+            newVolumeBrickAttributeSampleBuffer = try Self.reuseOrMakeRequiredShaderBindingBuffer(
+                existing: volumeBrickAttributeSampleBuffer,
+                device: device,
+                values: compiled.volumeBrickAttributeSamples
+            )
+        }
+        let newVolumeBrickBVHNodeBuffer = try Self.reuseOrMakeRequiredShaderBindingBuffer(
+            existing: volumeBrickBVHNodeBuffer,
+            device: device,
+            values: compiled.volumeBrickBVH.nodes
+        )
+        let newVolumeBrickBVHIndexBuffer = try Self.reuseOrMakeRequiredShaderBindingBuffer(
+            existing: volumeBrickBVHIndexBuffer,
+            device: device,
+            values: compiled.volumeBrickBVH.primitiveIndices
+        )
+        let newVolumeBrickGridBuffer: MTLBuffer
+        if let gpuVolumeBrickGridBuffer = compiled.gpuVolumeBrickGridBuffer {
+            guard gpuVolumeBrickGridBuffer.device === device else {
+                throw DenrimRendererError.invalidScene("GPU sparse distance field grid metadata buffer belongs to a different Metal device.")
+            }
+            newVolumeBrickGridBuffer = gpuVolumeBrickGridBuffer
+        } else {
+            newVolumeBrickGridBuffer = try Self.reuseOrMakeRequiredShaderBindingBuffer(
+                existing: volumeBrickGridBuffer,
+                device: device,
+                values: compiled.volumeBrickGrids
+            )
+        }
+        let newVolumeBrickGridIndexBuffer: MTLBuffer
+        if let gpuVolumeBrickGridIndexBuffer = compiled.gpuVolumeBrickGridIndexBuffer {
+            guard gpuVolumeBrickGridIndexBuffer.device === device else {
+                throw DenrimRendererError.invalidScene("GPU sparse distance field grid index metadata buffer belongs to a different Metal device.")
+            }
+            newVolumeBrickGridIndexBuffer = gpuVolumeBrickGridIndexBuffer
+        } else {
+            newVolumeBrickGridIndexBuffer = try Self.reuseOrMakeRequiredShaderBindingBuffer(
+                existing: volumeBrickGridIndexBuffer,
+                device: device,
+                values: compiled.volumeBrickGridIndices
+            )
+        }
+
+        volumeBuffer = newVolumeBuffer
+        volumeSampleBuffer = newVolumeSampleBuffer
+        volumeAttributeDescriptorBuffer = newVolumeAttributeDescriptorBuffer
+        volumeAttributeSampleBuffer = newVolumeAttributeSampleBuffer
+        volumeBrickBuffer = newVolumeBrickBuffer
+        volumeBrickSampleBuffer = newVolumeBrickSampleBuffer
+        volumeBrickMaterialFieldSampleBuffer = newVolumeBrickMaterialFieldSampleBuffer
+        volumeBrickAttributeDescriptorBuffer = newVolumeBrickAttributeDescriptorBuffer
+        volumeBrickAttributeSampleBuffer = newVolumeBrickAttributeSampleBuffer
+        volumeBrickBVHNodeBuffer = newVolumeBrickBVHNodeBuffer
+        volumeBrickBVHIndexBuffer = newVolumeBrickBVHIndexBuffer
+        volumeBrickGridBuffer = newVolumeBrickGridBuffer
+        volumeBrickGridIndexBuffer = newVolumeBrickGridIndexBuffer
+
+        volumeCount = compiled.volumes.count
+        volumeSampleCount = compiled.volumeSamples.count
+        volumeAttributeSampleCount = compiled.volumeAttributeSamples.count
+        volumeBrickCount = compiled.gpuVolumeBrickCount ?? compiled.volumeBricks.count
+        volumeBrickSampleCount = compiled.gpuVolumeBrickSampleCount ?? compiled.volumeBrickSamples.count
+        volumeBrickMaterialFieldSampleCount = compiled.volumeBrickMaterialFieldSamples.count
+        volumeBrickAttributeSampleCount = compiled.gpuVolumeBrickAttributeSampleCount ?? compiled.volumeBrickAttributeSamples.count
+        volumeBrickBVHNodeCount = compiled.volumeBrickBVH.nodes.count
+        volumeBrickBVHIndexCount = compiled.volumeBrickBVH.primitiveIndices.count
+        volumeBrickGridCount = compiled.gpuVolumeBrickGridCount ?? compiled.volumeBrickGrids.count
+        volumeBrickGridIndexCount = compiled.gpuVolumeBrickGridIndexCount ?? compiled.volumeBrickGridIndices.count
+
+        resetAccumulation()
+    }
+
+    /// Reads accumulated SDF traversal counters.
+    public func sdfTraversalStats() -> SDFTraversalStats {
+        let counters = sdfTraversalStatsBuffer.contents().bindMemory(
+            to: UInt32.self,
+            capacity: SDFTraversalCounter.allCases.count
+        )
+        let sparseGridCellsVisited = counters[SDFTraversalCounter.sparseGridCellsVisited.rawValue]
+        let sparseBrickTests = counters[SDFTraversalCounter.sparseBrickTests.rawValue]
+        return SDFTraversalStats(
+            denseVolumeTests: counters[SDFTraversalCounter.denseVolumeTests.rawValue],
+            denseMarchSteps: counters[SDFTraversalCounter.denseMarchSteps.rawValue],
+            sparseGridCellsVisited: sparseGridCellsVisited,
+            sparseGridEmptyCells: sparseGridCellsVisited - min(sparseGridCellsVisited, sparseBrickTests),
+            sparseGridMacroSkips: counters[SDFTraversalCounter.sparseGridMacroSkips.rawValue],
+            sparseBrickTests: sparseBrickTests,
+            sparseBrickInvalid: counters[SDFTraversalCounter.sparseBrickInvalid.rawValue],
+            sparseBrickRangeCulls: counters[SDFTraversalCounter.sparseBrickRangeCulls.rawValue],
+            sparseBrickMarches: counters[SDFTraversalCounter.sparseBrickMarches.rawValue],
+            sparseBrickMarchSteps: counters[SDFTraversalCounter.sparseBrickMarchSteps.rawValue],
+            sparseBrickHits: counters[SDFTraversalCounter.sparseBrickHits.rawValue],
+            primarySceneQueries: counters[SDFTraversalCounter.primarySceneQueries.rawValue],
+            bounceSceneQueries: counters[SDFTraversalCounter.bounceSceneQueries.rawValue],
+            shadowSceneQueries: counters[SDFTraversalCounter.shadowSceneQueries.rawValue]
+        )
+    }
+
     /// Renders one additional progressive sample.
     public func renderNextSample() throws {
         let previousSampleCount = sampleCount
@@ -410,8 +786,57 @@ public final class RenderSession {
     /// Use this from live Metal integrations that want renderer work and presentation work ordered
     /// in the same frame without blocking on `waitUntilCompleted()`.
     public func encodeNextSample(into commandBuffer: MTLCommandBuffer) throws {
+        try encodeNextSample(
+            tile: RenderTile(x: 0, y: 0, width: settings.width, height: settings.height),
+            completesSample: true,
+            into: commandBuffer
+        )
+    }
+
+    /// Encodes one tile of the current progressive sample.
+    ///
+    /// `completesSample` should be `true` only for the final tile in a full-frame tile sweep.
+    /// Until then, `sampleCount` remains unchanged so each tile in the sweep accumulates with
+    /// the same sample weight.
+    public func encodeNextTile(
+        _ tile: RenderTile,
+        completesSample: Bool,
+        into commandBuffer: MTLCommandBuffer
+    ) throws {
+        try encodeNextSample(tile: tile, completesSample: completesSample, into: commandBuffer)
+    }
+
+    /// Renders one tile synchronously.
+    public func renderNextTile(_ tile: RenderTile, completesSample: Bool) throws {
+        let previousSampleCount = sampleCount
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            throw DenrimRendererError.commandBufferFailed("Could not create command buffer.")
+        }
+        try encodeNextTile(tile, completesSample: completesSample, into: commandBuffer)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        if let error = commandBuffer.error {
+            sampleCount = previousSampleCount
+            throw DenrimRendererError.commandBufferFailed(error.localizedDescription)
+        }
+    }
+
+    private func encodeNextSample(
+        tile requestedTile: RenderTile,
+        completesSample: Bool,
+        into commandBuffer: MTLCommandBuffer
+    ) throws {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw DenrimRendererError.commandBufferFailed("Could not create command encoder.")
+        }
+        let tileX = max(0, min(requestedTile.x, settings.width))
+        let tileY = max(0, min(requestedTile.y, settings.height))
+        let tileWidth = max(0, min(requestedTile.width, settings.width - tileX))
+        let tileHeight = max(0, min(requestedTile.height, settings.height - tileY))
+        guard tileWidth > 0, tileHeight > 0 else {
+            encoder.endEncoding()
+            return
         }
 
         var constants = GPURenderConstants(
@@ -422,9 +847,11 @@ public final class RenderSession {
             materialCount: UInt32(materialCount),
             sampleIndex: UInt32(sampleCount),
             maxBounces: UInt32(max(1, settings.maxBounces)),
+            renderQuality: settings.shaderQualityLevel,
             frameSeed: UInt32(0x1234ABCD),
             accelerationNodeCount: UInt32(accelerationNodeCount),
             transparentBackground: settings.transparentBackground ? 1 : 0,
+            showsEnvironmentBackground: settings.showsEnvironmentBackground ? 1 : 0,
             lightCount: UInt32(lightCount),
             environmentTextureIndexPlusOne: environmentTextureIndexPlusOne,
             environmentDistributionCount: UInt32(environmentDistributionCount),
@@ -432,12 +859,23 @@ public final class RenderSession {
             environmentRotationY: environmentRotationY,
             environmentMaxRadiance: environmentMaxRadiance,
             sampleRadianceClamp: settings.resolvedSampleRadianceClamp,
+            backgroundColor: SIMD4<Float>(settings.backgroundColor, 1),
             volumeSampleCount: UInt32(volumeSampleCount),
             volumeAttributeSampleCount: UInt32(volumeAttributeSampleCount),
             volumeBrickCount: UInt32(volumeBrickCount),
             volumeBrickSampleCount: UInt32(volumeBrickSampleCount),
+            volumeBrickMaterialFieldSampleCount: UInt32(volumeBrickMaterialFieldSampleCount),
             volumeBrickAttributeSampleCount: UInt32(volumeBrickAttributeSampleCount),
-            denoiserEnabled: settings.denoise.denoiser == .none ? 0 : 1
+            volumeBrickBVHNodeCount: UInt32(volumeBrickBVHNodeCount),
+            volumeBrickBVHIndexCount: UInt32(volumeBrickBVHIndexCount),
+            volumeBrickGridCount: UInt32(volumeBrickGridCount),
+            volumeBrickGridIndexCount: UInt32(volumeBrickGridIndexCount),
+            denoiserEnabled: settings.denoise.denoiser == .none ? 0 : 1,
+            sdfTraversalStatsEnabled: settings.collectsSDFTraversalStats ? 1 : 0,
+            tileX: UInt32(tileX),
+            tileY: UInt32(tileY),
+            tileWidth: UInt32(tileWidth),
+            tileHeight: UInt32(tileHeight)
         )
         var camera = camera
         var previousCamera = previousCamera
@@ -471,6 +909,12 @@ public final class RenderSession {
         encoder.setBuffer(volumeAttributeSampleBuffer, offset: 0, index: 20)
         encoder.setBuffer(volumeBrickAttributeDescriptorBuffer, offset: 0, index: 21)
         encoder.setBuffer(volumeBrickAttributeSampleBuffer, offset: 0, index: 22)
+        encoder.setBuffer(volumeBrickBVHNodeBuffer, offset: 0, index: 23)
+        encoder.setBuffer(volumeBrickBVHIndexBuffer, offset: 0, index: 24)
+        encoder.setBuffer(volumeBrickGridBuffer, offset: 0, index: 25)
+        encoder.setBuffer(volumeBrickGridIndexBuffer, offset: 0, index: 26)
+        encoder.setBuffer(volumeBrickMaterialFieldSampleBuffer, offset: 0, index: 27)
+        encoder.setBuffer(sdfTraversalStatsBuffer, offset: 0, index: 28)
         if useHardwareRayTracing,
            let tlasResource = metalRayTracingExperiment?.tlasResource,
            let sceneBuffers = metalRayTracingExperiment?.sceneBuffers {
@@ -483,11 +927,13 @@ public final class RenderSession {
         }
 
         let threadgroup = MTLSize(width: 8, height: 8, depth: 1)
-        let grid = MTLSize(width: settings.width, height: settings.height, depth: 1)
+        let grid = MTLSize(width: tileWidth, height: tileHeight, depth: 1)
         encoder.dispatchThreads(grid, threadsPerThreadgroup: threadgroup)
         encoder.endEncoding()
 
-        sampleCount += 1
+        if completesSample {
+            sampleCount += 1
+        }
         denoisedBeautyIsCurrent = false
     }
 
@@ -685,5 +1131,31 @@ public final class RenderSession {
             throw DenrimRendererError.commandBufferFailed("Could not create empty shader binding buffer.")
         }
         return buffer
+    }
+
+    private static func reuseOrMakeRequiredShaderBindingBuffer<T>(
+        existing: MTLBuffer,
+        device: MTLDevice,
+        values: [T]
+    ) throws -> MTLBuffer {
+        let requiredLength = max(MemoryLayout<T>.stride * values.count, MemoryLayout<T>.stride, 1)
+        guard existing.device === device, existing.length >= requiredLength else {
+            return try makeRequiredShaderBindingBuffer(device: device, values: values)
+        }
+
+        guard !values.isEmpty else {
+            return existing
+        }
+        values.withUnsafeBytes { rawBuffer in
+            if let baseAddress = rawBuffer.baseAddress, rawBuffer.count > 0 {
+                memcpy(existing.contents(), baseAddress, rawBuffer.count)
+                #if os(macOS)
+                if existing.storageMode == .managed {
+                    existing.didModifyRange(0..<rawBuffer.count)
+                }
+                #endif
+            }
+        }
+        return existing
     }
 }

@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.1
 
 import PackageDescription
 
@@ -32,9 +32,29 @@ let package = Package(
             resources: [
                 .process("Resources")
             ],
+            swiftSettings: [
+                .unsafeFlags([
+                    "-no-whole-module-optimization",
+                    "-enable-incremental-file-hashing",
+                    "-enable-incremental-imports"
+                ], .when(configuration: .release))
+            ],
             linkerSettings: [
                 .linkedFramework("MetalPerformanceShaders")
+            ],
+            plugins: [
+                .plugin(name: "MetalLibraryPlugin")
             ]
+        ),
+        .executableTarget(
+            name: "MetalLibraryGenerator",
+            path: "Plugins/MetalLibraryGenerator"
+        ),
+        .plugin(
+            name: "MetalLibraryPlugin",
+            capability: .buildTool(),
+            dependencies: ["MetalLibraryGenerator"],
+            path: "Plugins/MetalLibraryPlugin"
         ),
         .executableTarget(
             name: "DenrimRenderPreview",

@@ -1281,6 +1281,7 @@ public enum SceneScript {
         var fallbackMaterialName: String?
         var resolution = max(2, scene.renderDefaults.sdfResolution ?? 32)
         var brickSize = 8
+        var sampleScale = 1
         var narrowBand: Float = 0.1
         var boundsMin = SIMD3<Float>(repeating: -1)
         var boundsMax = SIMD3<Float>(repeating: 1)
@@ -1354,6 +1355,12 @@ public enum SceneScript {
                     throw SceneScriptError.invalidArgumentCount("sdf", line: line)
                 }
                 brickSize = max(1, try int(tokens[index + 1], line: line))
+                index += 2
+            case "samplescale", "sample-scale", "sdfsamplescale", "sdf-sample-scale":
+                guard index + 1 < tokens.count else {
+                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
+                }
+                sampleScale = max(1, try int(tokens[index + 1], line: line))
                 index += 2
             case "narrowband", "band":
                 guard index + 1 < tokens.count else {
@@ -1433,7 +1440,7 @@ public enum SceneScript {
         let buildResolution = max(2, options.sdfResolutionOverride ?? resolution)
         let baker = options.distanceFieldBaker ?? DistanceFieldBaker(preferredBackend: .cpuReference)
         let storage: DistanceFieldBakeStorage = isSparse
-            ? .sparseBricks(brickSize: brickSize, narrowBand: narrowBand)
+            ? .sparseBricks(brickSize: brickSize, narrowBand: narrowBand, sampleScale: sampleScale)
             : .dense
         let result = try baker.bake(DistanceFieldBakeRequest(
             graph: DistanceFieldBakeGraph(model: model),
@@ -2241,6 +2248,7 @@ public enum SceneScript {
         switch token.lowercased() {
         case "dense", "sparse", "bricks", "brick", "backend", "storage", "material",
              "resolution", "res", "bricksize", "brick-size", "narrowband", "band",
+             "samplescale", "sample-scale", "sdfsamplescale", "sdf-sample-scale",
              "boundsmin", "min", "boundsmax", "max", "attributes", "attrs",
              "position", "translation", "translate", "scale", "rotationx", "rotatex",
              "rotationy", "rotatey", "rotationz", "rotatez":

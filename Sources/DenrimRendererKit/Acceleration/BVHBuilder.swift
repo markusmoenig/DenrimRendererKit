@@ -9,8 +9,15 @@ struct BVHBuilder {
             return BVH(nodes: [], primitiveIndices: [])
         }
 
-        let primitiveBounds = triangles.map(Self.bounds)
-        var primitiveIndices = Array(triangles.indices)
+        return build(bounds: triangles.map(Self.bounds))
+    }
+
+    func build(bounds primitiveBounds: [AABB]) -> BVH {
+        guard !primitiveBounds.isEmpty else {
+            return BVH(nodes: [], primitiveIndices: [])
+        }
+
+        var primitiveIndices = Array(primitiveBounds.indices)
         var nodes: [BVHNode] = []
 
         _ = buildNode(

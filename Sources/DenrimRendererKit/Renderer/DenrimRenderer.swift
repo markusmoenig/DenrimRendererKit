@@ -31,12 +31,20 @@ public final class DenrimRenderer {
     public let device: MTLDevice
 
     private let commandQueue: MTLCommandQueue
+    private let library: MTLLibrary
     private let pipeline: MTLComputePipelineState
-    private let hardwareRayTracingPipeline: MTLComputePipelineState?
-    private let simpleSpatialDenoisePipeline: MTLComputePipelineState?
-    private let svgfDepthNormalPipeline: MTLComputePipelineState?
-    private let svgfOutputCopyPipeline: MTLComputePipelineState?
-    private let distanceFieldBakePipeline: MTLComputePipelineState?
+    private var cachedHardwareRayTracingPipeline: MTLComputePipelineState?
+    private var cachedSimpleSpatialDenoisePipeline: MTLComputePipelineState?
+    private var cachedSVGFDepthNormalPipeline: MTLComputePipelineState?
+    private var cachedSVGFOutputCopyPipeline: MTLComputePipelineState?
+    private var cachedDistanceFieldBakePipeline: MTLComputePipelineState?
+    private var cachedSparseDistanceFieldClassifyPipeline: MTLComputePipelineState?
+    private var cachedSparseDistanceFieldBakePipeline: MTLComputePipelineState?
+    private var cachedSparseDistanceFieldDirectGridBakePipeline: MTLComputePipelineState?
+    private var cachedSparseDistanceFieldMacroGridPipeline: MTLComputePipelineState?
+    private var cachedSparseDistanceFieldProgramDirectGridBakePipeline: MTLComputePipelineState?
+    private var cachedSparseDistanceFieldProgramDirectGridSelectedBakePipeline: MTLComputePipelineState?
+    private let pipelineLock = NSLock()
 
     /// Creates a renderer using the supplied Metal device or the system default device.
     public init(device: MTLDevice? = MTLCreateSystemDefaultDevice()) throws {
@@ -54,40 +62,42 @@ public final class DenrimRenderer {
 
         self.device = device
         self.commandQueue = commandQueue
+        self.library = library
         self.pipeline = try device.makeComputePipelineState(function: function)
-        if device.supportsRaytracing,
-           let hardwareFunction = library.makeFunction(name: "pathTraceHardwareKernel") {
-            self.hardwareRayTracingPipeline = try? device.makeComputePipelineState(function: hardwareFunction)
-        } else {
-            self.hardwareRayTracingPipeline = nil
-        }
-        if let denoiseFunction = library.makeFunction(name: "simpleSpatialDenoiseKernel") {
-            self.simpleSpatialDenoisePipeline = try device.makeComputePipelineState(function: denoiseFunction)
-        } else {
-            self.simpleSpatialDenoisePipeline = nil
-        }
-        if let packFunction = library.makeFunction(name: "packSVGFDepthNormalKernel"),
-           let copyFunction = library.makeFunction(name: "copySVGFOutputKernel") {
-            self.svgfDepthNormalPipeline = try device.makeComputePipelineState(function: packFunction)
-            self.svgfOutputCopyPipeline = try device.makeComputePipelineState(function: copyFunction)
-        } else {
-            self.svgfDepthNormalPipeline = nil
-            self.svgfOutputCopyPipeline = nil
-        }
-        if let bakeFunction = library.makeFunction(name: "sdfBakeKernel") {
-            self.distanceFieldBakePipeline = try device.makeComputePipelineState(function: bakeFunction)
-        } else {
-            self.distanceFieldBakePipeline = nil
-        }
     }
 
     private static func makeLibrary(device: MTLDevice) throws -> MTLLibrary {
+        if let metallibURL = Bundle.module.url(
+            forResource: "DenrimRendererKit",
+            withExtension: "metallib"
+        ),
+           let library = try? device.makeLibrary(URL: metallibURL),
+           library.makeFunction(name: "pathTraceKernel") != nil,
+           library.makeFunction(name: "simpleSpatialDenoiseKernel") != nil,
+           library.makeFunction(name: "packSVGFDepthNormalKernel") != nil,
+           library.makeFunction(name: "copySVGFOutputKernel") != nil,
+           library.makeFunction(name: "sdfBakeKernel") != nil,
+           library.makeFunction(name: "sdfSparseClassifyKernel") != nil,
+           library.makeFunction(name: "sdfSparseBakeKernel") != nil,
+           library.makeFunction(name: "sdfSparseDirectGridBakeKernel") != nil,
+           library.makeFunction(name: "sdfSparseBuildMacroGridKernel") != nil,
+           library.makeFunction(name: "sdfProgramSparseDirectGridBakeKernel") != nil,
+           library.makeFunction(name: "sdfProgramSparseDirectGridBakeSelectedKernel") != nil {
+            return library
+        }
+
         if let library = try? device.makeDefaultLibrary(bundle: .module),
            library.makeFunction(name: "pathTraceKernel") != nil,
            library.makeFunction(name: "simpleSpatialDenoiseKernel") != nil,
            library.makeFunction(name: "packSVGFDepthNormalKernel") != nil,
            library.makeFunction(name: "copySVGFOutputKernel") != nil,
-           library.makeFunction(name: "sdfBakeKernel") != nil {
+           library.makeFunction(name: "sdfBakeKernel") != nil,
+           library.makeFunction(name: "sdfSparseClassifyKernel") != nil,
+           library.makeFunction(name: "sdfSparseBakeKernel") != nil,
+           library.makeFunction(name: "sdfSparseDirectGridBakeKernel") != nil,
+           library.makeFunction(name: "sdfSparseBuildMacroGridKernel") != nil,
+           library.makeFunction(name: "sdfProgramSparseDirectGridBakeKernel") != nil,
+           library.makeFunction(name: "sdfProgramSparseDirectGridBakeSelectedKernel") != nil {
             return library
         }
 
@@ -130,6 +140,76 @@ public final class DenrimRenderer {
         return urls.sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
+    private func optionalPipeline(
+        named functionName: String,
+        cache keyPath: ReferenceWritableKeyPath<DenrimRenderer, MTLComputePipelineState?>
+    ) throws -> MTLComputePipelineState? {
+        pipelineLock.lock()
+        defer {
+            pipelineLock.unlock()
+        }
+        if let cached = self[keyPath: keyPath] {
+            return cached
+        }
+        guard let function = library.makeFunction(name: functionName) else {
+            return nil
+        }
+        let pipeline = try device.makeComputePipelineState(function: function)
+        self[keyPath: keyPath] = pipeline
+        return pipeline
+    }
+
+    private func hardwarePipelineIfNeeded(
+        scene: RenderScene,
+        accelerationMode: RenderAccelerationMode
+    ) throws -> MTLComputePipelineState? {
+        guard device.supportsRaytracing,
+              accelerationMode != .flatBVH,
+              scene.volumeInstances.isEmpty,
+              scene.sparseVolumeInstances.isEmpty,
+              scene.gpuSparseVolumeInstances.isEmpty else {
+            return nil
+        }
+        return try optionalPipeline(
+            named: "pathTraceHardwareKernel",
+            cache: \.cachedHardwareRayTracingPipeline
+        )
+    }
+
+    private func denoisePipelines(
+        for settings: RenderSettings
+    ) throws -> (
+        simpleSpatial: MTLComputePipelineState?,
+        svgfDepthNormal: MTLComputePipelineState?,
+        svgfOutputCopy: MTLComputePipelineState?
+    ) {
+        switch settings.denoise.denoiser {
+        case .none:
+            return (nil, nil, nil)
+        case .simpleSpatial:
+            return (
+                try optionalPipeline(
+                    named: "simpleSpatialDenoiseKernel",
+                    cache: \.cachedSimpleSpatialDenoisePipeline
+                ),
+                nil,
+                nil
+            )
+        case .appleSVGF:
+            return (
+                nil,
+                try optionalPipeline(
+                    named: "packSVGFDepthNormalKernel",
+                    cache: \.cachedSVGFDepthNormalPipeline
+                ),
+                try optionalPipeline(
+                    named: "copySVGFOutputKernel",
+                    cache: \.cachedSVGFOutputCopyPipeline
+                )
+            )
+        }
+    }
+
     /// Creates a progressive render session for a scene and settings.
     public func makeSession(
         scene: RenderScene,
@@ -152,14 +232,18 @@ public final class DenrimRenderer {
         settings: RenderSettings = RenderSettings(),
         accelerationMode: RenderAccelerationMode
     ) throws -> RenderSession {
-        try RenderSession(
+        let denoisePipelines = try denoisePipelines(for: settings)
+        return try RenderSession(
             device: device,
             commandQueue: commandQueue,
             pipeline: pipeline,
-            hardwareRayTracingPipeline: hardwareRayTracingPipeline,
-            simpleSpatialDenoisePipeline: simpleSpatialDenoisePipeline,
-            svgfDepthNormalPipeline: svgfDepthNormalPipeline,
-            svgfOutputCopyPipeline: svgfOutputCopyPipeline,
+            hardwareRayTracingPipeline: try hardwarePipelineIfNeeded(
+                scene: scene,
+                accelerationMode: accelerationMode
+            ),
+            simpleSpatialDenoisePipeline: denoisePipelines.simpleSpatial,
+            svgfDepthNormalPipeline: denoisePipelines.svgfDepthNormal,
+            svgfOutputCopyPipeline: denoisePipelines.svgfOutputCopy,
             scene: scene,
             settings: settings,
             accelerationMode: accelerationMode
@@ -195,7 +279,34 @@ public final class DenrimRenderer {
             preferredBackend: preferredBackend,
             device: device,
             commandQueue: commandQueue,
-            pipeline: distanceFieldBakePipeline
+            pipeline: try? optionalPipeline(
+                named: "sdfBakeKernel",
+                cache: \.cachedDistanceFieldBakePipeline
+            ),
+            sparseClassifyPipeline: try? optionalPipeline(
+                named: "sdfSparseClassifyKernel",
+                cache: \.cachedSparseDistanceFieldClassifyPipeline
+            ),
+            sparseBakePipeline: try? optionalPipeline(
+                named: "sdfSparseBakeKernel",
+                cache: \.cachedSparseDistanceFieldBakePipeline
+            ),
+            sparseDirectGridBakePipeline: try? optionalPipeline(
+                named: "sdfSparseDirectGridBakeKernel",
+                cache: \.cachedSparseDistanceFieldDirectGridBakePipeline
+            ),
+            sparseMacroGridPipeline: try? optionalPipeline(
+                named: "sdfSparseBuildMacroGridKernel",
+                cache: \.cachedSparseDistanceFieldMacroGridPipeline
+            ),
+            sparseProgramDirectGridBakePipeline: try? optionalPipeline(
+                named: "sdfProgramSparseDirectGridBakeKernel",
+                cache: \.cachedSparseDistanceFieldProgramDirectGridBakePipeline
+            ),
+            sparseProgramDirectGridSelectedBakePipeline: try? optionalPipeline(
+                named: "sdfProgramSparseDirectGridBakeSelectedKernel",
+                cache: \.cachedSparseDistanceFieldProgramDirectGridSelectedBakePipeline
+            )
         )
     }
 }

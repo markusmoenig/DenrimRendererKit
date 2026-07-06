@@ -49,6 +49,63 @@ final class TransparentExportTests: XCTestCase {
         XCTAssertTrue(pixels.contains { $0.r > 0 && $0.g > 0 && $0.b > 0 })
     }
 
+    func testHiddenEnvironmentBackgroundRemainsOpaqueBlack() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer(device: device)
+        let session = try renderer.makeSession(
+            scene: Self.floatingQuadScene(),
+            settings: RenderSettings(
+                width: 24,
+                height: 24,
+                maxBounces: 1,
+                showsEnvironmentBackground: false
+            ),
+            accelerationMode: .flatBVH
+        )
+
+        try session.renderNextSample()
+        let pixels = try session.pixels(for: .beauty)
+        let corner = pixels[0]
+
+        XCTAssertGreaterThan(corner.a, 0.99)
+        XCTAssertEqual(corner.r, 0, accuracy: 0.0001)
+        XCTAssertEqual(corner.g, 0, accuracy: 0.0001)
+        XCTAssertEqual(corner.b, 0, accuracy: 0.0001)
+        XCTAssertTrue(pixels.contains { $0.a > 0.99 && ($0.r > 0 || $0.g > 0 || $0.b > 0) })
+    }
+
+    func testHiddenEnvironmentBackgroundUsesCustomOpaqueColor() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let background = SIMD3<Float>(0.075, 0.105, 0.155)
+        let renderer = try DenrimRenderer(device: device)
+        let session = try renderer.makeSession(
+            scene: Self.floatingQuadScene(),
+            settings: RenderSettings(
+                width: 24,
+                height: 24,
+                maxBounces: 1,
+                showsEnvironmentBackground: false,
+                backgroundColor: background
+            ),
+            accelerationMode: .flatBVH
+        )
+
+        try session.renderNextSample()
+        let pixels = try session.pixels(for: .beauty)
+        let corner = pixels[0]
+
+        XCTAssertGreaterThan(corner.a, 0.99)
+        XCTAssertEqual(corner.r, background.x, accuracy: 0.0001)
+        XCTAssertEqual(corner.g, background.y, accuracy: 0.0001)
+        XCTAssertEqual(corner.b, background.z, accuracy: 0.0001)
+    }
+
     func testBeautyPNGPreservesTransparentAlpha() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw XCTSkip("No Metal device available.")

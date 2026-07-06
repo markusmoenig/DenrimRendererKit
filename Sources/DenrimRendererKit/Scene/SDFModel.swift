@@ -135,12 +135,22 @@ public struct SparseDistanceVolumeBuildSettings: Sendable, Equatable {
     /// Signed-distance band that keeps bricks near a possible surface.
     public var narrowBand: Float
 
+    /// Multiplies sparse sample density while keeping brick world-space size roughly stable.
+    ///
+    /// A value of `2` stores about twice as many samples per axis inside occupied
+    /// bricks while preserving the coarse brick grid. CPU sparse builds use it
+    /// without requiring a dense full-volume allocation, and RendererKit's sparse
+    /// Metal bake paths apply the same layout rule when the graph can run on GPU.
+    public var sampleScale: Int
+
     /// Creates sparse SDF build settings.
     public init(
         denseSettings: DistanceVolumeBuildSettings,
         brickSize: SIMD3<Int> = SIMD3<Int>(repeating: 8),
-        narrowBand: Float = 0.1
+        narrowBand: Float = 0.1,
+        sampleScale: Int = 1
     ) {
+        let scale = max(sampleScale, 1)
         self.denseSettings = denseSettings
         self.brickSize = SIMD3<Int>(
             max(brickSize.x, 1),
@@ -148,6 +158,7 @@ public struct SparseDistanceVolumeBuildSettings: Sendable, Equatable {
             max(brickSize.z, 1)
         )
         self.narrowBand = max(narrowBand, 0)
+        self.sampleScale = scale
     }
 
     /// Creates cubic sparse SDF build settings.
@@ -156,7 +167,8 @@ public struct SparseDistanceVolumeBuildSettings: Sendable, Equatable {
         brickSize: Int = 8,
         boundsMin: SIMD3<Float> = SIMD3<Float>(repeating: -1),
         boundsMax: SIMD3<Float> = SIMD3<Float>(repeating: 1),
-        narrowBand: Float = 0.1
+        narrowBand: Float = 0.1,
+        sampleScale: Int = 1
     ) {
         self.init(
             denseSettings: DistanceVolumeBuildSettings(
@@ -165,7 +177,8 @@ public struct SparseDistanceVolumeBuildSettings: Sendable, Equatable {
                 boundsMax: boundsMax
             ),
             brickSize: SIMD3<Int>(repeating: max(brickSize, 1)),
-            narrowBand: narrowBand
+            narrowBand: narrowBand,
+            sampleScale: sampleScale
         )
     }
 }
@@ -245,11 +258,13 @@ public enum DistanceVolumeBuilder {
         settings: SparseDistanceVolumeBuildSettings
     ) throws -> SparseDistanceVolume {
         let denseSettings = settings.denseSettings
-        let dimensions = try validatedDimensions(model: model, settings: denseSettings)
+        let baseDimensions = try validatedDimensions(model: model, settings: denseSettings)
+        let sampleScale = max(settings.sampleScale, 1)
+        let dimensions = scaledDimensions(baseDimensions, sampleScale: sampleScale)
         let brickSize = SIMD3<Int>(
-            max(settings.brickSize.x, 1),
-            max(settings.brickSize.y, 1),
-            max(settings.brickSize.z, 1)
+            max(settings.brickSize.x * sampleScale, 1),
+            max(settings.brickSize.y * sampleScale, 1),
+            max(settings.brickSize.z * sampleScale, 1)
         )
         let extent = denseSettings.boundsMax - denseSettings.boundsMin
         let compiledPrimitives = compiledPrimitives(for: model)
@@ -416,6 +431,18 @@ public enum DistanceVolumeBuilder {
             throw DenrimRendererError.invalidScene("SDF build bounds must have positive extent.")
         }
         return dimensions
+    }
+
+    private static func scaledDimensions(_ dimensions: SIMD3<Int>, sampleScale: Int) -> SIMD3<Int> {
+        let scale = max(sampleScale, 1)
+        guard scale > 1 else {
+            return dimensions
+        }
+        return SIMD3<Int>(
+            (dimensions.x - 1) * scale + 1,
+            (dimensions.y - 1) * scale + 1,
+            (dimensions.z - 1) * scale + 1
+        )
     }
 
     private static func compiledPrimitives(for model: SDFModel) -> [CompiledPrimitive] {

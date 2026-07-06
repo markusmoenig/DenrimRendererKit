@@ -107,6 +107,20 @@ struct GPUVolumeSample {
     uint4 materialFieldFlags;
 };
 
+struct GPUVolumeBrickSample {
+    float distance;
+    uint materialA;
+    uint materialB;
+    float materialBlend;
+};
+
+struct GPUVolumeMaterialFieldSample {
+    float4 baseColorOpacity;
+    float4 emissionTransmission;
+    float4 surface;
+    uint4 materialFieldFlags;
+};
+
 struct GPUVolumeAttributeDescriptor {
     uint4 metadata;
     uint4 semantics0;
@@ -118,8 +132,17 @@ struct GPUVolumeBrickDescriptor {
     float4 worldBoundsMax;
     float4 localBoundsMin;
     float4 localBoundsMax;
+    float4 sampleBoundsMin;
+    float4 sampleBoundsMax;
     uint4 gridOriginAndVolume;
     uint4 dimensionsAndSampleOffset;
+};
+
+struct GPUVolumeBrickGrid {
+    uint4 dimensionsAndIndexOffset;
+    uint4 brickSizeAndVolume;
+    uint4 macroDimensionsAndIndexOffset;
+    uint4 macroSizeAndReserved;
 };
 
 struct GPURenderConstants {
@@ -130,9 +153,11 @@ struct GPURenderConstants {
     uint materialCount;
     uint sampleIndex;
     uint maxBounces;
+    uint renderQuality;
     uint frameSeed;
     uint accelerationNodeCount;
     uint transparentBackground;
+    uint showsEnvironmentBackground;
     uint lightCount;
     uint environmentTextureIndexPlusOne;
     uint environmentDistributionCount;
@@ -140,13 +165,49 @@ struct GPURenderConstants {
     float environmentRotationY;
     float environmentMaxRadiance;
     float sampleRadianceClamp;
+    float4 backgroundColor;
     uint volumeSampleCount;
     uint volumeAttributeSampleCount;
     uint volumeBrickCount;
     uint volumeBrickSampleCount;
+    uint volumeBrickMaterialFieldSampleCount;
     uint volumeBrickAttributeSampleCount;
+    uint volumeBrickBVHNodeCount;
+    uint volumeBrickBVHIndexCount;
+    uint volumeBrickGridCount;
+    uint volumeBrickGridIndexCount;
     uint denoiserEnabled;
+    uint sdfTraversalStatsEnabled;
+    uint tileX;
+    uint tileY;
+    uint tileWidth;
+    uint tileHeight;
 };
+
+constant uint sdfCounterDenseVolumeTests = 0u;
+constant uint sdfCounterDenseMarchSteps = 1u;
+constant uint sdfCounterSparseGridCellsVisited = 2u;
+constant uint sdfCounterSparseGridMacroSkips = 3u;
+constant uint sdfCounterSparseBrickTests = 4u;
+constant uint sdfCounterSparseBrickInvalid = 5u;
+constant uint sdfCounterSparseBrickRangeCulls = 6u;
+constant uint sdfCounterSparseBrickMarches = 7u;
+constant uint sdfCounterSparseBrickMarchSteps = 8u;
+constant uint sdfCounterSparseBrickHits = 9u;
+constant uint sdfCounterPrimarySceneQueries = 10u;
+constant uint sdfCounterBounceSceneQueries = 11u;
+constant uint sdfCounterShadowSceneQueries = 12u;
+
+static void addSDFTraversalCounter(
+    device atomic_uint *sdfCounters,
+    constant GPURenderConstants &constants,
+    uint index,
+    uint value = 1u
+) {
+    if (constants.sdfTraversalStatsEnabled != 0u && sdfCounters != nullptr) {
+        atomic_fetch_add_explicit(&sdfCounters[index], value, memory_order_relaxed);
+    }
+}
 
 struct GPURayTracingInstance {
     uint4 metadata;
@@ -1589,45 +1650,68 @@ static float3 volumeNormal(
     return normalize((normalTransform * float4(normalize(localNormal), 0.0f)).xyz);
 }
 
-static float sampleVolumeBrickDistance(
-    constant GPUVolumeDescriptor &volume,
+struct VolumeBrickSampleContext {
+    uint3 dimensions;
+    uint sampleOffset;
+    uint strideY;
+    uint strideZ;
+    uint sampleCount;
+    float3 sampleMin;
+    float3 sampleMax;
+    float3 sampleExtent;
+    uint valid;
+};
+
+struct VolumeBrickDistanceGradient {
+    float distance;
+    float3 gradient;
+};
+
+static VolumeBrickSampleContext makeVolumeBrickSampleContext(
     constant GPUVolumeBrickDescriptor &brick,
-    constant GPUVolumeSample *brickSamples,
-    uint brickSampleCount,
-    float3 localPosition
+    uint brickSampleCount
 ) {
+    VolumeBrickSampleContext context;
     uint3 dimensions = uint3(brick.dimensionsAndSampleOffset.xyz);
     uint sampleOffset = brick.dimensionsAndSampleOffset.w;
     uint sampleCount = dimensions.x * dimensions.y * dimensions.z;
-    if (dimensions.x < 2u || dimensions.y < 2u || dimensions.z < 2u
-        || sampleOffset >= brickSampleCount
-        || sampleOffset + sampleCount > brickSampleCount) {
+    context.dimensions = dimensions;
+    context.sampleOffset = sampleOffset;
+    context.strideY = dimensions.x;
+    context.strideZ = dimensions.x * dimensions.y;
+    context.sampleCount = sampleCount;
+    context.sampleMin = brick.sampleBoundsMin.xyz;
+    context.sampleMax = brick.sampleBoundsMax.xyz;
+    context.sampleExtent = max(context.sampleMax - context.sampleMin, float3(1e-6f));
+    bool sampleRangeValid = sampleOffset < brickSampleCount && sampleCount <= brickSampleCount - sampleOffset;
+    context.valid = (dimensions.x >= 2u && dimensions.y >= 2u && dimensions.z >= 2u
+        && sampleRangeValid) ? 1u : 0u;
+    return context;
+}
+
+static float sampleVolumeBrickDistancePrepared(
+    constant GPUVolumeBrickSample *brickSamples,
+    VolumeBrickSampleContext context,
+    float3 localPosition
+) {
+    if (context.valid == 0u) {
         return INFINITY;
     }
 
-    float3 volumeExtent = max(volume.localBoundsMax.xyz - volume.localBoundsMin.xyz, float3(1e-6f));
-    float3 volumeDenominator = max(float3(volume.dimensions.xyz) - float3(1.0f), float3(1.0f));
-    float3 sampleMin = volume.localBoundsMin.xyz
-        + volumeExtent * (float3(brick.gridOriginAndVolume.xyz) / volumeDenominator);
-    float3 sampleMax = volume.localBoundsMin.xyz
-        + volumeExtent * ((float3(brick.gridOriginAndVolume.xyz) + float3(dimensions - uint3(1))) / volumeDenominator);
-    float3 extent = max(sampleMax - sampleMin, float3(1e-6f));
-    float3 uvw = clamp((localPosition - sampleMin) / extent, float3(0.0f), float3(1.0f));
-    float3 grid = uvw * float3(dimensions - uint3(1));
+    float3 uvw = clamp((localPosition - context.sampleMin) / context.sampleExtent, float3(0.0f), float3(1.0f));
+    float3 grid = uvw * float3(context.dimensions - uint3(1));
     uint3 base = uint3(floor(grid));
-    uint3 next = min(base + uint3(1), dimensions - uint3(1));
+    uint3 next = min(base + uint3(1), context.dimensions - uint3(1));
     float3 fraction = grid - float3(base);
 
-    uint strideY = dimensions.x;
-    uint strideZ = dimensions.x * dimensions.y;
-    uint i000 = sampleOffset + base.x + base.y * strideY + base.z * strideZ;
-    uint i100 = sampleOffset + next.x + base.y * strideY + base.z * strideZ;
-    uint i010 = sampleOffset + base.x + next.y * strideY + base.z * strideZ;
-    uint i110 = sampleOffset + next.x + next.y * strideY + base.z * strideZ;
-    uint i001 = sampleOffset + base.x + base.y * strideY + next.z * strideZ;
-    uint i101 = sampleOffset + next.x + base.y * strideY + next.z * strideZ;
-    uint i011 = sampleOffset + base.x + next.y * strideY + next.z * strideZ;
-    uint i111 = sampleOffset + next.x + next.y * strideY + next.z * strideZ;
+    uint i000 = context.sampleOffset + base.x + base.y * context.strideY + base.z * context.strideZ;
+    uint i100 = context.sampleOffset + next.x + base.y * context.strideY + base.z * context.strideZ;
+    uint i010 = context.sampleOffset + base.x + next.y * context.strideY + base.z * context.strideZ;
+    uint i110 = context.sampleOffset + next.x + next.y * context.strideY + base.z * context.strideZ;
+    uint i001 = context.sampleOffset + base.x + base.y * context.strideY + next.z * context.strideZ;
+    uint i101 = context.sampleOffset + next.x + base.y * context.strideY + next.z * context.strideZ;
+    uint i011 = context.sampleOffset + base.x + next.y * context.strideY + next.z * context.strideZ;
+    uint i111 = context.sampleOffset + next.x + next.y * context.strideY + next.z * context.strideZ;
 
     float c00 = mix(brickSamples[i000].distance, brickSamples[i100].distance, fraction.x);
     float c10 = mix(brickSamples[i010].distance, brickSamples[i110].distance, fraction.x);
@@ -1638,19 +1722,216 @@ static float sampleVolumeBrickDistance(
     return mix(c0, c1, fraction.z);
 }
 
-static GPUVolumeSample sampleVolumeBrickMaterial(
+static float sampleVolumeBrickDistanceAtGrid(
+    constant GPUVolumeBrickSample *brickSamples,
+    VolumeBrickSampleContext context,
+    uint3 coordinate
+) {
+    uint index = context.sampleOffset
+        + coordinate.x
+        + coordinate.y * context.strideY
+        + coordinate.z * context.strideZ;
+    return brickSamples[index].distance;
+}
+
+static float cubicCatmullRom(float p0, float p1, float p2, float p3, float t) {
+    float t2 = t * t;
+    float t3 = t2 * t;
+    return 0.5f * (
+        2.0f * p1
+        + (-p0 + p2) * t
+        + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2
+        + (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3
+    );
+}
+
+static float cubicCatmullRomDerivative(float p0, float p1, float p2, float p3, float t) {
+    float t2 = t * t;
+    return 0.5f * (
+        (-p0 + p2)
+        + 2.0f * (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t
+        + 3.0f * (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t2
+    );
+}
+
+static VolumeBrickDistanceGradient sampleVolumeBrickDistanceGradientPrepared(
+    constant GPUVolumeBrickSample *brickSamples,
+    VolumeBrickSampleContext context,
+    float3 localPosition
+) {
+    VolumeBrickDistanceGradient result;
+    result.distance = INFINITY;
+    result.gradient = float3(0.0f);
+    if (context.valid == 0u) {
+        return result;
+    }
+
+    float3 uvw = clamp((localPosition - context.sampleMin) / context.sampleExtent, float3(0.0f), float3(1.0f));
+    float3 grid = uvw * float3(context.dimensions - uint3(1));
+    uint3 base = uint3(floor(grid));
+    uint3 next = min(base + uint3(1), context.dimensions - uint3(1));
+    float3 fraction = grid - float3(base);
+
+    uint i000 = context.sampleOffset + base.x + base.y * context.strideY + base.z * context.strideZ;
+    uint i100 = context.sampleOffset + next.x + base.y * context.strideY + base.z * context.strideZ;
+    uint i010 = context.sampleOffset + base.x + next.y * context.strideY + base.z * context.strideZ;
+    uint i110 = context.sampleOffset + next.x + next.y * context.strideY + base.z * context.strideZ;
+    uint i001 = context.sampleOffset + base.x + base.y * context.strideY + next.z * context.strideZ;
+    uint i101 = context.sampleOffset + next.x + base.y * context.strideY + next.z * context.strideZ;
+    uint i011 = context.sampleOffset + base.x + next.y * context.strideY + next.z * context.strideZ;
+    uint i111 = context.sampleOffset + next.x + next.y * context.strideY + next.z * context.strideZ;
+
+    float d000 = brickSamples[i000].distance;
+    float d100 = brickSamples[i100].distance;
+    float d010 = brickSamples[i010].distance;
+    float d110 = brickSamples[i110].distance;
+    float d001 = brickSamples[i001].distance;
+    float d101 = brickSamples[i101].distance;
+    float d011 = brickSamples[i011].distance;
+    float d111 = brickSamples[i111].distance;
+
+    float c00 = mix(d000, d100, fraction.x);
+    float c10 = mix(d010, d110, fraction.x);
+    float c01 = mix(d001, d101, fraction.x);
+    float c11 = mix(d011, d111, fraction.x);
+    float c0 = mix(c00, c10, fraction.y);
+    float c1 = mix(c01, c11, fraction.y);
+    result.distance = mix(c0, c1, fraction.z);
+
+    float dxGrid = mix(
+        mix(d100 - d000, d110 - d010, fraction.y),
+        mix(d101 - d001, d111 - d011, fraction.y),
+        fraction.z
+    );
+    float dyGrid = mix(
+        mix(d010 - d000, d110 - d100, fraction.x),
+        mix(d011 - d001, d111 - d101, fraction.x),
+        fraction.z
+    );
+    float dzGrid = c1 - c0;
+    float3 gridToLocal = float3(context.dimensions - uint3(1)) / context.sampleExtent;
+    result.gradient = float3(dxGrid, dyGrid, dzGrid) * gridToLocal;
+    return result;
+}
+
+static float3 sampleVolumeBrickCentralGradientPrepared(
+    constant GPUVolumeBrickSample *brickSamples,
+    VolumeBrickSampleContext context,
+    float3 localPosition,
+    float3 spacing
+) {
+    float3 minPosition = context.sampleMin;
+    float3 maxPosition = context.sampleMax;
+
+    float3 x0 = localPosition;
+    float3 x1 = localPosition;
+    x0.x = max(localPosition.x - spacing.x, minPosition.x);
+    x1.x = min(localPosition.x + spacing.x, maxPosition.x);
+    float xWidth = max(x1.x - x0.x, 1e-6f);
+    float dx = (sampleVolumeBrickDistancePrepared(brickSamples, context, x1)
+        - sampleVolumeBrickDistancePrepared(brickSamples, context, x0)) / xWidth;
+
+    float3 y0 = localPosition;
+    float3 y1 = localPosition;
+    y0.y = max(localPosition.y - spacing.y, minPosition.y);
+    y1.y = min(localPosition.y + spacing.y, maxPosition.y);
+    float yWidth = max(y1.y - y0.y, 1e-6f);
+    float dy = (sampleVolumeBrickDistancePrepared(brickSamples, context, y1)
+        - sampleVolumeBrickDistancePrepared(brickSamples, context, y0)) / yWidth;
+
+    float3 z0 = localPosition;
+    float3 z1 = localPosition;
+    z0.z = max(localPosition.z - spacing.z, minPosition.z);
+    z1.z = min(localPosition.z + spacing.z, maxPosition.z);
+    float zWidth = max(z1.z - z0.z, 1e-6f);
+    float dz = (sampleVolumeBrickDistancePrepared(brickSamples, context, z1)
+        - sampleVolumeBrickDistancePrepared(brickSamples, context, z0)) / zWidth;
+
+    return float3(dx, dy, dz);
+}
+
+static VolumeBrickDistanceGradient sampleVolumeBrickDistanceGradientCubicPrepared(
+    constant GPUVolumeBrickSample *brickSamples,
+    VolumeBrickSampleContext context,
+    float3 localPosition
+) {
+    if (context.valid == 0u) {
+        VolumeBrickDistanceGradient invalid;
+        invalid.distance = INFINITY;
+        invalid.gradient = float3(0.0f);
+        return invalid;
+    }
+
+    float3 uvw = clamp((localPosition - context.sampleMin) / context.sampleExtent, float3(0.0f), float3(1.0f));
+    float3 grid = uvw * float3(context.dimensions - uint3(1));
+    uint3 base = uint3(floor(grid));
+    if (base.x < 1u || base.y < 1u || base.z < 1u
+        || base.x + 2u >= context.dimensions.x
+        || base.y + 2u >= context.dimensions.y
+        || base.z + 2u >= context.dimensions.z) {
+        return sampleVolumeBrickDistanceGradientPrepared(brickSamples, context, localPosition);
+    }
+
+    float3 fraction = grid - float3(base);
+    float xRows[4][4];
+    float dxRows[4][4];
+    for (uint z = 0u; z < 4u; ++z) {
+        for (uint y = 0u; y < 4u; ++y) {
+            uint3 coordinate = uint3(base.x - 1u, base.y + y - 1u, base.z + z - 1u);
+            float p0 = sampleVolumeBrickDistanceAtGrid(brickSamples, context, coordinate);
+            coordinate.x = base.x;
+            float p1 = sampleVolumeBrickDistanceAtGrid(brickSamples, context, coordinate);
+            coordinate.x = base.x + 1u;
+            float p2 = sampleVolumeBrickDistanceAtGrid(brickSamples, context, coordinate);
+            coordinate.x = base.x + 2u;
+            float p3 = sampleVolumeBrickDistanceAtGrid(brickSamples, context, coordinate);
+            xRows[y][z] = cubicCatmullRom(p0, p1, p2, p3, fraction.x);
+            dxRows[y][z] = cubicCatmullRomDerivative(p0, p1, p2, p3, fraction.x);
+        }
+    }
+
+    float yRows[4];
+    float dyRows[4];
+    float dxYRows[4];
+    for (uint z = 0u; z < 4u; ++z) {
+        yRows[z] = cubicCatmullRom(xRows[0][z], xRows[1][z], xRows[2][z], xRows[3][z], fraction.y);
+        dyRows[z] = cubicCatmullRomDerivative(xRows[0][z], xRows[1][z], xRows[2][z], xRows[3][z], fraction.y);
+        dxYRows[z] = cubicCatmullRom(dxRows[0][z], dxRows[1][z], dxRows[2][z], dxRows[3][z], fraction.y);
+    }
+
+    VolumeBrickDistanceGradient result;
+    result.distance = cubicCatmullRom(yRows[0], yRows[1], yRows[2], yRows[3], fraction.z);
+    float dxGrid = cubicCatmullRom(dxYRows[0], dxYRows[1], dxYRows[2], dxYRows[3], fraction.z);
+    float dyGrid = cubicCatmullRom(dyRows[0], dyRows[1], dyRows[2], dyRows[3], fraction.z);
+    float dzGrid = cubicCatmullRomDerivative(yRows[0], yRows[1], yRows[2], yRows[3], fraction.z);
+    float3 gridToLocal = float3(context.dimensions - uint3(1)) / context.sampleExtent;
+    result.gradient = float3(dxGrid, dyGrid, dzGrid) * gridToLocal;
+    return result;
+}
+
+static float sampleVolumeBrickDistance(
     constant GPUVolumeDescriptor &volume,
     constant GPUVolumeBrickDescriptor &brick,
-    constant GPUVolumeSample *brickSamples,
+    constant GPUVolumeBrickSample *brickSamples,
     uint brickSampleCount,
     float3 localPosition
 ) {
-    uint3 dimensions = uint3(brick.dimensionsAndSampleOffset.xyz);
-    uint sampleOffset = brick.dimensionsAndSampleOffset.w;
-    uint sampleCount = dimensions.x * dimensions.y * dimensions.z;
-    if (dimensions.x < 1u || dimensions.y < 1u || dimensions.z < 1u
-        || sampleOffset >= brickSampleCount
-        || sampleOffset + sampleCount > brickSampleCount) {
+    (void)volume;
+    VolumeBrickSampleContext context = makeVolumeBrickSampleContext(brick, brickSampleCount);
+    return sampleVolumeBrickDistancePrepared(brickSamples, context, localPosition);
+}
+
+static GPUVolumeSample sampleVolumeBrickMaterial(
+    constant GPUVolumeDescriptor &volume,
+    constant GPUVolumeBrickDescriptor &brick,
+    constant GPUVolumeBrickSample *brickSamples,
+    constant GPUVolumeMaterialFieldSample *materialFieldSamples,
+    uint brickSampleCount,
+    uint materialFieldSampleCount,
+    float3 localPosition
+) {
+    VolumeBrickSampleContext context = makeVolumeBrickSampleContext(brick, brickSampleCount);
+    if (context.valid == 0u) {
         GPUVolumeSample fallback;
         fallback.distance = INFINITY;
         fallback.materialA = volume.dimensions.w;
@@ -1663,17 +1944,27 @@ static GPUVolumeSample sampleVolumeBrickMaterial(
         return fallback;
     }
 
-    float3 volumeExtent = max(volume.localBoundsMax.xyz - volume.localBoundsMin.xyz, float3(1e-6f));
-    float3 volumeDenominator = max(float3(volume.dimensions.xyz) - float3(1.0f), float3(1.0f));
-    float3 sampleMin = volume.localBoundsMin.xyz
-        + volumeExtent * (float3(brick.gridOriginAndVolume.xyz) / volumeDenominator);
-    float3 sampleMax = volume.localBoundsMin.xyz
-        + volumeExtent * ((float3(brick.gridOriginAndVolume.xyz) + float3(dimensions - uint3(1))) / volumeDenominator);
-    float3 extent = max(sampleMax - sampleMin, float3(1e-6f));
-    float3 uvw = clamp((localPosition - sampleMin) / extent, float3(0.0f), float3(1.0f));
-    uint3 nearest = min(uint3(round(uvw * float3(dimensions - uint3(1)))), dimensions - uint3(1));
-    uint index = sampleOffset + nearest.x + nearest.y * dimensions.x + nearest.z * dimensions.x * dimensions.y;
-    return brickSamples[index];
+    float3 uvw = clamp((localPosition - context.sampleMin) / context.sampleExtent, float3(0.0f), float3(1.0f));
+    uint3 nearest = min(uint3(round(uvw * float3(context.dimensions - uint3(1)))), context.dimensions - uint3(1));
+    uint index = context.sampleOffset + nearest.x + nearest.y * context.strideY + nearest.z * context.strideZ;
+    constant GPUVolumeBrickSample &compact = brickSamples[index];
+    GPUVolumeSample sample;
+    sample.distance = compact.distance;
+    sample.materialA = compact.materialA;
+    sample.materialB = compact.materialB;
+    sample.materialBlend = compact.materialBlend;
+    sample.baseColorOpacity = float4(0);
+    sample.emissionTransmission = float4(0);
+    sample.surface = float4(0);
+    sample.materialFieldFlags = uint4(0);
+    if (materialFieldSamples != nullptr && materialFieldSampleCount == brickSampleCount && index < materialFieldSampleCount) {
+        constant GPUVolumeMaterialFieldSample &fields = materialFieldSamples[index];
+        sample.baseColorOpacity = fields.baseColorOpacity;
+        sample.emissionTransmission = fields.emissionTransmission;
+        sample.surface = fields.surface;
+        sample.materialFieldFlags = fields.materialFieldFlags;
+    }
+    return sample;
 }
 
 static void sampleVolumeBrickAttributes(
@@ -1706,12 +1997,8 @@ static void sampleVolumeBrickAttributes(
         return;
     }
 
-    float3 volumeExtent = max(volume.localBoundsMax.xyz - volume.localBoundsMin.xyz, float3(1e-6f));
-    float3 volumeDenominator = max(float3(volume.dimensions.xyz) - float3(1.0f), float3(1.0f));
-    float3 sampleMin = volume.localBoundsMin.xyz
-        + volumeExtent * (float3(brick.gridOriginAndVolume.xyz) / volumeDenominator);
-    float3 sampleMax = volume.localBoundsMin.xyz
-        + volumeExtent * ((float3(brick.gridOriginAndVolume.xyz) + float3(dimensions - uint3(1))) / volumeDenominator);
+    float3 sampleMin = brick.sampleBoundsMin.xyz;
+    float3 sampleMax = brick.sampleBoundsMax.xyz;
     float3 extent = max(sampleMax - sampleMin, float3(1e-6f));
     float3 uvw = clamp((localPosition - sampleMin) / extent, float3(0.0f), float3(1.0f));
     uint3 nearest = min(uint3(round(uvw * float3(dimensions - uint3(1)))), dimensions - uint3(1));
@@ -1728,20 +2015,42 @@ static void sampleVolumeBrickAttributes(
 
 static float3 volumeBrickNormal(
     constant GPUVolumeDescriptor &volume,
-    constant GPUVolumeBrickDescriptor &brick,
-    constant GPUVolumeSample *brickSamples,
+    constant GPUVolumeBrickSample *brickSamples,
     uint brickSampleCount,
-    float3 localPosition
+    VolumeBrickSampleContext context,
+    float3 localPosition,
+    bool useCubicGradient,
+    bool useCoarseFilteredGradient
 ) {
-    float3 volumeExtent = max(volume.localBoundsMax.xyz - volume.localBoundsMin.xyz, float3(1e-6f));
-    float3 spacing = volumeExtent / max(float3(volume.dimensions.xyz) - float3(1.0f), float3(1.0f));
-    float dx = sampleVolumeBrickDistance(volume, brick, brickSamples, brickSampleCount, localPosition + float3(spacing.x, 0, 0))
-        - sampleVolumeBrickDistance(volume, brick, brickSamples, brickSampleCount, localPosition - float3(spacing.x, 0, 0));
-    float dy = sampleVolumeBrickDistance(volume, brick, brickSamples, brickSampleCount, localPosition + float3(0, spacing.y, 0))
-        - sampleVolumeBrickDistance(volume, brick, brickSamples, brickSampleCount, localPosition - float3(0, spacing.y, 0));
-    float dz = sampleVolumeBrickDistance(volume, brick, brickSamples, brickSampleCount, localPosition + float3(0, 0, spacing.z))
-        - sampleVolumeBrickDistance(volume, brick, brickSamples, brickSampleCount, localPosition - float3(0, 0, spacing.z));
-    float3 localNormal = float3(dx, dy, dz);
+    (void)brickSampleCount;
+    if (context.valid == 0u) {
+        return float3(0, 1, 0);
+    }
+
+    float3 localNormal = useCubicGradient
+        ? sampleVolumeBrickDistanceGradientCubicPrepared(
+            brickSamples,
+            context,
+            localPosition
+        ).gradient
+        : sampleVolumeBrickDistanceGradientPrepared(
+            brickSamples,
+            context,
+            localPosition
+        ).gradient;
+    if (useCoarseFilteredGradient) {
+        float3 volumeExtent = max(volume.localBoundsMax.xyz - volume.localBoundsMin.xyz, float3(1e-6f));
+        float3 spacing = volumeExtent / max(float3(volume.dimensions.xyz) - float3(1.0f), float3(1.0f));
+        float3 centralNormal = sampleVolumeBrickCentralGradientPrepared(
+            brickSamples,
+            context,
+            localPosition,
+            spacing * 1.5f
+        );
+        if (dot(centralNormal, centralNormal) > 1e-10f) {
+            localNormal = normalize(mix(normalize(localNormal), normalize(centralNormal), 0.35f));
+        }
+    }
     if (dot(localNormal, localNormal) <= 1e-10f) {
         localNormal = float3(0, 1, 0);
     }
@@ -1758,6 +2067,7 @@ static float3 volumeBrickNormal(
 static bool intersectVolume(
     uint volumeIndex,
     Ray ray,
+    constant GPURenderConstants &constants,
     constant GPUVolumeDescriptor &volume,
     constant GPUVolumeSample *volumeSamples,
     constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors,
@@ -1765,6 +2075,7 @@ static bool intersectVolume(
     uint volumeSampleCount,
     uint volumeAttributeSampleCount,
     float closestT,
+    device atomic_uint *sdfCounters,
     thread Hit &hit
 ) {
     float tNear;
@@ -1802,6 +2113,7 @@ static bool intersectVolume(
 
     float t = previousT + max(fabs(previousDistance) / localUnitsPerWorldUnit * 0.9f, minimumStep);
     for (uint step = 0u; step < 512u && t <= tFar && t < closestT; ++step) {
+        addSDFTraversalCounter(sdfCounters, constants, sdfCounterDenseMarchSteps);
         float3 worldPosition = ray.origin + ray.direction * t;
         float3 localPosition = (worldToLocal * float4(worldPosition, 1.0f)).xyz;
         float distance = sampleVolumeDistance(volume, volumeSamples, volumeSampleCount, localPosition);
@@ -1887,48 +2199,53 @@ static bool intersectVolume(
     return false;
 }
 
-static bool intersectVolumeBrick(
+static bool intersectVolumeBrickPrepared(
     uint brickIndex,
     Ray ray,
+    constant GPURenderConstants &constants,
     constant GPUVolumeDescriptor &volume,
     constant GPUVolumeBrickDescriptor &brick,
-    constant GPUVolumeSample *brickSamples,
+    constant GPUVolumeBrickSample *brickSamples,
+    constant GPUVolumeMaterialFieldSample *brickMaterialFieldSamples,
     constant GPUVolumeAttributeDescriptor *brickAttributeDescriptors,
     constant float4 *brickAttributeSamples,
     uint brickSampleCount,
+    uint brickMaterialFieldSampleCount,
     uint brickAttributeSampleCount,
     float closestT,
+    float3 localOrigin,
+    float3 localDirection,
+    float localUnitsPerWorldUnit,
+    float cellSize,
+    device atomic_uint *sdfCounters,
     thread Hit &hit
 ) {
     float tNear;
     float tFar;
-    if (!intersectAABB(ray, brick.worldBoundsMin.xyz, brick.worldBoundsMax.xyz, closestT, tNear, tFar)) {
+    Ray localRay;
+    localRay.origin = localOrigin;
+    localRay.direction = localDirection;
+    if (!intersectAABB(localRay, brick.localBoundsMin.xyz, brick.localBoundsMax.xyz, closestT, tNear, tFar)) {
         return false;
     }
 
-    float4x4 worldToLocal = matrixFromColumns(
-        volume.worldToLocal0,
-        volume.worldToLocal1,
-        volume.worldToLocal2,
-        volume.worldToLocal3
-    );
-    float3 localRayStep = (worldToLocal * float4(ray.direction, 0.0f)).xyz;
-    float localUnitsPerWorldUnit = max(length(localRayStep), 1e-6f);
-    float3 volumeExtent = max(volume.localBoundsMax.xyz - volume.localBoundsMin.xyz, float3(1e-6f));
-    float3 volumeSpacing = volumeExtent / max(float3(volume.dimensions.xyz) - float3(1.0f), float3(1.0f));
-    float cellSize = min(volumeSpacing.x, min(volumeSpacing.y, volumeSpacing.z));
+    VolumeBrickSampleContext sampleContext = makeVolumeBrickSampleContext(brick, brickSampleCount);
+    if (sampleContext.valid == 0u) {
+        addSDFTraversalCounter(sdfCounters, constants, sdfCounterSparseBrickInvalid);
+        return false;
+    }
+    if (brick.sampleBoundsMin.w > 0.0f || brick.sampleBoundsMax.w < 0.0f) {
+        addSDFTraversalCounter(sdfCounters, constants, sdfCounterSparseBrickRangeCulls);
+        return false;
+    }
+
+    addSDFTraversalCounter(sdfCounters, constants, sdfCounterSparseBrickMarches);
+
     float minimumStep = max(cellSize * 0.10f / localUnitsPerWorldUnit, 0.0005f);
 
     float previousT = tNear;
-    float3 previousWorldPosition = ray.origin + ray.direction * previousT;
-    float3 previousLocalPosition = (worldToLocal * float4(previousWorldPosition, 1.0f)).xyz;
-    float previousDistance = sampleVolumeBrickDistance(
-        volume,
-        brick,
-        brickSamples,
-        brickSampleCount,
-        previousLocalPosition
-    );
+    float3 previousLocalPosition = localOrigin + localDirection * previousT;
+    float previousDistance = sampleVolumeBrickDistancePrepared(brickSamples, sampleContext, previousLocalPosition);
     if (!isfinite(previousDistance)) {
         return false;
     }
@@ -1939,15 +2256,8 @@ static bool intersectVolumeBrick(
         float searchT = previousT;
         for (uint backtrack = 0u; backtrack < 12u; ++backtrack) {
             searchT = max(searchT - backStep, 0.0005f);
-            float3 searchWorldPosition = ray.origin + ray.direction * searchT;
-            float3 searchLocalPosition = (worldToLocal * float4(searchWorldPosition, 1.0f)).xyz;
-            float searchDistance = sampleVolumeBrickDistance(
-                volume,
-                brick,
-                brickSamples,
-                brickSampleCount,
-                searchLocalPosition
-            );
+            float3 searchLocalPosition = localOrigin + localDirection * searchT;
+            float searchDistance = sampleVolumeBrickDistancePrepared(brickSamples, sampleContext, searchLocalPosition);
             if (!isfinite(searchDistance)) {
                 break;
             }
@@ -1965,9 +2275,9 @@ static bool intersectVolumeBrick(
 
     float t = max(originalEntryT, previousT + max(fabs(previousDistance) / localUnitsPerWorldUnit * 0.9f, minimumStep));
     for (uint step = 0u; step < 192u && t <= tFar && t < closestT; ++step) {
-        float3 worldPosition = ray.origin + ray.direction * t;
-        float3 localPosition = (worldToLocal * float4(worldPosition, 1.0f)).xyz;
-        float distance = sampleVolumeBrickDistance(volume, brick, brickSamples, brickSampleCount, localPosition);
+        addSDFTraversalCounter(sdfCounters, constants, sdfCounterSparseBrickMarchSteps);
+        float3 localPosition = localOrigin + localDirection * t;
+        float distance = sampleVolumeBrickDistancePrepared(brickSamples, sampleContext, localPosition);
         if (!isfinite(distance)) {
             return false;
         }
@@ -1982,9 +2292,8 @@ static bool intersectVolumeBrick(
             float refinedT = t;
             for (uint refine = 0u; refine < 8u; ++refine) {
                 float midT = 0.5f * (lowT + highT);
-                float3 midWorldPosition = ray.origin + ray.direction * midT;
-                float3 midLocalPosition = (worldToLocal * float4(midWorldPosition, 1.0f)).xyz;
-                float midDistance = sampleVolumeBrickDistance(volume, brick, brickSamples, brickSampleCount, midLocalPosition);
+                float3 midLocalPosition = localOrigin + localDirection * midT;
+                float midDistance = sampleVolumeBrickDistancePrepared(brickSamples, sampleContext, midLocalPosition);
                 if ((lowDistance > 0.0f && midDistance > 0.0f)
                     || (lowDistance < 0.0f && midDistance < 0.0f)) {
                     lowT = midT;
@@ -1996,9 +2305,42 @@ static bool intersectVolumeBrick(
                 refinedT = 0.5f * (lowT + highT);
             }
 
+            bool useCubicHitPolish = cellSize <= 0.03f;
+            bool useCoarseFilteredGradient = constants.renderQuality > 0u && cellSize > 0.03f;
+            refinedLocalPosition = localOrigin + localDirection * refinedT;
+            if (useCubicHitPolish) {
+                uint polishCount = constants.renderQuality > 1u ? 2u : 1u;
+                for (uint polish = 0u; polish < polishCount; ++polish) {
+                    VolumeBrickDistanceGradient polished = sampleVolumeBrickDistanceGradientCubicPrepared(
+                        brickSamples,
+                        sampleContext,
+                        refinedLocalPosition
+                    );
+                    float distanceSlope = dot(polished.gradient, localDirection);
+                    if (!isfinite(polished.distance) || fabs(distanceSlope) <= 1e-6f) {
+                        break;
+                    }
+
+                    float projectedT = refinedT - polished.distance / distanceSlope;
+                    if (projectedT <= lowT || projectedT >= highT) {
+                        break;
+                    }
+
+                    refinedT = projectedT;
+                    refinedLocalPosition = localOrigin + localDirection * refinedT;
+                }
+            }
+
             float3 refinedWorldPosition = ray.origin + ray.direction * refinedT;
-            refinedLocalPosition = (worldToLocal * float4(refinedWorldPosition, 1.0f)).xyz;
-            float3 normal = volumeBrickNormal(volume, brick, brickSamples, brickSampleCount, refinedLocalPosition);
+            float3 normal = volumeBrickNormal(
+                volume,
+                brickSamples,
+                brickSampleCount,
+                sampleContext,
+                refinedLocalPosition,
+                useCubicHitPolish,
+                useCoarseFilteredGradient
+            );
             bool frontFacing = dot(normal, ray.direction) <= 0.0f;
             if (!frontFacing) {
                 normal = -normal;
@@ -2015,7 +2357,9 @@ static bool intersectVolumeBrick(
                 volume,
                 brick,
                 brickSamples,
+                brickMaterialFieldSamples,
                 brickSampleCount,
+                brickMaterialFieldSampleCount,
                 refinedLocalPosition
             );
             hit.materialID = materialSample.materialA;
@@ -2041,6 +2385,7 @@ static bool intersectVolumeBrick(
             hit.objectID = volume.metadata.y;
             hit.primitiveID = volume.metadata.z;
             hit.frontFacing = frontFacing;
+            addSDFTraversalCounter(sdfCounters, constants, sdfCounterSparseBrickHits);
             return true;
         }
 
@@ -2053,6 +2398,287 @@ static bool intersectVolumeBrick(
     return false;
 }
 
+static bool intersectVolumeBrick(
+    uint brickIndex,
+    Ray ray,
+    constant GPURenderConstants &constants,
+    constant GPUVolumeDescriptor &volume,
+    constant GPUVolumeBrickDescriptor &brick,
+    constant GPUVolumeBrickSample *brickSamples,
+    constant GPUVolumeMaterialFieldSample *brickMaterialFieldSamples,
+    constant GPUVolumeAttributeDescriptor *brickAttributeDescriptors,
+    constant float4 *brickAttributeSamples,
+    uint brickSampleCount,
+    uint brickMaterialFieldSampleCount,
+    uint brickAttributeSampleCount,
+    float closestT,
+    device atomic_uint *sdfCounters,
+    thread Hit &hit
+) {
+    float4x4 worldToLocal = matrixFromColumns(
+        volume.worldToLocal0,
+        volume.worldToLocal1,
+        volume.worldToLocal2,
+        volume.worldToLocal3
+    );
+    float3 localOrigin = (worldToLocal * float4(ray.origin, 1.0f)).xyz;
+    float3 localDirection = (worldToLocal * float4(ray.direction, 0.0f)).xyz;
+    float localUnitsPerWorldUnit = max(length(localDirection), 1e-6f);
+    float3 volumeExtent = max(volume.localBoundsMax.xyz - volume.localBoundsMin.xyz, float3(1e-6f));
+    float3 volumeSpacing = volumeExtent / max(float3(volume.dimensions.xyz) - float3(1.0f), float3(1.0f));
+    float cellSize = min(volumeSpacing.x, min(volumeSpacing.y, volumeSpacing.z));
+
+    return intersectVolumeBrickPrepared(
+        brickIndex,
+        ray,
+        constants,
+        volume,
+        brick,
+        brickSamples,
+        brickMaterialFieldSamples,
+        brickAttributeDescriptors,
+        brickAttributeSamples,
+        brickSampleCount,
+        brickMaterialFieldSampleCount,
+        brickAttributeSampleCount,
+        closestT,
+        localOrigin,
+        localDirection,
+        localUnitsPerWorldUnit,
+        cellSize,
+        sdfCounters,
+        hit
+    );
+}
+
+static bool findVolumeBrickGrid(
+    uint volumeIndex,
+    constant GPURenderConstants &constants,
+    constant GPUVolumeBrickGrid *volumeBrickGrids,
+    thread GPUVolumeBrickGrid &grid
+) {
+    if (volumeBrickGrids == nullptr) {
+        return false;
+    }
+    for (uint gridIndex = 0u; gridIndex < constants.volumeBrickGridCount; ++gridIndex) {
+        constant GPUVolumeBrickGrid &candidate = volumeBrickGrids[gridIndex];
+        if (candidate.brickSizeAndVolume.w == volumeIndex) {
+            grid = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+static Hit closestSparseVolumeBrickDDAHit(
+    uint volumeIndex,
+    Ray ray,
+    constant GPURenderConstants &constants,
+    constant GPUVolumeDescriptor &volume,
+    constant GPUVolumeBrickDescriptor *volumeBricks,
+    constant GPUVolumeBrickSample *volumeBrickSamples,
+    constant GPUVolumeMaterialFieldSample *volumeBrickMaterialFieldSamples,
+    constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors,
+    constant float4 *volumeBrickAttributeSamples,
+    constant GPUVolumeBrickGrid *volumeBrickGrids,
+    constant uint *volumeBrickGridIndices,
+    device atomic_uint *sdfCounters,
+    float closestT
+) {
+    Hit closest = emptyHit();
+    closest.t = closestT;
+
+    GPUVolumeBrickGrid grid;
+    if (!findVolumeBrickGrid(volumeIndex, constants, volumeBrickGrids, grid)
+        || volumeBrickGridIndices == nullptr) {
+        return closest;
+    }
+
+    uint3 gridDimensions = grid.dimensionsAndIndexOffset.xyz;
+    uint gridIndexOffset = grid.dimensionsAndIndexOffset.w;
+    uint3 brickSize = max(grid.brickSizeAndVolume.xyz, uint3(1u));
+    if (gridDimensions.x == 0u || gridDimensions.y == 0u || gridDimensions.z == 0u) {
+        return closest;
+    }
+
+    float tNear;
+    float tFar;
+    if (!intersectAABB(ray, volume.worldBoundsMin.xyz, volume.worldBoundsMax.xyz, closestT, tNear, tFar)) {
+        return closest;
+    }
+
+    float4x4 worldToLocal = matrixFromColumns(
+        volume.worldToLocal0,
+        volume.worldToLocal1,
+        volume.worldToLocal2,
+        volume.worldToLocal3
+    );
+    float3 localOrigin = (worldToLocal * float4(ray.origin, 1.0f)).xyz;
+    float3 localDirection = (worldToLocal * float4(ray.direction, 0.0f)).xyz;
+    float3 extent = max(volume.localBoundsMax.xyz - volume.localBoundsMin.xyz, float3(1e-6f));
+    float3 sampleDenominator = max(float3(volume.dimensions.xyz) - float3(1.0f), float3(1.0f));
+    float3 brickSizeFloat = max(float3(brickSize), float3(1.0f));
+    float3 volumeSpacing = extent / sampleDenominator;
+    float cellSize = min(volumeSpacing.x, min(volumeSpacing.y, volumeSpacing.z));
+    float localUnitsPerWorldUnit = max(length(localDirection), 1e-6f);
+
+    float t = tNear;
+    float3 localPosition = localOrigin + localDirection * t;
+    float3 samplePosition = ((localPosition - volume.localBoundsMin.xyz) / extent) * sampleDenominator;
+    float3 brickPosition = (samplePosition + float3(0.5f)) / brickSizeFloat;
+    int3 cell = int3(clamp(floor(brickPosition), float3(0.0f), float3(gridDimensions) - float3(1.0f)));
+
+    float3 brickVelocity = (localDirection / extent) * sampleDenominator / brickSizeFloat;
+    int3 stepDirection = int3(
+        brickVelocity.x > 0.0f ? 1 : (brickVelocity.x < 0.0f ? -1 : 0),
+        brickVelocity.y > 0.0f ? 1 : (brickVelocity.y < 0.0f ? -1 : 0),
+        brickVelocity.z > 0.0f ? 1 : (brickVelocity.z < 0.0f ? -1 : 0)
+    );
+    float3 nextBoundary = float3(
+        stepDirection.x > 0 ? (float)cell.x + 1.0f : (float)cell.x,
+        stepDirection.y > 0 ? (float)cell.y + 1.0f : (float)cell.y,
+        stepDirection.z > 0 ? (float)cell.z + 1.0f : (float)cell.z
+    );
+    float3 tMax = float3(
+        stepDirection.x == 0 ? INFINITY : t + (nextBoundary.x - brickPosition.x) / brickVelocity.x,
+        stepDirection.y == 0 ? INFINITY : t + (nextBoundary.y - brickPosition.y) / brickVelocity.y,
+        stepDirection.z == 0 ? INFINITY : t + (nextBoundary.z - brickPosition.z) / brickVelocity.z
+    );
+    float3 tDelta = float3(
+        stepDirection.x == 0 ? INFINITY : fabs(1.0f / brickVelocity.x),
+        stepDirection.y == 0 ? INFINITY : fabs(1.0f / brickVelocity.y),
+        stepDirection.z == 0 ? INFINITY : fabs(1.0f / brickVelocity.z)
+    );
+    uint3 macroDimensions = grid.macroDimensionsAndIndexOffset.xyz;
+    uint macroIndexOffset = grid.macroDimensionsAndIndexOffset.w;
+    uint3 macroSize = max(grid.macroSizeAndReserved.xyz, uint3(1u));
+    bool hasMacroGrid = macroDimensions.x > 0u
+        && macroDimensions.y > 0u
+        && macroDimensions.z > 0u
+        && macroIndexOffset < constants.volumeBrickGridIndexCount;
+
+    uint maximumSteps = min(gridDimensions.x + gridDimensions.y + gridDimensions.z + 8u, 1024u);
+    for (uint step = 0u; step < maximumSteps && t <= tFar && t < closest.t; ++step) {
+        addSDFTraversalCounter(sdfCounters, constants, sdfCounterSparseGridCellsVisited);
+        if (cell.x < 0 || cell.y < 0 || cell.z < 0
+            || cell.x >= (int)gridDimensions.x
+            || cell.y >= (int)gridDimensions.y
+            || cell.z >= (int)gridDimensions.z) {
+            break;
+        }
+
+        if (hasMacroGrid) {
+            uint3 unsignedCell = uint3(cell);
+            uint3 macroCell = min(unsignedCell / macroSize, macroDimensions - uint3(1u));
+            uint macroSlot = macroIndexOffset
+                + macroCell.x
+                + macroCell.y * macroDimensions.x
+                + macroCell.z * macroDimensions.x * macroDimensions.y;
+            if (macroSlot < constants.volumeBrickGridIndexCount
+                && volumeBrickGridIndices[macroSlot] == 0u) {
+                float3 currentBrickPosition = brickPosition + brickVelocity * (t - tNear);
+                float3 macroBoundary = float3(
+                    stepDirection.x > 0
+                        ? min((macroCell.x + 1u) * macroSize.x, gridDimensions.x)
+                        : macroCell.x * macroSize.x,
+                    stepDirection.y > 0
+                        ? min((macroCell.y + 1u) * macroSize.y, gridDimensions.y)
+                        : macroCell.y * macroSize.y,
+                    stepDirection.z > 0
+                        ? min((macroCell.z + 1u) * macroSize.z, gridDimensions.z)
+                        : macroCell.z * macroSize.z
+                );
+                float3 macroTMax = float3(
+                    stepDirection.x == 0 ? INFINITY : t + (macroBoundary.x - currentBrickPosition.x) / brickVelocity.x,
+                    stepDirection.y == 0 ? INFINITY : t + (macroBoundary.y - currentBrickPosition.y) / brickVelocity.y,
+                    stepDirection.z == 0 ? INFINITY : t + (macroBoundary.z - currentBrickPosition.z) / brickVelocity.z
+                );
+                float macroNextT = min(macroTMax.x, min(macroTMax.y, macroTMax.z));
+                if (macroNextT > t + 1e-6f) {
+                    addSDFTraversalCounter(sdfCounters, constants, sdfCounterSparseGridMacroSkips);
+                    if (macroNextT > tFar || macroNextT >= closest.t) {
+                        break;
+                    }
+
+                    t = macroNextT + 1e-5f;
+                    currentBrickPosition = brickPosition + brickVelocity * (t - tNear);
+                    cell = int3(clamp(floor(currentBrickPosition), float3(0.0f), float3(gridDimensions) - float3(1.0f)));
+                    nextBoundary = float3(
+                        stepDirection.x > 0 ? (float)cell.x + 1.0f : (float)cell.x,
+                        stepDirection.y > 0 ? (float)cell.y + 1.0f : (float)cell.y,
+                        stepDirection.z > 0 ? (float)cell.z + 1.0f : (float)cell.z
+                    );
+                    tMax = float3(
+                        stepDirection.x == 0 ? INFINITY : t + (nextBoundary.x - currentBrickPosition.x) / brickVelocity.x,
+                        stepDirection.y == 0 ? INFINITY : t + (nextBoundary.y - currentBrickPosition.y) / brickVelocity.y,
+                        stepDirection.z == 0 ? INFINITY : t + (nextBoundary.z - currentBrickPosition.z) / brickVelocity.z
+                    );
+                    continue;
+                }
+            }
+        }
+
+        uint slot = gridIndexOffset
+            + (uint)cell.x
+            + (uint)cell.y * gridDimensions.x
+            + (uint)cell.z * gridDimensions.x * gridDimensions.y;
+        if (slot < constants.volumeBrickGridIndexCount) {
+            uint brickIndex = volumeBrickGridIndices[slot];
+            if (brickIndex != 0xffffffffu && brickIndex < constants.volumeBrickCount) {
+                addSDFTraversalCounter(sdfCounters, constants, sdfCounterSparseBrickTests);
+                Hit candidate = emptyHit();
+                if (intersectVolumeBrickPrepared(
+                    brickIndex,
+                    ray,
+                    constants,
+                    volume,
+                    volumeBricks[brickIndex],
+                    volumeBrickSamples,
+                    volumeBrickMaterialFieldSamples,
+                    volumeBrickAttributeDescriptors,
+                    volumeBrickAttributeSamples,
+                    constants.volumeBrickSampleCount,
+                    constants.volumeBrickMaterialFieldSampleCount,
+                    constants.volumeBrickAttributeSampleCount,
+                    closest.t,
+                    localOrigin,
+                    localDirection,
+                    localUnitsPerWorldUnit,
+                    cellSize,
+                    sdfCounters,
+                    candidate
+                ) && candidate.t < closest.t) {
+                    closest = candidate;
+                }
+            }
+        }
+
+        float nextT = min(tMax.x, min(tMax.y, tMax.z));
+        if (closest.hit && closest.t <= nextT + 0.0005f) {
+            return closest;
+        }
+        if (nextT > tFar || nextT >= closest.t) {
+            break;
+        }
+
+        if (tMax.x <= tMax.y && tMax.x <= tMax.z) {
+            cell.x += stepDirection.x;
+            t = tMax.x;
+            tMax.x += tDelta.x;
+        } else if (tMax.y <= tMax.z) {
+            cell.y += stepDirection.y;
+            t = tMax.y;
+            tMax.y += tDelta.y;
+        } else {
+            cell.z += stepDirection.z;
+            t = tMax.z;
+            tMax.z += tDelta.z;
+        }
+    }
+
+    return closest;
+}
+
 static Hit closestVolumeHit(
     Ray ray,
     constant GPURenderConstants &constants,
@@ -2061,9 +2687,15 @@ static Hit closestVolumeHit(
     constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors,
     constant float4 *volumeAttributeSamples,
     constant GPUVolumeBrickDescriptor *volumeBricks,
-    constant GPUVolumeSample *volumeBrickSamples,
+    constant GPUVolumeBrickSample *volumeBrickSamples,
+    constant GPUVolumeMaterialFieldSample *volumeBrickMaterialFieldSamples,
     constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors,
     constant float4 *volumeBrickAttributeSamples,
+    constant GPUAccelerationNode *volumeBrickBVHNodes,
+    constant uint *volumeBrickBVHIndices,
+    constant GPUVolumeBrickGrid *volumeBrickGrids,
+    constant uint *volumeBrickGridIndices,
+    device atomic_uint *sdfCounters,
     float closestT
 ) {
     Hit closest = emptyHit();
@@ -2072,10 +2704,12 @@ static Hit closestVolumeHit(
         if (volumes[index].metadata.w != 0u) {
             continue;
         }
+        addSDFTraversalCounter(sdfCounters, constants, sdfCounterDenseVolumeTests);
         Hit candidate = emptyHit();
         if (intersectVolume(
             index,
             ray,
+            constants,
             volumes[index],
             volumeSamples,
             volumeAttributeDescriptors,
@@ -2083,28 +2717,135 @@ static Hit closestVolumeHit(
             constants.volumeSampleCount,
             constants.volumeAttributeSampleCount,
             closest.t,
+            sdfCounters,
             candidate
         ) && candidate.t < closest.t) {
             closest = candidate;
         }
     }
-    for (uint index = 0; index < constants.volumeBrickCount; ++index) {
-        uint volumeIndex = volumeBricks[index].gridOriginAndVolume.w;
+
+    if (constants.volumeBrickGridCount > 0u
+        && constants.volumeBrickGridIndexCount > 0u
+        && volumeBrickGrids != nullptr
+        && volumeBrickGridIndices != nullptr) {
+        for (uint index = 0u; index < constants.volumeCount; ++index) {
+            if (volumes[index].metadata.w != 1u) {
+                continue;
+            }
+            Hit candidate = closestSparseVolumeBrickDDAHit(
+                index,
+                ray,
+                constants,
+                volumes[index],
+                volumeBricks,
+                volumeBrickSamples,
+                volumeBrickMaterialFieldSamples,
+                volumeBrickAttributeDescriptors,
+                volumeBrickAttributeSamples,
+                volumeBrickGrids,
+                volumeBrickGridIndices,
+                sdfCounters,
+                closest.t
+            );
+            if (candidate.hit && candidate.t < closest.t) {
+                closest = candidate;
+            }
+        }
+        return closest;
+    }
+
+    if (constants.volumeBrickBVHNodeCount > 0u && volumeBrickBVHNodes != nullptr && volumeBrickBVHIndices != nullptr) {
+        uint stack[64];
+        uint stackCount = 0;
+        stack[stackCount++] = 0;
+
+        while (stackCount > 0u) {
+            uint nodeIndex = stack[--stackCount];
+            if (nodeIndex >= constants.volumeBrickBVHNodeCount) {
+                continue;
+            }
+
+            constant GPUAccelerationNode &node = volumeBrickBVHNodes[nodeIndex];
+            if (!intersectBounds(ray, node, closest.t)) {
+                continue;
+            }
+
+            uint firstBrickIndex = node.metadata.z;
+            uint brickIndexCount = node.metadata.w;
+            if (brickIndexCount > 0u) {
+                for (uint offset = 0u; offset < brickIndexCount; ++offset) {
+                    uint indexSlot = firstBrickIndex + offset;
+                    if (indexSlot >= constants.volumeBrickBVHIndexCount) {
+                        continue;
+                    }
+
+                    uint brickIndex = volumeBrickBVHIndices[indexSlot];
+                    if (brickIndex >= constants.volumeBrickCount) {
+                        continue;
+                    }
+
+                    uint volumeIndex = volumeBricks[brickIndex].gridOriginAndVolume.w;
+                    if (volumeIndex >= constants.volumeCount || volumes[volumeIndex].metadata.w != 1u) {
+                        continue;
+                    }
+
+                    Hit candidate = emptyHit();
+                    addSDFTraversalCounter(sdfCounters, constants, sdfCounterSparseBrickTests);
+                    if (intersectVolumeBrick(
+                        brickIndex,
+                        ray,
+                        constants,
+                        volumes[volumeIndex],
+                        volumeBricks[brickIndex],
+                        volumeBrickSamples,
+                        volumeBrickMaterialFieldSamples,
+                        volumeBrickAttributeDescriptors,
+                        volumeBrickAttributeSamples,
+                        constants.volumeBrickSampleCount,
+                        constants.volumeBrickMaterialFieldSampleCount,
+                        constants.volumeBrickAttributeSampleCount,
+                        closest.t,
+                        sdfCounters,
+                        candidate
+                    ) && candidate.t < closest.t) {
+                        closest = candidate;
+                    }
+                }
+            } else {
+                uint leftChild = node.metadata.x;
+                uint rightChild = node.metadata.y;
+                if (stackCount + 2u <= 64u) {
+                    stack[stackCount++] = rightChild;
+                    stack[stackCount++] = leftChild;
+                }
+            }
+        }
+
+        return closest;
+    }
+
+    for (uint brickIndex = 0; brickIndex < constants.volumeBrickCount; ++brickIndex) {
+        uint volumeIndex = volumeBricks[brickIndex].gridOriginAndVolume.w;
         if (volumeIndex >= constants.volumeCount || volumes[volumeIndex].metadata.w != 1u) {
             continue;
         }
         Hit candidate = emptyHit();
+        addSDFTraversalCounter(sdfCounters, constants, sdfCounterSparseBrickTests);
         if (intersectVolumeBrick(
-            index,
+            brickIndex,
             ray,
+            constants,
             volumes[volumeIndex],
-            volumeBricks[index],
+            volumeBricks[brickIndex],
             volumeBrickSamples,
+            volumeBrickMaterialFieldSamples,
             volumeBrickAttributeDescriptors,
             volumeBrickAttributeSamples,
             constants.volumeBrickSampleCount,
+            constants.volumeBrickMaterialFieldSampleCount,
             constants.volumeBrickAttributeSampleCount,
             closest.t,
+            sdfCounters,
             candidate
         ) && candidate.t < closest.t) {
             closest = candidate;
@@ -2153,9 +2894,15 @@ static Hit intersectScene(
     constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors,
     constant float4 *volumeAttributeSamples,
     constant GPUVolumeBrickDescriptor *volumeBricks,
-    constant GPUVolumeSample *volumeBrickSamples,
+    constant GPUVolumeBrickSample *volumeBrickSamples,
+    constant GPUVolumeMaterialFieldSample *volumeBrickMaterialFieldSamples,
     constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors,
-    constant float4 *volumeBrickAttributeSamples
+    constant float4 *volumeBrickAttributeSamples,
+    constant GPUAccelerationNode *volumeBrickBVHNodes,
+    constant uint *volumeBrickBVHIndices,
+    constant GPUVolumeBrickGrid *volumeBrickGrids,
+    constant uint *volumeBrickGridIndices,
+    device atomic_uint *sdfCounters
 ) {
     Hit closest = emptyHit();
     if (constants.accelerationNodeCount == 0 || nodes == nullptr || primitiveIndices == nullptr) {
@@ -2169,8 +2916,14 @@ static Hit intersectScene(
             volumeAttributeSamples,
             volumeBricks,
             volumeBrickSamples,
+            volumeBrickMaterialFieldSamples,
             volumeBrickAttributeDescriptors,
             volumeBrickAttributeSamples,
+            volumeBrickBVHNodes,
+            volumeBrickBVHIndices,
+            volumeBrickGrids,
+            volumeBrickGridIndices,
+            sdfCounters,
             closest.t
         );
         return volumeHit.hit ? volumeHit : closest;
@@ -2242,8 +2995,14 @@ static Hit intersectScene(
         volumeAttributeSamples,
         volumeBricks,
         volumeBrickSamples,
+        volumeBrickMaterialFieldSamples,
         volumeBrickAttributeDescriptors,
         volumeBrickAttributeSamples,
+        volumeBrickBVHNodes,
+        volumeBrickBVHIndices,
+        volumeBrickGrids,
+        volumeBrickGridIndices,
+        sdfCounters,
         closest.t
     );
     if (volumeHit.hit) {
@@ -2367,9 +3126,15 @@ static bool continueSubsurfaceRandomWalk(
     constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors,
     constant float4 *volumeAttributeSamples,
     constant GPUVolumeBrickDescriptor *volumeBricks,
-    constant GPUVolumeSample *volumeBrickSamples,
+    constant GPUVolumeBrickSample *volumeBrickSamples,
+    constant GPUVolumeMaterialFieldSample *volumeBrickMaterialFieldSamples,
     constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors,
     constant float4 *volumeBrickAttributeSamples,
+    constant GPUAccelerationNode *volumeBrickBVHNodes,
+    constant uint *volumeBrickBVHIndices,
+    constant GPUVolumeBrickGrid *volumeBrickGrids,
+    constant uint *volumeBrickGridIndices,
+    device atomic_uint *sdfCounters,
     thread Ray &ray,
     thread float3 &throughput,
     thread float &previousBSDFPDF,
@@ -2393,6 +3158,7 @@ static bool continueSubsurfaceRandomWalk(
     float anisotropy = materialSubsurfaceAnisotropy(material);
 
     for (uint step = 0u; step < 8u; ++step) {
+        addSDFTraversalCounter(sdfCounters, constants, sdfCounterBounceSceneQueries);
         Hit boundaryHit = intersectScene(
             mediumRay,
             constants,
@@ -2405,8 +3171,14 @@ static bool continueSubsurfaceRandomWalk(
             volumeAttributeSamples,
             volumeBricks,
             volumeBrickSamples,
+            volumeBrickMaterialFieldSamples,
             volumeBrickAttributeDescriptors,
-            volumeBrickAttributeSamples
+            volumeBrickAttributeSamples,
+            volumeBrickBVHNodes,
+            volumeBrickBVHIndices,
+            volumeBrickGrids,
+            volumeBrickGridIndices,
+            sdfCounters
         );
         if (!boundaryHit.hit) {
             return false;
@@ -2823,9 +3595,15 @@ static bool tracePrimaryAOV(
     constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors,
     constant float4 *volumeAttributeSamples,
     constant GPUVolumeBrickDescriptor *volumeBricks,
-    constant GPUVolumeSample *volumeBrickSamples,
+    constant GPUVolumeBrickSample *volumeBrickSamples,
+    constant GPUVolumeMaterialFieldSample *volumeBrickMaterialFieldSamples,
     constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors,
     constant float4 *volumeBrickAttributeSamples,
+    constant GPUAccelerationNode *volumeBrickBVHNodes,
+    constant uint *volumeBrickBVHIndices,
+    constant GPUVolumeBrickGrid *volumeBrickGrids,
+    constant uint *volumeBrickGridIndices,
+    device atomic_uint *sdfCounters,
     constant GPUMaterial *materials,
     constant GPUMaterialSemanticDescriptor *materialSemantics,
     constant GPUTextureDescriptor *textureDescriptors,
@@ -2834,6 +3612,7 @@ static bool tracePrimaryAOV(
     thread GPUMaterial &primaryMaterial
 ) {
     for (uint pass = 0; pass < 32u; ++pass) {
+        addSDFTraversalCounter(sdfCounters, constants, sdfCounterPrimarySceneQueries);
         Hit hit = intersectScene(
             ray,
             constants,
@@ -2846,8 +3625,14 @@ static bool tracePrimaryAOV(
             volumeAttributeSamples,
             volumeBricks,
             volumeBrickSamples,
+            volumeBrickMaterialFieldSamples,
             volumeBrickAttributeDescriptors,
-            volumeBrickAttributeSamples
+            volumeBrickAttributeSamples,
+            volumeBrickBVHNodes,
+            volumeBrickBVHIndices,
+            volumeBrickGrids,
+            volumeBrickGridIndices,
+            sdfCounters
         );
         if (!hit.hit) {
             return false;
@@ -2917,13 +3702,20 @@ static bool shadowOccluded(
     constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors,
     constant float4 *volumeAttributeSamples,
     constant GPUVolumeBrickDescriptor *volumeBricks,
-    constant GPUVolumeSample *volumeBrickSamples,
+    constant GPUVolumeBrickSample *volumeBrickSamples,
+    constant GPUVolumeMaterialFieldSample *volumeBrickMaterialFieldSamples,
     constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors,
     constant float4 *volumeBrickAttributeSamples,
+    constant GPUAccelerationNode *volumeBrickBVHNodes,
+    constant uint *volumeBrickBVHIndices,
+    constant GPUVolumeBrickGrid *volumeBrickGrids,
+    constant uint *volumeBrickGridIndices,
+    device atomic_uint *sdfCounters,
     thread float3 &transmittance
 ) {
     float traveled = 0.0f;
     for (uint step = 0; step < 8u; ++step) {
+        addSDFTraversalCounter(sdfCounters, constants, sdfCounterShadowSceneQueries);
         Hit shadowHit = intersectScene(
             shadowRay,
             constants,
@@ -2936,8 +3728,14 @@ static bool shadowOccluded(
             volumeAttributeSamples,
             volumeBricks,
             volumeBrickSamples,
+            volumeBrickMaterialFieldSamples,
             volumeBrickAttributeDescriptors,
-            volumeBrickAttributeSamples
+            volumeBrickAttributeSamples,
+            volumeBrickBVHNodes,
+            volumeBrickBVHIndices,
+            volumeBrickGrids,
+            volumeBrickGridIndices,
+            sdfCounters
         );
         if (!shadowHit.hit || traveled + shadowHit.t >= maxDistance) {
             return false;
@@ -3031,9 +3829,15 @@ static float3 sampleDirectLighting(
     constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors,
     constant float4 *volumeAttributeSamples,
     constant GPUVolumeBrickDescriptor *volumeBricks,
-    constant GPUVolumeSample *volumeBrickSamples,
+    constant GPUVolumeBrickSample *volumeBrickSamples,
+    constant GPUVolumeMaterialFieldSample *volumeBrickMaterialFieldSamples,
     constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors,
     constant float4 *volumeBrickAttributeSamples,
+    constant GPUAccelerationNode *volumeBrickBVHNodes,
+    constant uint *volumeBrickBVHIndices,
+    constant GPUVolumeBrickGrid *volumeBrickGrids,
+    constant uint *volumeBrickGridIndices,
+    device atomic_uint *sdfCounters,
     constant GPULightRecord *lights,
     constant GPUEnvironmentSample *environmentSamples,
     constant GPUTextureDescriptor *textureDescriptors,
@@ -3095,8 +3899,14 @@ static float3 sampleDirectLighting(
                         volumeAttributeSamples,
                         volumeBricks,
                         volumeBrickSamples,
+                        volumeBrickMaterialFieldSamples,
                         volumeBrickAttributeDescriptors,
                         volumeBrickAttributeSamples,
+                        volumeBrickBVHNodes,
+                        volumeBrickBVHIndices,
+                        volumeBrickGrids,
+                        volumeBrickGridIndices,
+                        sdfCounters,
                         shadowTransmittance
                     )) {
                         float geometryTerm = cosSurface * cosLight * area / max(distanceSquared, 1e-6f);
@@ -3156,8 +3966,14 @@ static float3 sampleDirectLighting(
                 volumeAttributeSamples,
                 volumeBricks,
                 volumeBrickSamples,
+                volumeBrickMaterialFieldSamples,
                 volumeBrickAttributeDescriptors,
                 volumeBrickAttributeSamples,
+                volumeBrickBVHNodes,
+                volumeBrickBVHIndices,
+                volumeBrickGrids,
+                volumeBrickGridIndices,
+                sdfCounters,
                 shadowTransmittance
             )) {
                 float3 brdf = evaluateMaterialBRDF(
@@ -3346,27 +4162,37 @@ kernel void pathTraceKernel(
     constant GPUVolumeDescriptor *volumes [[buffer(14)]],
     constant GPUVolumeSample *volumeSamples [[buffer(15)]],
     constant GPUVolumeBrickDescriptor *volumeBricks [[buffer(16)]],
-    constant GPUVolumeSample *volumeBrickSamples [[buffer(17)]],
+    constant GPUVolumeBrickSample *volumeBrickSamples [[buffer(17)]],
     constant GPUMaterialSemanticDescriptor *materialSemantics [[buffer(18)]],
     constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors [[buffer(19)]],
     constant float4 *volumeAttributeSamples [[buffer(20)]],
     constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors [[buffer(21)]],
     constant float4 *volumeBrickAttributeSamples [[buffer(22)]],
+    constant GPUAccelerationNode *volumeBrickBVHNodes [[buffer(23)]],
+    constant uint *volumeBrickBVHIndices [[buffer(24)]],
+    constant GPUVolumeBrickGrid *volumeBrickGrids [[buffer(25)]],
+    constant uint *volumeBrickGridIndices [[buffer(26)]],
+    constant GPUVolumeMaterialFieldSample *volumeBrickMaterialFieldSamples [[buffer(27)]],
+    device atomic_uint *sdfCounters [[buffer(28)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
-    if (gid.x >= constants.width || gid.y >= constants.height) {
+    if (gid.x >= constants.tileWidth || gid.y >= constants.tileHeight) {
+        return;
+    }
+    uint2 pixel = gid + uint2(constants.tileX, constants.tileY);
+    if (pixel.x >= constants.width || pixel.y >= constants.height) {
         return;
     }
 
     uint state = constants.frameSeed
-        ^ hash(gid.x + gid.y * constants.width)
+        ^ hash(pixel.x + pixel.y * constants.width)
         ^ hash(constants.sampleIndex + 1u);
 
     Ray ray = makeCameraRay(
         camera,
         constants.width,
         constants.height,
-        gid,
+        pixel,
         randomFloat(state),
         randomFloat(state)
     );
@@ -3397,6 +4223,11 @@ kernel void pathTraceKernel(
     primaryMaterial.volumeParameters = float4(0);
 
     for (uint bounce = 0; bounce < constants.maxBounces; ++bounce) {
+        addSDFTraversalCounter(
+            sdfCounters,
+            constants,
+            bounce == 0u ? sdfCounterPrimarySceneQueries : sdfCounterBounceSceneQueries
+        );
         Hit hit = intersectScene(
             ray,
             constants,
@@ -3409,14 +4240,21 @@ kernel void pathTraceKernel(
             volumeAttributeSamples,
             volumeBricks,
             volumeBrickSamples,
+            volumeBrickMaterialFieldSamples,
             volumeBrickAttributeDescriptors,
-            volumeBrickAttributeSamples
+            volumeBrickAttributeSamples,
+            volumeBrickBVHNodes,
+            volumeBrickBVHIndices,
+            volumeBrickGrids,
+            volumeBrickGridIndices,
+            sdfCounters
         );
         if (!hit.hit) {
-            if (constants.transparentBackground != 0u) {
-                if (bounce == 0u) {
-                    outputAlpha = 0.0f;
-                }
+            if (constants.transparentBackground != 0u && !primaryHit.hit) {
+                outputAlpha = 0.0f;
+            } else if (constants.showsEnvironmentBackground == 0u && !primaryHit.hit) {
+                outputAlpha = 1.0f;
+                radiance += max(constants.backgroundColor.xyz, float3(0.0f));
             } else {
                 float environmentWeight = 1.0f;
                 if (bounce > 0u && previousBSDFPDF > 0.0f) {
@@ -3473,8 +4311,14 @@ kernel void pathTraceKernel(
                 volumeAttributeSamples,
                 volumeBricks,
                 volumeBrickSamples,
+                volumeBrickMaterialFieldSamples,
                 volumeBrickAttributeDescriptors,
                 volumeBrickAttributeSamples,
+                volumeBrickBVHNodes,
+                volumeBrickBVHIndices,
+                volumeBrickGrids,
+                volumeBrickGridIndices,
+                sdfCounters,
                 ray,
                 throughput,
                 previousBSDFPDF,
@@ -3528,8 +4372,14 @@ kernel void pathTraceKernel(
             volumeAttributeSamples,
             volumeBricks,
             volumeBrickSamples,
+            volumeBrickMaterialFieldSamples,
             volumeBrickAttributeDescriptors,
             volumeBrickAttributeSamples,
+            volumeBrickBVHNodes,
+            volumeBrickBVHIndices,
+            volumeBrickGrids,
+            volumeBrickGridIndices,
+            sdfCounters,
             lights,
             environmentSamples,
             textureDescriptors,
@@ -3634,11 +4484,11 @@ kernel void pathTraceKernel(
         }
     }
 
-    float4 previous = accumulation.read(gid);
+    float4 previous = accumulation.read(pixel);
     float sampleWeight = 1.0f / ((float)constants.sampleIndex + 1.0f);
     float3 color = mix(previous.xyz, radiance, sampleWeight);
     float alpha = mix(previous.w, outputAlpha, sampleWeight);
-    accumulation.write(float4(color, alpha), gid);
+    accumulation.write(float4(color, alpha), pixel);
 
     Hit aovHit = emptyHit();
     GPUMaterial aovMaterial;
@@ -3647,7 +4497,7 @@ kernel void pathTraceKernel(
     aovMaterial = primaryMaterial;
     if (constants.denoiserEnabled != 0u) {
         hasAOVHit = tracePrimaryAOV(
-            makeCameraRay(camera, constants.width, constants.height, gid, 0.5f, 0.5f),
+            makeCameraRay(camera, constants.width, constants.height, pixel, 0.5f, 0.5f),
             constants,
             triangles,
             nodes,
@@ -3658,8 +4508,14 @@ kernel void pathTraceKernel(
             volumeAttributeSamples,
             volumeBricks,
             volumeBrickSamples,
+            volumeBrickMaterialFieldSamples,
             volumeBrickAttributeDescriptors,
             volumeBrickAttributeSamples,
+            volumeBrickBVHNodes,
+            volumeBrickBVHIndices,
+            volumeBrickGrids,
+            volumeBrickGridIndices,
+            sdfCounters,
             materials,
             materialSemantics,
             textureDescriptors,
@@ -3671,30 +4527,30 @@ kernel void pathTraceKernel(
 
     if (hasAOVHit) {
         float3 encodedNormal = aovHit.normal * 0.5f + 0.5f;
-        depthOutput.write(float4(aovHit.t, aovHit.t, aovHit.t, 1.0f), gid);
-        normalOutput.write(float4(encodedNormal, 1.0f), gid);
-        albedoOutput.write(float4(aovMaterial.baseColor.xyz, aovMaterial.baseColor.w), gid);
+        depthOutput.write(float4(aovHit.t, aovHit.t, aovHit.t, 1.0f), pixel);
+        normalOutput.write(float4(encodedNormal, 1.0f), pixel);
+        albedoOutput.write(float4(aovMaterial.baseColor.xyz, aovMaterial.baseColor.w), pixel);
         float materialID = (float)(aovHit.materialID + 1u);
         float objectID = (float)(aovHit.objectID + 1u);
-        materialIDOutput.write(float4(materialID, materialID, materialID, 1.0f), gid);
-        objectIDOutput.write(float4(objectID, objectID, objectID, 1.0f), gid);
+        materialIDOutput.write(float4(materialID, materialID, materialID, 1.0f), pixel);
+        objectIDOutput.write(float4(objectID, objectID, objectID, 1.0f), pixel);
 
         float2 currentScreen;
         float2 previousScreen;
         if (projectToScreen(camera, aovHit.position, constants.width, constants.height, currentScreen)
             && projectToScreen(previousCamera, aovHit.position, constants.width, constants.height, previousScreen)) {
             float2 motion = previousScreen - currentScreen;
-            motionVectorOutput.write(float4(motion.x, motion.y, 0.0f, 1.0f), gid);
+            motionVectorOutput.write(float4(motion.x, motion.y, 0.0f, 1.0f), pixel);
         } else {
-            motionVectorOutput.write(float4(0.0f), gid);
+            motionVectorOutput.write(float4(0.0f), pixel);
         }
     } else {
-        depthOutput.write(float4(0.0f), gid);
-        normalOutput.write(float4(0.5f, 0.5f, 0.5f, 0.0f), gid);
-        albedoOutput.write(float4(0.0f), gid);
-        materialIDOutput.write(float4(0.0f), gid);
-        objectIDOutput.write(float4(0.0f), gid);
-        motionVectorOutput.write(float4(0.0f), gid);
+        depthOutput.write(float4(0.0f), pixel);
+        normalOutput.write(float4(0.5f, 0.5f, 0.5f, 0.0f), pixel);
+        albedoOutput.write(float4(0.0f), pixel);
+        materialIDOutput.write(float4(0.0f), pixel);
+        objectIDOutput.write(float4(0.0f), pixel);
+        motionVectorOutput.write(float4(0.0f), pixel);
     }
 }
 
@@ -3725,19 +4581,23 @@ kernel void pathTraceHardwareKernel(
     (void)nodes;
     (void)primitiveIndices;
 
-    if (gid.x >= constants.width || gid.y >= constants.height) {
+    if (gid.x >= constants.tileWidth || gid.y >= constants.tileHeight) {
+        return;
+    }
+    uint2 pixel = gid + uint2(constants.tileX, constants.tileY);
+    if (pixel.x >= constants.width || pixel.y >= constants.height) {
         return;
     }
 
     uint state = constants.frameSeed
-        ^ hash(gid.x + gid.y * constants.width)
+        ^ hash(pixel.x + pixel.y * constants.width)
         ^ hash(constants.sampleIndex + 1u);
 
     Ray ray = makeCameraRay(
         camera,
         constants.width,
         constants.height,
-        gid,
+        pixel,
         randomFloat(state),
         randomFloat(state)
     );
@@ -3770,10 +4630,11 @@ kernel void pathTraceHardwareKernel(
     for (uint bounce = 0; bounce < constants.maxBounces; ++bounce) {
         Hit hit = intersectSceneHardware(ray, scene, localTriangles, rtInstances);
         if (!hit.hit) {
-            if (constants.transparentBackground != 0u) {
-                if (bounce == 0u) {
-                    outputAlpha = 0.0f;
-                }
+            if (constants.transparentBackground != 0u && !primaryHit.hit) {
+                outputAlpha = 0.0f;
+            } else if (constants.showsEnvironmentBackground == 0u && !primaryHit.hit) {
+                outputAlpha = 1.0f;
+                radiance += max(constants.backgroundColor.xyz, float3(0.0f));
             } else {
                 float environmentWeight = 1.0f;
                 if (bounce > 0u && previousBSDFPDF > 0.0f) {
@@ -3974,11 +4835,11 @@ kernel void pathTraceHardwareKernel(
         }
     }
 
-    float4 previous = accumulation.read(gid);
+    float4 previous = accumulation.read(pixel);
     float sampleWeight = 1.0f / ((float)constants.sampleIndex + 1.0f);
     float3 color = mix(previous.xyz, radiance, sampleWeight);
     float alpha = mix(previous.w, outputAlpha, sampleWeight);
-    accumulation.write(float4(color, alpha), gid);
+    accumulation.write(float4(color, alpha), pixel);
 
     Hit aovHit = emptyHit();
     GPUMaterial aovMaterial;
@@ -3987,7 +4848,7 @@ kernel void pathTraceHardwareKernel(
     aovMaterial = primaryMaterial;
     if (constants.denoiserEnabled != 0u) {
         hasAOVHit = tracePrimaryAOVHardware(
-            makeCameraRay(camera, constants.width, constants.height, gid, 0.5f, 0.5f),
+            makeCameraRay(camera, constants.width, constants.height, pixel, 0.5f, 0.5f),
             scene,
             rtInstances,
             localTriangles,
@@ -4002,29 +4863,29 @@ kernel void pathTraceHardwareKernel(
 
     if (hasAOVHit) {
         float3 encodedNormal = aovHit.normal * 0.5f + 0.5f;
-        depthOutput.write(float4(aovHit.t, aovHit.t, aovHit.t, 1.0f), gid);
-        normalOutput.write(float4(encodedNormal, 1.0f), gid);
-        albedoOutput.write(float4(aovMaterial.baseColor.xyz, aovMaterial.baseColor.w), gid);
+        depthOutput.write(float4(aovHit.t, aovHit.t, aovHit.t, 1.0f), pixel);
+        normalOutput.write(float4(encodedNormal, 1.0f), pixel);
+        albedoOutput.write(float4(aovMaterial.baseColor.xyz, aovMaterial.baseColor.w), pixel);
         float materialID = (float)(aovHit.materialID + 1u);
         float objectID = (float)(aovHit.objectID + 1u);
-        materialIDOutput.write(float4(materialID, materialID, materialID, 1.0f), gid);
-        objectIDOutput.write(float4(objectID, objectID, objectID, 1.0f), gid);
+        materialIDOutput.write(float4(materialID, materialID, materialID, 1.0f), pixel);
+        objectIDOutput.write(float4(objectID, objectID, objectID, 1.0f), pixel);
 
         float2 currentScreen;
         float2 previousScreen;
         if (projectToScreen(camera, aovHit.position, constants.width, constants.height, currentScreen)
             && projectToScreen(previousCamera, aovHit.position, constants.width, constants.height, previousScreen)) {
             float2 motion = previousScreen - currentScreen;
-            motionVectorOutput.write(float4(motion.x, motion.y, 0.0f, 1.0f), gid);
+            motionVectorOutput.write(float4(motion.x, motion.y, 0.0f, 1.0f), pixel);
         } else {
-            motionVectorOutput.write(float4(0.0f), gid);
+            motionVectorOutput.write(float4(0.0f), pixel);
         }
     } else {
-        depthOutput.write(float4(0.0f), gid);
-        normalOutput.write(float4(0.5f, 0.5f, 0.5f, 0.0f), gid);
-        albedoOutput.write(float4(0.0f), gid);
-        materialIDOutput.write(float4(0.0f), gid);
-        objectIDOutput.write(float4(0.0f), gid);
-        motionVectorOutput.write(float4(0.0f), gid);
+        depthOutput.write(float4(0.0f), pixel);
+        normalOutput.write(float4(0.5f, 0.5f, 0.5f, 0.0f), pixel);
+        albedoOutput.write(float4(0.0f), pixel);
+        materialIDOutput.write(float4(0.0f), pixel);
+        objectIDOutput.write(float4(0.0f), pixel);
+        motionVectorOutput.write(float4(0.0f), pixel);
     }
 }

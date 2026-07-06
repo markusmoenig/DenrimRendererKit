@@ -1,9 +1,25 @@
 import Foundation
+import Metal
 import simd
 import XCTest
 @testable import DenrimRendererKit
 
 final class APITests: XCTestCase {
+    private static func macroGridCount(dimensions: SIMD3<Int>, brickSize: SIMD3<Int>) -> Int {
+        let gridDimensions = SIMD3<Int>(
+            (dimensions.x + brickSize.x - 1) / brickSize.x,
+            (dimensions.y + brickSize.y - 1) / brickSize.y,
+            (dimensions.z + brickSize.z - 1) / brickSize.z
+        )
+        let macroSize = SIMD3<Int>(repeating: 4)
+        let macroDimensions = SIMD3<Int>(
+            (gridDimensions.x + macroSize.x - 1) / macroSize.x,
+            (gridDimensions.y + macroSize.y - 1) / macroSize.y,
+            (gridDimensions.z + macroSize.z - 1) / macroSize.z
+        )
+        return macroDimensions.x * macroDimensions.y * macroDimensions.z
+    }
+
     func testPerspectiveCameraGeneratesPerspectiveGPUCamera() {
         let camera = Camera(
             origin: SIMD3<Float>(0, 0, 3),
@@ -52,6 +68,7 @@ final class APITests: XCTestCase {
         XCTAssertTrue(scene.meshInstances.isEmpty)
         XCTAssertTrue(scene.volumeInstances.isEmpty)
         XCTAssertTrue(scene.sparseVolumeInstances.isEmpty)
+        XCTAssertTrue(scene.gpuSparseVolumeInstances.isEmpty)
     }
 
     func testDistanceVolumeSceneCompiles() throws {
@@ -123,6 +140,7 @@ final class APITests: XCTestCase {
             with: RenderFieldBundle(sparse: replacement, fallbackMaterial: material)
         )
         let compiled = try scene.compileForGPU()
+        let build = try LinearTriangleAccelerationBackend().build(scene: scene)
 
         XCTAssertTrue(replaced)
         XCTAssertEqual(field.storage, .sparse)
@@ -134,6 +152,16 @@ final class APITests: XCTestCase {
         XCTAssertEqual(scene.sparseVolumeInstances[0].transform.matrix.columns.3.y, 0.2, accuracy: 0.0001)
         XCTAssertEqual(scene.sparseVolumeInstances[0].transform.matrix.columns.3.z, 0.3, accuracy: 0.0001)
         XCTAssertEqual(compiled.volumeBricks.count, replacement.bricks.count)
+        XCTAssertEqual(build.volumeBrickBVH.primitiveIndices.count, build.volumeBricks.count)
+        XCTAssertGreaterThan(build.volumeBrickBVH.nodes.count, 0)
+        XCTAssertEqual(build.volumeBrickGrids.count, 1)
+        let grid = build.volumeBrickGrids[0]
+        let fineGridOffset = Int(grid.dimensionsAndIndexOffset.w)
+        let fineGridCount = Int(grid.dimensionsAndIndexOffset.x * grid.dimensionsAndIndexOffset.y * grid.dimensionsAndIndexOffset.z)
+        XCTAssertEqual(
+            build.volumeBrickGridIndices[fineGridOffset..<(fineGridOffset + fineGridCount)].filter { $0 != UInt32.max }.count,
+            build.volumeBricks.count
+        )
     }
 
     func testDistanceFieldBakerProducesSparseFieldBundle() throws {
@@ -162,6 +190,775 @@ final class APITests: XCTestCase {
         XCTAssertEqual(scene.sparseVolumeInstances.count, 1)
         XCTAssertEqual(scene.sparseVolumeInstances[0].volume.dimensions, SIMD3<Int>(18, 18, 18))
         XCTAssertGreaterThan(scene.sparseVolumeInstances[0].volume.bricks.count, 0)
+    }
+
+    func testDistanceFieldProgramSphereMatchesPrimitiveModel() throws {
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.2, 0.65, 0.9)))
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .cpuReference)
+        let modelResult = try baker.bake(DistanceFieldBakeRequest(
+            graph: DistanceFieldBakeGraph(primitives: [
+                SDFPrimitive(shape: .sphere(radius: 0.55), material: material)
+            ]),
+            resolution: 12,
+            storage: .dense,
+            fallbackMaterial: material
+        ))
+        let programResult = try baker.bake(DistanceFieldBakeRequest(
+            graph: DistanceFieldBakeGraph(program: DistanceFieldProgram(operations: [
+                .sphere(radius: 0.55, material: material)
+            ])),
+            resolution: 12,
+            storage: .dense,
+            fallbackMaterial: material
+        ))
+
+        guard case .dense(let modelVolume) = modelResult.bundle.storage,
+              case .dense(let programVolume) = programResult.bundle.storage else {
+            return XCTFail("Expected dense field bundles.")
+        }
+        XCTAssertEqual(modelVolume.distances.count, programVolume.distances.count)
+        let maxError = zip(modelVolume.distances, programVolume.distances).map { abs($0 - $1) }.max() ?? 0
+        XCTAssertLessThan(maxError, 0.00001)
+    }
+
+    func testDistanceFieldProgramTransformMatchesPrimitiveModel() throws {
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.2, 0.65, 0.9)))
+        let transform = Transform.translation(SIMD3<Float>(0.24, -0.1, 0.08))
+            * .scale(SIMD3<Float>(0.85, 1.1, 0.95))
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .cpuReference)
+        let modelResult = try baker.bake(DistanceFieldBakeRequest(
+            graph: DistanceFieldBakeGraph(primitives: [
+                SDFPrimitive(shape: .sphere(radius: 0.55), material: material, transform: transform)
+            ]),
+            resolution: 12,
+            storage: .dense,
+            fallbackMaterial: material
+        ))
+        let programResult = try baker.bake(DistanceFieldBakeRequest(
+            graph: DistanceFieldBakeGraph(program: DistanceFieldProgram(operations: [
+                .transform(transform),
+                .sphere(radius: 0.55, material: material)
+            ])),
+            resolution: 12,
+            storage: .dense,
+            fallbackMaterial: material
+        ))
+
+        guard case .dense(let modelVolume) = modelResult.bundle.storage,
+              case .dense(let programVolume) = programResult.bundle.storage else {
+            return XCTFail("Expected dense field bundles.")
+        }
+        let maxError = zip(modelVolume.distances, programVolume.distances).map { abs($0 - $1) }.max() ?? 0
+        XCTAssertLessThan(maxError, 0.00001)
+    }
+
+    func testDistanceFieldProgramInstructionsCanDefineSphere() throws {
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.2, 0.65, 0.9)))
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .cpuReference)
+        let modelResult = try baker.bake(DistanceFieldBakeRequest(
+            graph: DistanceFieldBakeGraph(primitives: [
+                SDFPrimitive(shape: .sphere(radius: 0.55), material: material)
+            ]),
+            resolution: 12,
+            storage: .dense,
+            fallbackMaterial: material
+        ))
+        let programResult = try baker.bake(DistanceFieldBakeRequest(
+            graph: DistanceFieldBakeGraph(program: DistanceFieldProgram(instructions: [
+                .loadPosition(.init(0)),
+                .length(.init(0), .init(0)),
+                .setFloat(.init(1), 0.55),
+                .subtractFloat(.init(2), .init(0), .init(1)),
+                .emit(distance: .init(2), material: material)
+            ])),
+            resolution: 12,
+            storage: .dense,
+            fallbackMaterial: material
+        ))
+
+        guard case .dense(let modelVolume) = modelResult.bundle.storage,
+              case .dense(let programVolume) = programResult.bundle.storage else {
+            return XCTFail("Expected dense field bundles.")
+        }
+        let maxError = zip(modelVolume.distances, programVolume.distances).map { abs($0 - $1) }.max() ?? 0
+        XCTAssertLessThan(maxError, 0.00001)
+    }
+
+    func testDistanceFieldProgramInstructionsCanDefineTwistedBox() throws {
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.45, 0.2)))
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .cpuReference)
+        let operationProgram = DistanceFieldProgram(operations: [
+            .twistY(strength: 2.4),
+            .box(halfExtents: SIMD3<Float>(0.55, 0.18, 0.28), cornerRadius: 0.04, material: material)
+        ])
+        let instructionProgram = DistanceFieldProgram(instructions: [
+            .loadPosition(.init(0)),
+            .extractX(.init(0), .init(0)),
+            .extractY(.init(1), .init(0)),
+            .extractZ(.init(2), .init(0)),
+            .setFloat(.init(3), 2.4),
+            .multiplyFloat(.init(4), .init(1), .init(3)),
+            .negateFloat(.init(4), .init(4)),
+            .cosFloat(.init(5), .init(4)),
+            .sinFloat(.init(6), .init(4)),
+            .multiplyFloat(.init(7), .init(5), .init(0)),
+            .multiplyFloat(.init(8), .init(6), .init(2)),
+            .subtractFloat(.init(9), .init(7), .init(8)),
+            .multiplyFloat(.init(10), .init(6), .init(0)),
+            .multiplyFloat(.init(11), .init(5), .init(2)),
+            .addFloat(.init(12), .init(10), .init(11)),
+            .composeVector(.init(1), .init(9), .init(1), .init(12)),
+            .setVector(.init(2), SIMD3<Float>(0.55, 0.18, 0.28)),
+            .setFloat(.init(13), 0.04),
+            .boxDistance(.init(14), position: .init(1), halfExtents: .init(2), cornerRadius: .init(13)),
+            .emit(distance: .init(14), material: material)
+        ])
+
+        func denseDistances(_ program: DistanceFieldProgram) throws -> [Float] {
+            let result = try baker.bake(DistanceFieldBakeRequest(
+                graph: DistanceFieldBakeGraph(program: program),
+                resolution: 14,
+                storage: .dense,
+                fallbackMaterial: material
+            ))
+            guard case .dense(let volume) = result.bundle.storage else {
+                throw DenrimRendererError.invalidScene("Expected dense program result.")
+            }
+            return volume.distances
+        }
+
+        let operationDistances = try denseDistances(operationProgram)
+        let instructionDistances = try denseDistances(instructionProgram)
+        let maxError = zip(operationDistances, instructionDistances).map { abs($0 - $1) }.max() ?? 0
+        XCTAssertLessThan(maxError, 0.00001)
+    }
+
+    func testDistanceFieldProgramOptimizerFoldsConstantsWithoutChangingSamples() throws {
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.2, 0.65, 0.9)))
+        let program = DistanceFieldProgram(instructions: [
+            .loadPosition(.init(0)),
+            .setFloat(.init(0), 0.25),
+            .setFloat(.init(1), 0.3),
+            .addFloat(.init(2), .init(0), .init(1)),
+            .length(.init(3), .init(0)),
+            .subtractFloat(.init(4), .init(3), .init(2)),
+            .emit(distance: .init(4), material: material)
+        ])
+        let optimized = program.optimized()
+
+        XCTAssertTrue(optimized.instructions.contains { instruction in
+            if case .setFloat(let register, let value) = instruction {
+                return register == .init(2) && abs(value - 0.55) < 0.00001
+            }
+            return false
+        })
+
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .cpuReference)
+        func distances(_ program: DistanceFieldProgram) throws -> [Float] {
+            let result = try baker.bake(DistanceFieldBakeRequest(
+                graph: DistanceFieldBakeGraph(program: program),
+                resolution: 10,
+                storage: .dense,
+                fallbackMaterial: material
+            ))
+            guard case .dense(let volume) = result.bundle.storage else {
+                throw DenrimRendererError.invalidScene("Expected dense program result.")
+            }
+            return volume.distances
+        }
+        let unoptimized = try distances(program)
+        let folded = try distances(optimized)
+        let maxError = zip(unoptimized, folded).map { abs($0 - $1) }.max() ?? 0
+        XCTAssertLessThan(maxError, 0.00001)
+    }
+
+    func testDistanceFieldProgramInstructionsWriteCompactAttributes() throws {
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(SemanticMaterial.moss())
+        let layout = DistanceVolumeAttributeLayout(channels: [
+            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
+            DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness)
+        ])
+        let program = DistanceFieldProgram(
+            instructions: [
+                .loadPosition(.init(0)),
+                .length(.init(0), .init(0)),
+                .setFloat(.init(1), 0.55),
+                .subtractFloat(.init(2), .init(0), .init(1)),
+                .setFloat(.init(3), 0.75),
+                .writeAttribute(channel: 0, value: .init(3)),
+                .setFloat(.init(4), 0.35),
+                .writeAttribute(channel: 1, value: .init(4)),
+                .emit(distance: .init(2), material: material)
+            ],
+            attributeLayout: layout
+        )
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .cpuReference)
+        let result = try baker.bake(DistanceFieldBakeRequest(
+            graph: DistanceFieldBakeGraph(program: program),
+            resolution: 10,
+            storage: .dense,
+            fallbackMaterial: material
+        ))
+
+        guard case .dense(let volume) = result.bundle.storage else {
+            return XCTFail("Expected dense field bundle.")
+        }
+        XCTAssertEqual(volume.attributeLayout, layout)
+        XCTAssertEqual(volume.attributeSamples.count, 10 * 10 * 10)
+        XCTAssertTrue(volume.attributeSamples.contains { sample in
+            abs(sample.x - 0.75) < 0.00001 && abs(sample.y - 0.35) < 0.00001
+        })
+    }
+
+    func testDistanceFieldProgramSparseSampleScalePreservesCompactAttributes() throws {
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(SemanticMaterial.moss())
+        let layout = DistanceVolumeAttributeLayout(channels: [
+            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
+            DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness)
+        ])
+        let program = DistanceFieldProgram(
+            instructions: [
+                .loadPosition(.init(0)),
+                .length(.init(0), .init(0)),
+                .setFloat(.init(1), 0.55),
+                .subtractFloat(.init(2), .init(0), .init(1)),
+                .setFloat(.init(3), 0.75),
+                .writeAttribute(channel: 0, value: .init(3)),
+                .setFloat(.init(4), 0.35),
+                .writeAttribute(channel: 1, value: .init(4)),
+                .emit(distance: .init(2), material: material)
+            ],
+            attributeLayout: layout
+        )
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .cpuReference)
+        let result = try baker.bake(DistanceFieldBakeRequest(
+            graph: DistanceFieldBakeGraph(program: program),
+            resolution: 10,
+            storage: .sparseBricks(brickSize: 3, narrowBand: 0.3, sampleScale: 2),
+            fallbackMaterial: material
+        ))
+
+        guard case .sparse(let sparse) = result.bundle.storage else {
+            return XCTFail("Expected sparse field bundle.")
+        }
+
+        XCTAssertEqual(sparse.dimensions, SIMD3<Int>(repeating: 19))
+        XCTAssertEqual(sparse.brickSize, SIMD3<Int>(repeating: 6))
+        XCTAssertEqual(sparse.attributeLayout, layout)
+        XCTAssertGreaterThan(sparse.bricks.count, 0)
+        XCTAssertTrue(sparse.bricks.contains { brick in
+            brick.attributeSamples.contains { sample in
+                abs(sample.x - 0.75) < 0.00001 && abs(sample.y - 0.35) < 0.00001
+            }
+        })
+    }
+
+    func testDistanceFieldProgramGPUResidentDirectGridBakesCompactAttributes() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(SemanticMaterial.moss())
+        let program = DistanceFieldProgram(
+            instructions: [
+                .loadPosition(.init(0)),
+                .length(.init(0), .init(0)),
+                .setFloat(.init(1), 0.55),
+                .subtractFloat(.init(2), .init(0), .init(1)),
+                .setFloat(.init(3), 0.75),
+                .writeAttribute(channel: 0, value: .init(3)),
+                .setFloat(.init(4), 0.35),
+                .writeAttribute(channel: 1, value: .init(4)),
+                .emit(distance: .init(2), material: material)
+            ],
+            attributeLayout: DistanceVolumeAttributeLayout(channels: [
+                DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
+                DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness)
+            ])
+        )
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .metalCompute)
+
+        let result = try baker.bakeGPUResident(
+            DistanceFieldBakeRequest(
+                graph: DistanceFieldBakeGraph(program: program),
+                resolution: 10,
+                storage: .sparseBricks(brickSize: 5, narrowBand: 0.2),
+                fallbackMaterial: material
+            ),
+            metadataMode: .directGridGPU
+        )
+        guard case .gpuSparse(let resource) = result.bundle.storage,
+              let metadata = resource.metadataBuffers,
+              let attributeSampleBuffer = resource.attributeSampleBuffer else {
+            return XCTFail("Expected GPU sparse resource with resident attribute samples.")
+        }
+        scene.add(fieldBundle: result.bundle)
+        let build = try LinearTriangleAccelerationBackend(buildsVolumeBrickBVH: false).build(scene: scene)
+
+        XCTAssertEqual(resource.attributeSampleCount, resource.sampleCount)
+        XCTAssertNotNil(build.gpuVolumeBrickAttributeSampleBuffer)
+        XCTAssertEqual(build.gpuVolumeBrickAttributeSampleCount, resource.attributeSampleCount)
+        let descriptors = metadata.attributeDescriptorBuffer.contents().bindMemory(
+            to: GPUVolumeAttributeDescriptor.self,
+            capacity: metadata.attributeDescriptorCount
+        )
+        XCTAssertTrue((0..<metadata.attributeDescriptorCount).contains { index in
+            descriptors[index].metadata.y == 1
+                && descriptors[index].semantics0.x == DistanceVolumeAttributeSemantic.growthAge.rawValue
+                && descriptors[index].semantics0.y == DistanceVolumeAttributeSemantic.wetness.rawValue
+        })
+
+        let samples = attributeSampleBuffer.contents().bindMemory(
+            to: SIMD4<Float>.self,
+            capacity: max(resource.attributeSampleCount, 1)
+        )
+        XCTAssertTrue((0..<resource.attributeSampleCount).contains { index in
+            abs(samples[index].x - 0.75) < 0.00001 && abs(samples[index].y - 0.35) < 0.00001
+        })
+    }
+
+    func testDistanceFieldProgramTwistZeroIsStableAndNonzeroChangesBox() throws {
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.45, 0.2)))
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .cpuReference)
+        let baseProgram = DistanceFieldProgram(operations: [
+            .box(halfExtents: SIMD3<Float>(0.55, 0.18, 0.28), cornerRadius: 0.04, material: material)
+        ])
+        let zeroTwistProgram = DistanceFieldProgram(operations: [
+            .twistY(strength: 0),
+            .box(halfExtents: SIMD3<Float>(0.55, 0.18, 0.28), cornerRadius: 0.04, material: material)
+        ])
+        let twistedProgram = DistanceFieldProgram(operations: [
+            .twistY(strength: 2.4),
+            .box(halfExtents: SIMD3<Float>(0.55, 0.18, 0.28), cornerRadius: 0.04, material: material)
+        ])
+
+        func denseDistances(_ program: DistanceFieldProgram) throws -> [Float] {
+            let result = try baker.bake(DistanceFieldBakeRequest(
+                graph: DistanceFieldBakeGraph(program: program),
+                resolution: 14,
+                storage: .dense,
+                fallbackMaterial: material
+            ))
+            guard case .dense(let volume) = result.bundle.storage else {
+                throw DenrimRendererError.invalidScene("Expected dense program result.")
+            }
+            return volume.distances
+        }
+
+        let base = try denseDistances(baseProgram)
+        let zero = try denseDistances(zeroTwistProgram)
+        let twisted = try denseDistances(twistedProgram)
+        let zeroError = zip(base, zero).map { abs($0 - $1) }.max() ?? 0
+        let twistDifference = zip(base, twisted).map { abs($0 - $1) }.max() ?? 0
+
+        XCTAssertLessThan(zeroError, 0.00001)
+        XCTAssertGreaterThan(twistDifference, 0.01)
+    }
+
+    func testDistanceFieldBakerProducesGPUResidentSparseFieldBundle() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.2, 0.65, 0.9)))
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .metalCompute)
+        let result = try baker.bakeGPUResident(DistanceFieldBakeRequest(
+            graph: DistanceFieldBakeGraph(primitives: [
+                SDFPrimitive(shape: .sphere(radius: 0.55), material: material)
+            ]),
+            resolution: 20,
+            storage: .sparseBricks(brickSize: 5, narrowBand: 0.3),
+            fallbackMaterial: material
+        ))
+
+        let fieldID = scene.add(fieldBundle: result.bundle)
+        let build = try LinearTriangleAccelerationBackend(buildsVolumeBrickBVH: false).build(scene: scene)
+
+        XCTAssertEqual(result.backend, .metalCompute)
+        XCTAssertEqual(fieldID.storage, .gpuSparse)
+        XCTAssertTrue(scene.volumeInstances.isEmpty)
+        XCTAssertTrue(scene.sparseVolumeInstances.isEmpty)
+        XCTAssertEqual(scene.gpuSparseVolumeInstances.count, 1)
+        XCTAssertEqual(build.volumes.count, 1)
+        XCTAssertGreaterThan(build.volumeBricks.count, 0)
+        XCTAssertTrue(build.volumeBrickSamples.isEmpty)
+        XCTAssertNotNil(build.gpuVolumeBrickSampleBuffer)
+        XCTAssertEqual(build.gpuVolumeBrickSampleCount, scene.gpuSparseVolumeInstances[0].resource.sampleCount)
+    }
+
+    func testDistanceFieldBakerUsesMetalForSampleScaledSparseBake() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.2, 0.65, 0.9)))
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .metalCompute)
+        let result = try baker.bake(DistanceFieldBakeRequest(
+            graph: DistanceFieldBakeGraph(primitives: [
+                SDFPrimitive(shape: .sphere(radius: 0.55), material: material)
+            ]),
+            resolution: 12,
+            storage: .sparseBricks(brickSize: 4, narrowBand: 0.3, sampleScale: 2),
+            fallbackMaterial: material,
+            backend: .metalCompute
+        ))
+
+        guard case .sparse(let sparse) = result.bundle.storage else {
+            return XCTFail("Expected sparse field storage.")
+        }
+
+        XCTAssertEqual(result.backend, .metalCompute)
+        XCTAssertEqual(sparse.dimensions, SIMD3<Int>(repeating: 23))
+        XCTAssertEqual(sparse.brickSize, SIMD3<Int>(repeating: 8))
+        XCTAssertGreaterThan(sparse.bricks.count, 0)
+        XCTAssertLessThanOrEqual(sparse.bricks.count, 27)
+    }
+
+    func testDistanceFieldBakerProducesDirectGridGPUResidentSparseFieldBundle() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.45, 0.2)))
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .metalCompute)
+        let result = try baker.bakeGPUResident(
+            DistanceFieldBakeRequest(
+                graph: DistanceFieldBakeGraph(primitives: [
+                    SDFPrimitive(shape: .sphere(radius: 0.55), material: material)
+                ]),
+                resolution: 20,
+                storage: .sparseBricks(brickSize: 5, narrowBand: 0.3),
+                fallbackMaterial: material
+            ),
+            metadataMode: .directGridGPU
+        )
+
+        scene.add(fieldBundle: result.bundle)
+        let resource = scene.gpuSparseVolumeInstances[0].resource
+        let metadata = try XCTUnwrap(resource.metadataBuffers)
+        let build = try LinearTriangleAccelerationBackend(buildsVolumeBrickBVH: false).build(scene: scene)
+
+        XCTAssertEqual(result.backend, .metalCompute)
+        XCTAssertTrue(resource.bricks.isEmpty)
+        XCTAssertGreaterThan(metadata.brickCount, 0)
+        XCTAssertEqual(metadata.gridCount, 1)
+        let macroGridCount = Self.macroGridCount(
+            dimensions: resource.dimensions,
+            brickSize: resource.brickSize
+        )
+        XCTAssertEqual(metadata.gridIndexCount, metadata.brickCount + macroGridCount)
+        let gpuGrid = metadata.gridBuffer.contents().bindMemory(to: GPUVolumeBrickGrid.self, capacity: metadata.gridCount)[0]
+        XCTAssertGreaterThan(gpuGrid.macroDimensionsAndIndexOffset.x, 0)
+        XCTAssertEqual(gpuGrid.macroDimensionsAndIndexOffset.w, UInt32(metadata.brickCount))
+        XCTAssertEqual(gpuGrid.macroSizeAndReserved.x, 4)
+        XCTAssertTrue(build.volumeBricks.isEmpty)
+        XCTAssertTrue(build.volumeBrickGridIndices.isEmpty)
+        XCTAssertNotNil(build.gpuVolumeBrickBuffer)
+        XCTAssertNotNil(build.gpuVolumeBrickGridBuffer)
+        XCTAssertNotNil(build.gpuVolumeBrickGridIndexBuffer)
+        XCTAssertEqual(build.gpuVolumeBrickCount, metadata.brickCount)
+        XCTAssertEqual(build.gpuVolumeBrickGridIndexCount, metadata.gridIndexCount)
+    }
+
+    func testGPUResidentDirectGridBrickIndicesCoverEditedLocalBounds() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.45, 0.2)))
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .metalCompute)
+        let result = try baker.bakeGPUResident(
+            DistanceFieldBakeRequest(
+                graph: DistanceFieldBakeGraph(primitives: [
+                    SDFPrimitive(shape: .sphere(radius: 0.55), material: material)
+                ]),
+                resolution: 20,
+                storage: .sparseBricks(brickSize: 5, narrowBand: 0.3),
+                fallbackMaterial: material
+            ),
+            metadataMode: .directGridGPU
+        )
+        guard case .gpuSparse(let resource) = result.bundle.storage else {
+            return XCTFail("Expected GPU sparse field storage.")
+        }
+
+        let centralIndices = try resource.directGridBrickIndices(
+            overlappingLocalBoundsMin: SIMD3<Float>(repeating: -0.1),
+            localBoundsMax: SIMD3<Float>(repeating: 0.1)
+        )
+        let expectedCentralIndices: Set<Int> = [
+            21, 22, 25, 26,
+            37, 38, 41, 42
+        ]
+
+        XCTAssertEqual(resource.brickGridDimensions, SIMD3<Int>(repeating: 4))
+        XCTAssertEqual(Set(centralIndices), expectedCentralIndices)
+        XCTAssertEqual(centralIndices, centralIndices.sorted())
+        XCTAssertEqual(
+            try resource.directGridBrickIndices(
+                overlappingLocalBoundsMin: SIMD3<Float>(repeating: 3),
+                localBoundsMax: SIMD3<Float>(repeating: 4)
+            ),
+            []
+        )
+        let activeCentralIndices = try resource.directGridBrickIndices(
+            overlappingLocalBoundsMin: SIMD3<Float>(repeating: -0.1),
+            localBoundsMax: SIMD3<Float>(repeating: 0.1),
+            activeOnly: true
+        )
+        XCTAssertFalse(activeCentralIndices.isEmpty)
+        XCTAssertTrue(Set(activeCentralIndices).isSubset(of: expectedCentralIndices))
+    }
+
+    func testDistanceFieldBakerProducesSampleScaledDirectGridGPUResidentSparseFieldBundle() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.45, 0.2)))
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .metalCompute)
+        let result = try baker.bakeGPUResident(
+            DistanceFieldBakeRequest(
+                graph: DistanceFieldBakeGraph(primitives: [
+                    SDFPrimitive(shape: .sphere(radius: 0.55), material: material)
+                ]),
+                resolution: 12,
+                storage: .sparseBricks(brickSize: 4, narrowBand: 0.3, sampleScale: 2),
+                fallbackMaterial: material
+            ),
+            metadataMode: .directGridGPU
+        )
+
+        scene.add(fieldBundle: result.bundle)
+        let resource = scene.gpuSparseVolumeInstances[0].resource
+        let metadata = try XCTUnwrap(resource.metadataBuffers)
+        let gpuGrid = metadata.gridBuffer.contents().bindMemory(to: GPUVolumeBrickGrid.self, capacity: metadata.gridCount)[0]
+
+        XCTAssertEqual(result.backend, .metalCompute)
+        XCTAssertEqual(resource.dimensions, SIMD3<Int>(repeating: 23))
+        XCTAssertEqual(resource.brickSize, SIMD3<Int>(repeating: 8))
+        XCTAssertEqual(metadata.brickCount, 27)
+        XCTAssertGreaterThan(resource.sampleCount, 27 * 8 * 8 * 8)
+        XCTAssertEqual(gpuGrid.dimensionsAndIndexOffset.x, 3)
+        XCTAssertEqual(gpuGrid.dimensionsAndIndexOffset.y, 3)
+        XCTAssertEqual(gpuGrid.dimensionsAndIndexOffset.z, 3)
+        XCTAssertEqual(gpuGrid.brickSizeAndVolume.x, 8)
+        XCTAssertEqual(gpuGrid.brickSizeAndVolume.y, 8)
+        XCTAssertEqual(gpuGrid.brickSizeAndVolume.z, 8)
+    }
+
+    func testDistanceFieldProgramBakesGPUResidentDirectGridSparseFieldBundle() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.45, 0.2)))
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .metalCompute)
+        let program = DistanceFieldProgram(instructions: [
+            .loadPosition(.init(0)),
+            .length(.init(0), .init(0)),
+            .setFloat(.init(1), 0.55),
+            .subtractFloat(.init(2), .init(0), .init(1)),
+            .emit(distance: .init(2), material: material)
+        ])
+        let result = try baker.bakeGPUResident(
+            DistanceFieldBakeRequest(
+                graph: DistanceFieldBakeGraph(program: program),
+                resolution: 12,
+                storage: .sparseBricks(brickSize: 4, narrowBand: 0.28, sampleScale: 2),
+                fallbackMaterial: material
+            ),
+            metadataMode: .directGridGPU
+        )
+
+        scene.add(fieldBundle: result.bundle)
+        let resource = scene.gpuSparseVolumeInstances[0].resource
+        let metadata = try XCTUnwrap(resource.metadataBuffers)
+        let build = try LinearTriangleAccelerationBackend(buildsVolumeBrickBVH: false).build(scene: scene)
+
+        XCTAssertEqual(result.backend, .metalCompute)
+        XCTAssertEqual(resource.dimensions, SIMD3<Int>(repeating: 23))
+        XCTAssertEqual(resource.brickSize, SIMD3<Int>(repeating: 8))
+        XCTAssertTrue(resource.bricks.isEmpty)
+        XCTAssertNil(resource.attributeSampleBuffer)
+        XCTAssertEqual(resource.attributeSampleCount, 0)
+        XCTAssertGreaterThan(metadata.brickCount, 0)
+        XCTAssertEqual(metadata.gridCount, 1)
+        XCTAssertEqual(
+            metadata.gridIndexCount,
+            metadata.brickCount + Self.macroGridCount(dimensions: resource.dimensions, brickSize: resource.brickSize)
+        )
+        let gpuGrid = metadata.gridBuffer.contents().bindMemory(to: GPUVolumeBrickGrid.self, capacity: metadata.gridCount)[0]
+        XCTAssertGreaterThan(gpuGrid.macroDimensionsAndIndexOffset.x, 0)
+        XCTAssertEqual(gpuGrid.macroDimensionsAndIndexOffset.w, UInt32(metadata.brickCount))
+        XCTAssertEqual(gpuGrid.macroSizeAndReserved.x, 4)
+        XCTAssertNotNil(build.gpuVolumeBrickSampleBuffer)
+        XCTAssertEqual(build.gpuVolumeBrickCount, metadata.brickCount)
+    }
+
+    func testDistanceFieldProgramEncodesDirtyDirectGridBrickUpdate() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer()
+        guard let commandQueue = renderer.device.makeCommandQueue() else {
+            throw XCTSkip("Could not create Metal command queue.")
+        }
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.45, 0.2)))
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .metalCompute)
+        let program = DistanceFieldProgram(instructions: [
+            .loadPosition(.init(0)),
+            .length(.init(0), .init(0)),
+            .setFloat(.init(1), 0.55),
+            .subtractFloat(.init(2), .init(0), .init(1)),
+            .emit(distance: .init(2), material: material)
+        ])
+        let result = try baker.bakeGPUResident(
+            DistanceFieldBakeRequest(
+                graph: DistanceFieldBakeGraph(program: program),
+                resolution: 20,
+                storage: .sparseBricks(brickSize: 5, narrowBand: 0.28),
+                fallbackMaterial: material
+            ),
+            metadataMode: .directGridGPU
+        )
+        guard case .gpuSparse(let resource) = result.bundle.storage,
+              let commandBuffer = commandQueue.makeCommandBuffer() else {
+            return XCTFail("Expected GPU sparse field storage and command buffer.")
+        }
+
+        try baker.encodeUpdateGPUResidentProgramBricks(
+            resource,
+            program: program,
+            brickIndices: [0, 1, 1],
+            narrowBand: 0.28,
+            fallbackMaterial: material,
+            into: commandBuffer
+        )
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        XCTAssertNil(commandBuffer.error)
+    }
+
+    func testDistanceFieldProgramEncodesDirtyDirectGridAttributeUpdate() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer()
+        guard let commandQueue = renderer.device.makeCommandQueue() else {
+            throw XCTSkip("Could not create Metal command queue.")
+        }
+        var scene = RenderScene()
+        let material = scene.addMaterial(SemanticMaterial.moss())
+        let layout = DistanceVolumeAttributeLayout(channels: [
+            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
+            DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness)
+        ])
+        func program(growthAge: Float, wetness: Float) -> DistanceFieldProgram {
+            DistanceFieldProgram(
+                instructions: [
+                    .loadPosition(.init(0)),
+                    .length(.init(0), .init(0)),
+                    .setFloat(.init(1), 0.55),
+                    .subtractFloat(.init(2), .init(0), .init(1)),
+                    .setFloat(.init(3), growthAge),
+                    .writeAttribute(channel: 0, value: .init(3)),
+                    .setFloat(.init(4), wetness),
+                    .writeAttribute(channel: 1, value: .init(4)),
+                    .emit(distance: .init(2), material: material)
+                ],
+                attributeLayout: layout
+            )
+        }
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .metalCompute)
+        let result = try baker.bakeGPUResident(
+            DistanceFieldBakeRequest(
+                graph: DistanceFieldBakeGraph(program: program(growthAge: 0.2, wetness: 0.1)),
+                resolution: 20,
+                storage: .sparseBricks(brickSize: 5, narrowBand: 0.28),
+                fallbackMaterial: material
+            ),
+            metadataMode: .directGridGPU
+        )
+        guard case .gpuSparse(let resource) = result.bundle.storage,
+              let metadata = resource.metadataBuffers,
+              let attributeSampleBuffer = resource.attributeSampleBuffer,
+              let commandBuffer = commandQueue.makeCommandBuffer() else {
+            return XCTFail("Expected GPU sparse field storage, resident attribute samples, and command buffer.")
+        }
+
+        let gridIndices = metadata.gridIndexBuffer.contents().bindMemory(
+            to: UInt32.self,
+            capacity: metadata.gridIndexCount
+        )
+        let activeBrickIndex = try XCTUnwrap((0..<metadata.brickCount).first { index in
+            gridIndices[index] != UInt32.max
+        })
+
+        try baker.encodeUpdateGPUResidentProgramBricks(
+            resource,
+            program: program(growthAge: 0.85, wetness: 0.65),
+            brickIndices: [activeBrickIndex],
+            narrowBand: 0.28,
+            fallbackMaterial: material,
+            updatesTopology: false,
+            into: commandBuffer
+        )
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        XCTAssertNil(commandBuffer.error)
+
+        let descriptors = metadata.attributeDescriptorBuffer.contents().bindMemory(
+            to: GPUVolumeAttributeDescriptor.self,
+            capacity: metadata.attributeDescriptorCount
+        )
+        let descriptor = descriptors[activeBrickIndex]
+        XCTAssertEqual(descriptor.metadata.y, 1)
+        XCTAssertEqual(descriptor.semantics0.x, DistanceVolumeAttributeSemantic.growthAge.rawValue)
+        XCTAssertEqual(descriptor.semantics0.y, DistanceVolumeAttributeSemantic.wetness.rawValue)
+        let samples = attributeSampleBuffer.contents().bindMemory(
+            to: SIMD4<Float>.self,
+            capacity: max(resource.attributeSampleCount, 1)
+        )
+        let attributeSampleIndex = Int(descriptor.metadata.x)
+        XCTAssertLessThan(attributeSampleIndex, resource.attributeSampleCount)
+        XCTAssertEqual(samples[attributeSampleIndex].x, 0.85, accuracy: 0.00001)
+        XCTAssertEqual(samples[attributeSampleIndex].y, 0.65, accuracy: 0.00001)
     }
 
     func testDistanceFieldBakerFallsBackForAttributeGraphs() throws {
@@ -457,15 +1254,20 @@ final class APITests: XCTestCase {
         let bakedColor = try XCTUnwrap(fields.baseColor)
         let bakedRoughness = try XCTUnwrap(fields.roughness)
         let bakedMetallic = try XCTUnwrap(fields.metallic)
-        XCTAssertTrue(compiled.volumeBrickSamples.contains { sample in
-            sample.baseColorOpacity.x == bakedColor.x
+        XCTAssertTrue(compiled.volumeBrickSamples.contains { $0.distance < 0 })
+        XCTAssertEqual(compiled.volumeBrickMaterialFieldSamples.count, compiled.volumeBrickSamples.count)
+        XCTAssertTrue(compiled.volumeBrickMaterialFieldSamples.contains { sample in
+            let colorMatches = sample.baseColorOpacity.x == bakedColor.x
                 && sample.baseColorOpacity.y == bakedColor.y
                 && sample.baseColorOpacity.z == bakedColor.z
-                && sample.surface.x == bakedRoughness
+            let surfaceMatches = sample.surface.x == bakedRoughness
                 && sample.surface.y == bakedMetallic
-                && sample.materialFieldFlags.x & DistanceVolumeMaterialFields.baseColorFlag != 0
-                && sample.materialFieldFlags.x & DistanceVolumeMaterialFields.roughnessFlag != 0
-                && sample.materialFieldFlags.x & DistanceVolumeMaterialFields.metallicFlag != 0
+            let flags = sample.materialFieldFlags.x
+            return colorMatches
+                && surfaceMatches
+                && flags & DistanceVolumeMaterialFields.baseColorFlag != 0
+                && flags & DistanceVolumeMaterialFields.roughnessFlag != 0
+                && flags & DistanceVolumeMaterialFields.metallicFlag != 0
         })
     }
 
@@ -601,6 +1403,51 @@ final class APITests: XCTestCase {
         XCTAssertTrue(dense.distances.contains { $0 < 0 })
     }
 
+    func testSparseSDFBuildSampleScaleRefinesBrickPayloadsWithoutMoreCoarseCells() throws {
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.15, 0.08)))
+        let model = SDFModel(primitives: [
+            SDFPrimitive(shape: .sphere(radius: 0.45), material: material)
+        ])
+        let base = try DistanceVolumeBuilder.buildSparse(
+            model: model,
+            settings: SparseDistanceVolumeBuildSettings(
+                resolution: 20,
+                brickSize: 5,
+                narrowBand: 0.35
+            )
+        )
+        let refined = try DistanceVolumeBuilder.buildSparse(
+            model: model,
+            settings: SparseDistanceVolumeBuildSettings(
+                resolution: 20,
+                brickSize: 5,
+                narrowBand: 0.35,
+                sampleScale: 2
+            )
+        )
+
+        let baseGridDimensions = SIMD3<Int>(
+            (base.dimensions.x + base.brickSize.x - 1) / base.brickSize.x,
+            (base.dimensions.y + base.brickSize.y - 1) / base.brickSize.y,
+            (base.dimensions.z + base.brickSize.z - 1) / base.brickSize.z
+        )
+        let refinedGridDimensions = SIMD3<Int>(
+            (refined.dimensions.x + refined.brickSize.x - 1) / refined.brickSize.x,
+            (refined.dimensions.y + refined.brickSize.y - 1) / refined.brickSize.y,
+            (refined.dimensions.z + refined.brickSize.z - 1) / refined.brickSize.z
+        )
+
+        XCTAssertEqual(baseGridDimensions, refinedGridDimensions)
+        XCTAssertEqual(refined.dimensions, SIMD3<Int>(39, 39, 39))
+        XCTAssertEqual(refined.brickSize, SIMD3<Int>(10, 10, 10))
+        XCTAssertLessThanOrEqual(refined.bricks.count, base.bricks.count)
+        XCTAssertGreaterThan(
+            refined.bricks.reduce(0) { $0 + $1.distances.count },
+            base.bricks.reduce(0) { $0 + $1.distances.count }
+        )
+    }
+
     func testSparseSDFBuildPreservesMaterialBlendSamples() throws {
         var scene = RenderScene()
         let red = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.1, 0.1)))
@@ -682,6 +1529,7 @@ final class APITests: XCTestCase {
             transform: .translation(SIMD3<Float>(0.25, 0.5, 0))
         )
         let compiled = try scene.compileForGPU()
+        let build = try LinearTriangleAccelerationBackend(buildsVolumeBrickBVH: false).build(scene: scene)
 
         XCTAssertTrue(scene.volumeInstances.isEmpty)
         XCTAssertEqual(scene.sparseVolumeInstances.count, 1)
@@ -696,6 +1544,18 @@ final class APITests: XCTestCase {
         )
         XCTAssertEqual(compiled.volumeBricks.first?.gridOriginAndVolume.w, 0)
         XCTAssertEqual(compiled.volumes[0].metadata.w, 1)
+        let grid = try XCTUnwrap(build.volumeBrickGrids.first)
+        XCTAssertGreaterThan(grid.macroDimensionsAndIndexOffset.x, 0)
+        XCTAssertGreaterThan(grid.macroDimensionsAndIndexOffset.y, 0)
+        XCTAssertGreaterThan(grid.macroDimensionsAndIndexOffset.z, 0)
+        XCTAssertEqual(grid.macroSizeAndReserved.x, 4)
+        let macroOffset = Int(grid.macroDimensionsAndIndexOffset.w)
+        let macroCount = Int(
+            grid.macroDimensionsAndIndexOffset.x
+                * grid.macroDimensionsAndIndexOffset.y
+                * grid.macroDimensionsAndIndexOffset.z
+        )
+        XCTAssertTrue(build.volumeBrickGridIndices[macroOffset..<(macroOffset + macroCount)].contains(1))
         XCTAssertTrue(compiled.volumeBrickSamples.contains { $0.distance < 0 })
     }
 
@@ -899,6 +1759,8 @@ final class APITests: XCTestCase {
         XCTAssertEqual(settings.maxBounces, 4)
         XCTAssertEqual(settings.quality, .preview)
         XCTAssertFalse(settings.transparentBackground)
+        XCTAssertTrue(settings.showsEnvironmentBackground)
+        XCTAssertEqual(settings.backgroundColor, SIMD3<Float>(0, 0, 0))
         XCTAssertEqual(settings.denoise.denoiser, .none)
         XCTAssertNil(settings.sampleRadianceClamp)
         XCTAssertEqual(settings.resolvedSampleRadianceClamp, RenderQuality.preview.defaultSampleRadianceClamp)

@@ -289,6 +289,22 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(compiled.volumeBrickAttributeDescriptors.first?.semantics0.x, DistanceVolumeAttributeSemantic.growthAge.rawValue)
     }
 
+    func testSceneScriptSparseSDFSupportsSampleScale() throws {
+        let source = """
+        material clay 0.8 0.45 0.22 roughness 0.6
+        sdf sparse material clay resolution 20 brickSize 5 sampleScale 2 narrowBand 0.3 sphere material clay radius 0.55
+        """
+
+        let scene = try SceneScript.parse(source)
+
+        let sparse = try XCTUnwrap(scene.sparseVolumeInstances.first?.volume)
+        XCTAssertEqual(scene.volumeInstances.count, 0)
+        XCTAssertEqual(scene.sparseVolumeInstances.count, 1)
+        XCTAssertEqual(sparse.dimensions, SIMD3<Int>(39, 39, 39))
+        XCTAssertEqual(sparse.brickSize, SIMD3<Int>(10, 10, 10))
+        XCTAssertGreaterThan(sparse.bricks.reduce(0) { $0 + $1.distances.count }, 0)
+    }
+
     func testSceneScriptSDFSemanticAttributesRenderAlbedoAOV() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw XCTSkip("No Metal device available.")
@@ -334,7 +350,10 @@ final class SceneScriptTests: XCTestCase {
         let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("Examples/SceneScripts/SDF/shadertoy-material-testball.denrim")
 
-        let scene = try SceneScript.parse(contentsOf: url)
+        let scene = try SceneScript.parse(
+            contentsOf: url,
+            options: SceneScriptOptions(sdfResolutionOverride: 32)
+        )
         let compiled = try scene.compileForGPU()
 
         XCTAssertEqual(scene.camera.origin, SIMD3<Float>(0.08, 0.5, 2.8))

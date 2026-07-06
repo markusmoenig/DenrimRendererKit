@@ -90,6 +90,9 @@ public struct RenderScene: Sendable {
     /// Sparse distance-volume instances in the scene.
     public private(set) var sparseVolumeInstances: [SparseDistanceVolumeInstance]
 
+    /// GPU-resident sparse distance-volume instances in the scene.
+    public private(set) var gpuSparseVolumeInstances: [GPUSparseDistanceVolumeInstance]
+
     /// Environment lighting sampled by rays that miss scene geometry.
     public var environment: Environment
 
@@ -113,6 +116,7 @@ public struct RenderScene: Sendable {
         self.meshInstances = []
         self.volumeInstances = []
         self.sparseVolumeInstances = []
+        self.gpuSparseVolumeInstances = []
     }
 
     /// Adds an expanded renderer material and returns its scene-local identifier.
@@ -169,6 +173,19 @@ public struct RenderScene: Sendable {
         ))
     }
 
+    /// Adds a GPU-resident sparse signed-distance volume instance using an existing material.
+    public mutating func add(
+        gpuSparseVolume resource: RenderGPUSparseFieldResource,
+        material: MaterialID,
+        transform: Transform = .identity
+    ) {
+        gpuSparseVolumeInstances.append(GPUSparseDistanceVolumeInstance(
+            resource: resource,
+            material: material,
+            transform: transform
+        ))
+    }
+
     /// Adds a renderable SDF field bundle using its fallback material.
     ///
     /// This is the preferred integration point for procedural products such as
@@ -188,6 +205,10 @@ public struct RenderScene: Sendable {
             let index = sparseVolumeInstances.count
             add(sparseVolume: volume, material: fieldBundle.fallbackMaterial, transform: transform)
             return RenderFieldID(storage: .sparse, index: index)
+        case .gpuSparse(let resource):
+            let index = gpuSparseVolumeInstances.count
+            add(gpuSparseVolume: resource, material: fieldBundle.fallbackMaterial, transform: transform)
+            return RenderFieldID(storage: .gpuSparse, index: index)
         }
     }
 
@@ -207,6 +228,8 @@ public struct RenderScene: Sendable {
             return replaceDenseField(at: id.index, with: fieldBundle, transform: transform)
         case .sparse:
             return replaceSparseField(at: id.index, with: fieldBundle, transform: transform)
+        case .gpuSparse:
+            return replaceGPUSparseField(at: id.index, with: fieldBundle, transform: transform)
         }
     }
 
@@ -261,6 +284,29 @@ public struct RenderScene: Sendable {
         )
         return true
     }
+
+    /// Replaces an existing GPU-resident sparse field instance.
+    @discardableResult
+    public mutating func replaceGPUSparseField(
+        at index: Int,
+        with fieldBundle: RenderFieldBundle,
+        transform: Transform? = nil
+    ) -> Bool {
+        guard gpuSparseVolumeInstances.indices.contains(index) else {
+            return false
+        }
+        guard case .gpuSparse(let resource) = fieldBundle.storage else {
+            return false
+        }
+        let existingTransform = gpuSparseVolumeInstances[index].transform
+        gpuSparseVolumeInstances[index] = GPUSparseDistanceVolumeInstance(
+            resource: resource,
+            material: fieldBundle.fallbackMaterial,
+            transform: transform ?? existingTransform
+        )
+        return true
+    }
+
 
     /// Adds an app-authored quad area light.
     ///
@@ -807,6 +853,7 @@ public struct RenderScene: Sendable {
             volumeAttributeSamples: volumeResources.attributeSamples,
             volumeBricks: volumeBrickResources.descriptors,
             volumeBrickSamples: volumeBrickResources.samples,
+            volumeBrickMaterialFieldSamples: volumeBrickResources.materialFieldSamples,
             volumeBrickAttributeDescriptors: volumeBrickResources.attributeDescriptors,
             volumeBrickAttributeSamples: volumeBrickResources.attributeSamples,
             instanceAcceleration: instanceAcceleration
@@ -823,7 +870,8 @@ struct SceneCompilation {
     var volumeAttributeDescriptors: [GPUVolumeAttributeDescriptor]
     var volumeAttributeSamples: [SIMD4<Float>]
     var volumeBricks: [GPUVolumeBrickDescriptor]
-    var volumeBrickSamples: [GPUVolumeSample]
+    var volumeBrickSamples: [GPUVolumeBrickSample]
+    var volumeBrickMaterialFieldSamples: [GPUVolumeMaterialFieldSample]
     var volumeBrickAttributeDescriptors: [GPUVolumeAttributeDescriptor]
     var volumeBrickAttributeSamples: [SIMD4<Float>]
     var instanceAcceleration: InstanceAcceleration

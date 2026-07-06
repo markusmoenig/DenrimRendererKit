@@ -99,6 +99,15 @@ struct GPUVolumeSample {
     var materialFieldFlags: SIMD4<UInt32>
 }
 
+typealias GPUVolumeBrickSample = PackedDistanceVolumeSample
+
+struct GPUVolumeMaterialFieldSample {
+    var baseColorOpacity: SIMD4<Float>
+    var emissionTransmission: SIMD4<Float>
+    var surface: SIMD4<Float>
+    var materialFieldFlags: SIMD4<UInt32>
+}
+
 struct GPUVolumeAttributeDescriptor {
     var metadata: SIMD4<UInt32>
     var semantics0: SIMD4<UInt32>
@@ -110,8 +119,17 @@ struct GPUVolumeBrickDescriptor {
     var worldBoundsMax: SIMD4<Float>
     var localBoundsMin: SIMD4<Float>
     var localBoundsMax: SIMD4<Float>
+    var sampleBoundsMin: SIMD4<Float>
+    var sampleBoundsMax: SIMD4<Float>
     var gridOriginAndVolume: SIMD4<UInt32>
     var dimensionsAndSampleOffset: SIMD4<UInt32>
+}
+
+struct GPUVolumeBrickGrid {
+    var dimensionsAndIndexOffset: SIMD4<UInt32>
+    var brickSizeAndVolume: SIMD4<UInt32>
+    var macroDimensionsAndIndexOffset: SIMD4<UInt32>
+    var macroSizeAndReserved: SIMD4<UInt32>
 }
 
 struct GPUAccelerationNode: Equatable {
@@ -128,9 +146,11 @@ struct GPURenderConstants {
     var materialCount: UInt32
     var sampleIndex: UInt32
     var maxBounces: UInt32
+    var renderQuality: UInt32
     var frameSeed: UInt32
     var accelerationNodeCount: UInt32
     var transparentBackground: UInt32
+    var showsEnvironmentBackground: UInt32
     var lightCount: UInt32
     var environmentTextureIndexPlusOne: UInt32
     var environmentDistributionCount: UInt32
@@ -138,12 +158,23 @@ struct GPURenderConstants {
     var environmentRotationY: Float
     var environmentMaxRadiance: Float
     var sampleRadianceClamp: Float
+    var backgroundColor: SIMD4<Float>
     var volumeSampleCount: UInt32
     var volumeAttributeSampleCount: UInt32
     var volumeBrickCount: UInt32
     var volumeBrickSampleCount: UInt32
+    var volumeBrickMaterialFieldSampleCount: UInt32
     var volumeBrickAttributeSampleCount: UInt32
+    var volumeBrickBVHNodeCount: UInt32
+    var volumeBrickBVHIndexCount: UInt32
+    var volumeBrickGridCount: UInt32
+    var volumeBrickGridIndexCount: UInt32
     var denoiserEnabled: UInt32
+    var sdfTraversalStatsEnabled: UInt32
+    var tileX: UInt32
+    var tileY: UInt32
+    var tileWidth: UInt32
+    var tileHeight: UInt32
 }
 
 struct GPURayTracingInstance {

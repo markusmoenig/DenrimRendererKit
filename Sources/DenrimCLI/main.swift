@@ -48,6 +48,7 @@ struct RenderReport: Codable {
     var timings: RenderTimings
     var samplesPerSecond: Double
     var pixelSamplesPerSecond: Double
+    var sdfTraversalStats: SDFTraversalStats?
 }
 
 let optionsWithValues: Set<String> = [
@@ -167,14 +168,23 @@ func performRender(
     defaultOutputPath: String,
     loadScene: (SceneScriptOptions) throws -> RenderScene
 ) throws {
-    let (renderer, rendererCreateSeconds) = try elapsed {
+    let writesJSON = arguments.contains("--json")
+    let printsStartupProgress = !writesJSON
+
+    let (renderer, rendererCreateSeconds) = try elapsedPhase(
+        "creating renderer and loading Metal pipelines",
+        printsProgress: printsStartupProgress
+    ) {
         try DenrimRenderer()
     }
     let sceneOptions = SceneScriptOptions(
         sdfResolutionOverride: optionInt(named: "--sdf-resolution", in: arguments),
         distanceFieldBaker: renderer.makeDistanceFieldBaker()
     )
-    let (scene, sceneLoadSeconds) = try elapsed {
+    let (scene, sceneLoadSeconds) = try elapsedPhase(
+        "loading SceneScript and baking SDF fields",
+        printsProgress: printsStartupProgress
+    ) {
         try loadScene(sceneOptions)
     }
     let renderDefaults = scene.renderDefaults
@@ -213,7 +223,7 @@ func performRender(
     let denoiseName = denoiseSettingsName(denoiseConfig)
     applyDenoiseOverrides(arguments: arguments, settings: &denoiseConfig)
     let reportOutputPath = optionValue(named: "--report-output", in: arguments)
-    let writesJSON = arguments.contains("--json")
+    let collectsSDFTraversalStats = optionBool(named: "--sdf-stats", in: arguments)
     let printsProgress = !writesJSON && samples > 0
 
     let previousCamera: Camera? = output == .motionVector
@@ -224,7 +234,10 @@ func performRender(
             verticalFieldOfViewDegrees: scene.camera.verticalFieldOfViewDegrees
         )
         : nil
-    let (session, sessionCreateSeconds) = try elapsed {
+    let (session, sessionCreateSeconds) = try elapsedPhase(
+        "creating render session and uploading GPU buffers",
+        printsProgress: printsStartupProgress
+    ) {
         try renderer.makeSession(
             scene: scene,
             settings: RenderSettings(
@@ -235,15 +248,25 @@ func performRender(
                 previousCamera: previousCamera,
                 transparentBackground: transparentBackground,
                 denoise: denoiseConfig,
-                sampleRadianceClamp: sampleRadianceClamp
+                sampleRadianceClamp: sampleRadianceClamp,
+                collectsSDFTraversalStats: collectsSDFTraversalStats
             ),
             accelerationMode: accelerationMode
         )
     }
-    let (_, renderSeconds) = try elapsed {
+    if collectsSDFTraversalStats {
+        session.resetSDFTraversalStats()
+    }
+    let (_, renderSeconds) = try elapsedPhase(
+        "rendering samples",
+        printsProgress: printsStartupProgress && !printsProgress
+    ) {
         try renderSamples(session: session, samples: samples, printsProgress: printsProgress)
     }
-    let (_, writeSeconds) = try elapsed {
+    let (_, writeSeconds) = try elapsedPhase(
+        "writing PNG",
+        printsProgress: printsStartupProgress
+    ) {
         try FileManager.default.createDirectory(
             at: outputURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -282,7 +305,8 @@ func performRender(
             writeSeconds: writeSeconds
         ),
         samplesPerSecond: samplesPerSecond,
-        pixelSamplesPerSecond: pixelSamplesPerSecond
+        pixelSamplesPerSecond: pixelSamplesPerSecond,
+        sdfTraversalStats: collectsSDFTraversalStats ? session.sdfTraversalStats() : nil
     )
 
     let reportData = try encodedReport(report)
@@ -334,6 +358,23 @@ func printRenderReport(_ report: RenderReport) {
     print(String(format: "Total: %.4fs", report.timings.totalSeconds))
     print(String(format: "Samples/s: %.2f", report.samplesPerSecond))
     print("Pixel-samples/s: \(Int(report.pixelSamplesPerSecond.rounded()))")
+    if let stats = report.sdfTraversalStats {
+        print("SDF traversal stats:")
+        print("  Dense volume tests: \(stats.denseVolumeTests)")
+        print("  Dense march steps: \(stats.denseMarchSteps)")
+        print("  Sparse grid cells visited: \(stats.sparseGridCellsVisited)")
+        print("  Sparse grid empty cells: \(stats.sparseGridEmptyCells)")
+        print("  Sparse grid macro skips: \(stats.sparseGridMacroSkips)")
+        print("  Sparse brick tests: \(stats.sparseBrickTests)")
+        print("  Sparse brick invalid: \(stats.sparseBrickInvalid)")
+        print("  Sparse brick range culls: \(stats.sparseBrickRangeCulls)")
+        print("  Sparse brick marches: \(stats.sparseBrickMarches)")
+        print("  Sparse brick march steps: \(stats.sparseBrickMarchSteps)")
+        print("  Sparse brick hits: \(stats.sparseBrickHits)")
+        print("  Primary scene queries: \(stats.primarySceneQueries)")
+        print("  Bounce scene queries: \(stats.bounceSceneQueries)")
+        print("  Shadow scene queries: \(stats.shadowSceneQueries)")
+    }
 }
 
 func renderSamples(session: RenderSession, samples: Int, printsProgress: Bool) throws {
@@ -453,6 +494,7 @@ func printRenderHelp() {
                                              Use 0 to disable.
               --sdf-resolution <n>            Override script SDF/volume build
                                              resolution for every SDF object.
+              --sdf-stats                     Collect and print SDF traversal counters.
 
         Backend:
               --backend <name>               automatic, flat-bvh, metal-ray-tracing.
@@ -506,7 +548,7 @@ func printMaterialHelp() {
         It accepts the same render options as `denrim render`, including:
           --output, --samples, --size, --width, --height, --quality,
           --max-bounces, --backend, --sample-radiance-clamp,
-          --sdf-resolution, --denoise, --json, and --report-output.
+          --sdf-resolution, --sdf-stats, --denoise, --json, and --report-output.
 
         If --output is omitted, the image is written to ./out.png.
         """
@@ -517,6 +559,23 @@ func elapsed<T>(_ work: () throws -> T) rethrows -> (T, Double) {
     let start = Date()
     let value = try work()
     return (value, Date().timeIntervalSince(start))
+}
+
+func elapsedPhase<T>(
+    _ name: String,
+    printsProgress: Bool,
+    work: () throws -> T
+) rethrows -> (T, Double) {
+    if printsProgress {
+        fputs("Startup: \(name)...\n", stderr)
+        fflush(stderr)
+    }
+    let (value, seconds) = try elapsed(work)
+    if printsProgress {
+        fputs(String(format: "Startup: %@ done in %.3fs\n", name, seconds), stderr)
+        fflush(stderr)
+    }
+    return (value, seconds)
 }
 
 func isHelp(_ value: String) -> Bool {

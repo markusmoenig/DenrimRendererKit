@@ -1,4 +1,5 @@
 import Foundation
+import Metal
 import simd
 
 /// Semantic meaning for compact scalar attributes baked alongside a distance field.
@@ -270,6 +271,48 @@ public struct DistanceVolume: Sendable, Equatable {
     }
 }
 
+/// Compact renderer-facing sample stored by sparse bricks.
+///
+/// This mirrors the sparse brick shader payload: distance plus material identity
+/// and blend. Larger procedural material fields live in a separate optional
+/// stream so ordinary sparse SDFs stay cheap to upload.
+public struct PackedDistanceVolumeSample: Sendable, Equatable {
+    /// Signed distance at this sample.
+    public var distance: Float
+
+    /// Primary material index at this sample.
+    public var materialA: UInt32
+
+    /// Secondary material index used by smooth blends.
+    public var materialB: UInt32
+
+    /// Blend amount from `materialA` to `materialB` in the range 0...1.
+    public var materialBlend: Float
+
+    /// Creates a compact sparse volume sample.
+    public init(
+        distance: Float,
+        materialA: UInt32,
+        materialB: UInt32,
+        materialBlend: Float
+    ) {
+        self.distance = distance
+        self.materialA = materialA
+        self.materialB = materialB
+        self.materialBlend = materialBlend
+    }
+
+    /// Creates a compact sparse volume sample from a material payload.
+    public init(distance: Float, material: DistanceVolumeMaterialSample) {
+        self.init(
+            distance: distance,
+            materialA: material.materialA.rawValue,
+            materialB: material.materialB.rawValue,
+            materialBlend: simd_clamp(material.blend, 0, 1)
+        )
+    }
+}
+
 /// One occupied brick in a sparse signed-distance volume.
 ///
 /// Brick samples use the same row-major X-fastest order as `DistanceVolume`,
@@ -296,6 +339,9 @@ public struct SparseDistanceVolumeBrick: Sendable, Equatable {
     /// Packed brick-local attribute samples in row-major X-fastest order.
     public var attributeSamples: [SIMD4<Float>]
 
+    /// Compact renderer-facing samples in row-major X-fastest order.
+    public var packedSamples: [PackedDistanceVolumeSample]
+
     /// Creates a sparse signed-distance brick.
     public init(
         origin: SIMD3<Int>,
@@ -304,7 +350,8 @@ public struct SparseDistanceVolumeBrick: Sendable, Equatable {
         coreDimensions: SIMD3<Int>? = nil,
         distances: [Float],
         materialSamples: [DistanceVolumeMaterialSample],
-        attributeSamples: [SIMD4<Float>] = []
+        attributeSamples: [SIMD4<Float>] = [],
+        packedSamples: [PackedDistanceVolumeSample] = []
     ) {
         self.origin = origin
         self.dimensions = dimensions
@@ -313,6 +360,13 @@ public struct SparseDistanceVolumeBrick: Sendable, Equatable {
         self.distances = distances
         self.materialSamples = materialSamples
         self.attributeSamples = attributeSamples
+        if packedSamples.count == distances.count {
+            self.packedSamples = packedSamples
+        } else {
+            self.packedSamples = zip(distances, materialSamples).map {
+                PackedDistanceVolumeSample(distance: $0.0, material: $0.1)
+            }
+        }
     }
 }
 
@@ -447,12 +501,342 @@ public struct SparseDistanceVolume: Sendable, Equatable {
 /// This is the renderer-facing boundary for products such as Denrim Form:
 /// host apps can compile procedural geometry into either dense samples or
 /// sparse bricks without depending on GPU packing details.
-public enum RenderFieldStorage: Sendable, Equatable {
+public struct RenderGPUSparseFieldBrick: Sendable {
+    /// Sample-space origin of the stored brick payload inside the full field grid.
+    public var origin: SIMD3<Int>
+
+    /// Stored brick dimensions in samples.
+    public var dimensions: SIMD3<Int>
+
+    /// Core, non-overlap sample-space origin for grid traversal.
+    public var coreOrigin: SIMD3<Int>
+
+    /// Core, non-overlap dimensions for grid traversal.
+    public var coreDimensions: SIMD3<Int>
+
+    /// Offset, in `PackedDistanceVolumeSample` elements, into the GPU sample buffer.
+    public var sampleOffset: Int
+
+    /// Number of `PackedDistanceVolumeSample` elements stored for this brick.
+    public var sampleCount: Int
+
+    /// Minimum signed distance stored in this brick. Used for conservative render-time culling.
+    public var minimumDistance: Float
+
+    /// Maximum signed distance stored in this brick. Used for conservative render-time culling.
+    public var maximumDistance: Float
+
+    public init(
+        origin: SIMD3<Int>,
+        dimensions: SIMD3<Int>,
+        coreOrigin: SIMD3<Int>,
+        coreDimensions: SIMD3<Int>,
+        sampleOffset: Int,
+        sampleCount: Int,
+        minimumDistance: Float = -Float.greatestFiniteMagnitude,
+        maximumDistance: Float = Float.greatestFiniteMagnitude
+    ) {
+        self.origin = origin
+        self.dimensions = dimensions
+        self.coreOrigin = coreOrigin
+        self.coreDimensions = coreDimensions
+        self.sampleOffset = sampleOffset
+        self.sampleCount = sampleCount
+        self.minimumDistance = minimumDistance
+        self.maximumDistance = maximumDistance
+    }
+}
+
+/// A GPU-to-GPU sample replacement for one existing sparse field brick.
+///
+/// This update keeps brick topology fixed: the target brick index, dimensions,
+/// and sample count must already exist in the destination resource. Use whole
+/// field replacement when an edit adds/removes occupied bricks or changes
+/// brick layout.
+public struct RenderGPUSparseFieldBrickUpdate {
+    /// Target brick index inside `RenderGPUSparseFieldResource.bricks`.
+    public var brickIndex: Int
+
+    /// Source buffer containing packed `PackedDistanceVolumeSample` values.
+    public var sourceBuffer: MTLBuffer
+
+    /// Source byte offset inside `sourceBuffer`.
+    public var sourceOffset: Int
+
+    /// Number of packed samples to copy. Defaults to the destination brick's full sample count.
+    public var sampleCount: Int?
+
+    public init(
+        brickIndex: Int,
+        sourceBuffer: MTLBuffer,
+        sourceOffset: Int = 0,
+        sampleCount: Int? = nil
+    ) {
+        self.brickIndex = brickIndex
+        self.sourceBuffer = sourceBuffer
+        self.sourceOffset = sourceOffset
+        self.sampleCount = sampleCount
+    }
+}
+
+/// GPU-authored sparse brick metadata compatible with the renderer's SDF bindings.
+public final class RenderGPUSparseFieldMetadataBuffers: @unchecked Sendable {
+    public let brickBuffer: MTLBuffer
+    public let attributeDescriptorBuffer: MTLBuffer
+    public let gridBuffer: MTLBuffer
+    public let gridIndexBuffer: MTLBuffer
+    public let brickCount: Int
+    public let attributeDescriptorCount: Int
+    public let gridCount: Int
+    public let gridIndexCount: Int
+
+    public init(
+        brickBuffer: MTLBuffer,
+        attributeDescriptorBuffer: MTLBuffer,
+        gridBuffer: MTLBuffer,
+        gridIndexBuffer: MTLBuffer,
+        brickCount: Int,
+        attributeDescriptorCount: Int,
+        gridCount: Int,
+        gridIndexCount: Int
+    ) {
+        self.brickBuffer = brickBuffer
+        self.attributeDescriptorBuffer = attributeDescriptorBuffer
+        self.gridBuffer = gridBuffer
+        self.gridIndexBuffer = gridIndexBuffer
+        self.brickCount = brickCount
+        self.attributeDescriptorCount = attributeDescriptorCount
+        self.gridCount = gridCount
+        self.gridIndexCount = gridIndexCount
+    }
+}
+
+/// Sparse distance-field samples that already live in GPU memory.
+///
+/// The sample buffer must contain tightly packed `PackedDistanceVolumeSample`
+/// values. RendererKit owns the shader layout; hosts should prefer resources
+/// returned by `DistanceFieldBaker` unless they intentionally produce the same
+/// sample layout.
+public final class RenderGPUSparseFieldResource: @unchecked Sendable {
+    public static let packedSampleStride = MemoryLayout<PackedDistanceVolumeSample>.stride
+
+    public let device: MTLDevice
+    public let dimensions: SIMD3<Int>
+    public let brickSize: SIMD3<Int>
+    public let boundsMin: SIMD3<Float>
+    public let boundsMax: SIMD3<Float>
+    public let defaultDistance: Float
+    public let defaultMaterial: DistanceVolumeMaterialSample
+    public let bricks: [RenderGPUSparseFieldBrick]
+    public let sampleBuffer: MTLBuffer
+    public let sampleCount: Int
+    public let attributeSampleBuffer: MTLBuffer?
+    public let attributeSampleCount: Int
+    public let metadataBuffers: RenderGPUSparseFieldMetadataBuffers?
+
+    /// Number of packed samples that fit in `sampleBuffer`.
+    public var sampleCapacity: Int {
+        sampleBuffer.length / Self.packedSampleStride
+    }
+
+    /// Dimensions of the sparse brick grid in field-local brick cells.
+    public var brickGridDimensions: SIMD3<Int> {
+        SIMD3<Int>(
+            (dimensions.x + brickSize.x - 1) / brickSize.x,
+            (dimensions.y + brickSize.y - 1) / brickSize.y,
+            (dimensions.z + brickSize.z - 1) / brickSize.z
+        )
+    }
+
+    public init(
+        device: MTLDevice,
+        dimensions: SIMD3<Int>,
+        brickSize: SIMD3<Int>,
+        boundsMin: SIMD3<Float>,
+        boundsMax: SIMD3<Float>,
+        defaultDistance: Float,
+        defaultMaterial: DistanceVolumeMaterialSample,
+        bricks: [RenderGPUSparseFieldBrick],
+        sampleBuffer: MTLBuffer,
+        sampleCount: Int,
+        attributeSampleBuffer: MTLBuffer? = nil,
+        attributeSampleCount: Int = 0,
+        metadataBuffers: RenderGPUSparseFieldMetadataBuffers? = nil
+    ) {
+        self.device = device
+        self.dimensions = dimensions
+        self.brickSize = brickSize
+        self.boundsMin = boundsMin
+        self.boundsMax = boundsMax
+        self.defaultDistance = defaultDistance
+        self.defaultMaterial = defaultMaterial
+        self.bricks = bricks
+        self.sampleBuffer = sampleBuffer
+        self.sampleCount = sampleCount
+        self.attributeSampleBuffer = attributeSampleBuffer
+        self.attributeSampleCount = attributeSampleCount
+        self.metadataBuffers = metadataBuffers
+    }
+
+    /// Returns direct-grid brick slots whose field-local core bounds overlap an edited region.
+    ///
+    /// Use this with resources produced by `bakeGPUResident(..., metadataMode: .directGridGPU)`.
+    /// Geometry edits should keep `activeOnly` false so inactive slots that might become active are
+    /// updated too. Material/attribute-only edits can pass `activeOnly: true` to skip currently empty
+    /// slots when the active brick set is known to be unchanged.
+    public func directGridBrickIndices(
+        overlappingLocalBoundsMin editedBoundsMin: SIMD3<Float>,
+        localBoundsMax editedBoundsMax: SIMD3<Float>,
+        padding: Float = 0,
+        activeOnly: Bool = false
+    ) throws -> [Int] {
+        let gridDimensions = brickGridDimensions
+        let candidateCount = gridDimensions.x * gridDimensions.y * gridDimensions.z
+        guard candidateCount > 0,
+              let metadataBuffers,
+              metadataBuffers.brickCount == candidateCount,
+              metadataBuffers.gridIndexCount >= candidateCount else {
+            throw DenrimRendererError.invalidScene("Direct-grid brick lookup requires direct-grid GPU sparse metadata.")
+        }
+
+        let padding = max(padding, 0)
+        let localMin = simd_min(editedBoundsMin, editedBoundsMax) - SIMD3<Float>(repeating: padding)
+        let localMax = simd_max(editedBoundsMin, editedBoundsMax) + SIMD3<Float>(repeating: padding)
+        let fieldMin = simd_min(boundsMin, boundsMax)
+        let fieldMax = simd_max(boundsMin, boundsMax)
+        guard localMax.x >= fieldMin.x, localMax.y >= fieldMin.y, localMax.z >= fieldMin.z,
+              localMin.x <= fieldMax.x, localMin.y <= fieldMax.y, localMin.z <= fieldMax.z else {
+            return []
+        }
+
+        func sampleCoordinate(_ position: Float, _ minValue: Float, _ maxValue: Float, _ dimension: Int) -> Float {
+            let extent = max(maxValue - minValue, Float.ulpOfOne)
+            let denominator = Float(max(dimension - 1, 1))
+            return ((position - minValue) / extent) * denominator
+        }
+
+        func clampedCellRange(minCoordinate: Float, maxCoordinate: Float, brickSize: Int, gridDimension: Int) -> ClosedRange<Int> {
+            let brickSize = max(brickSize, 1)
+            let gridDimension = max(gridDimension, 1)
+            let first = Int(floor((minCoordinate - 0.5) / Float(brickSize)))
+            let last = Int(floor((maxCoordinate + 0.5) / Float(brickSize)))
+            let clampedFirst = max(0, min(first, gridDimension - 1))
+            let clampedLast = max(0, min(last, gridDimension - 1))
+            return clampedFirst...max(clampedFirst, clampedLast)
+        }
+
+        let minCoordinate = SIMD3<Float>(
+            sampleCoordinate(localMin.x, fieldMin.x, fieldMax.x, dimensions.x),
+            sampleCoordinate(localMin.y, fieldMin.y, fieldMax.y, dimensions.y),
+            sampleCoordinate(localMin.z, fieldMin.z, fieldMax.z, dimensions.z)
+        )
+        let maxCoordinate = SIMD3<Float>(
+            sampleCoordinate(localMax.x, fieldMin.x, fieldMax.x, dimensions.x),
+            sampleCoordinate(localMax.y, fieldMin.y, fieldMax.y, dimensions.y),
+            sampleCoordinate(localMax.z, fieldMin.z, fieldMax.z, dimensions.z)
+        )
+
+        let xRange = clampedCellRange(
+            minCoordinate: min(minCoordinate.x, maxCoordinate.x),
+            maxCoordinate: max(minCoordinate.x, maxCoordinate.x),
+            brickSize: brickSize.x,
+            gridDimension: gridDimensions.x
+        )
+        let yRange = clampedCellRange(
+            minCoordinate: min(minCoordinate.y, maxCoordinate.y),
+            maxCoordinate: max(minCoordinate.y, maxCoordinate.y),
+            brickSize: brickSize.y,
+            gridDimension: gridDimensions.y
+        )
+        let zRange = clampedCellRange(
+            minCoordinate: min(minCoordinate.z, maxCoordinate.z),
+            maxCoordinate: max(minCoordinate.z, maxCoordinate.z),
+            brickSize: brickSize.z,
+            gridDimension: gridDimensions.z
+        )
+
+        let activeGrid = activeOnly
+            ? metadataBuffers.gridIndexBuffer.contents().bindMemory(to: UInt32.self, capacity: metadataBuffers.gridIndexCount)
+            : nil
+        var result: [Int] = []
+        result.reserveCapacity(xRange.count * yRange.count * zRange.count)
+        for z in zRange {
+            for y in yRange {
+                for x in xRange {
+                    let brickIndex = x + y * gridDimensions.x + z * gridDimensions.x * gridDimensions.y
+                    if let activeGrid, activeGrid[brickIndex] == UInt32.max {
+                        continue
+                    }
+                    result.append(brickIndex)
+                }
+            }
+        }
+        return result
+    }
+
+    /// Encodes GPU-to-GPU replacement of existing brick sample ranges.
+    ///
+    /// This is the dirty-brick path for same-topology edits. The caller owns
+    /// command-buffer ordering, so Form can encode its bake kernels, then these
+    /// copies, then the renderer sample in one frame.
+    public func encodeReplaceBrickSamples(
+        _ updates: [RenderGPUSparseFieldBrickUpdate],
+        into commandBuffer: MTLCommandBuffer
+    ) throws {
+        guard !updates.isEmpty else {
+            return
+        }
+        guard let blitEncoder = commandBuffer.makeBlitCommandEncoder() else {
+            throw DenrimRendererError.commandBufferFailed("Could not create GPU sparse field update blit encoder.")
+        }
+        do {
+            for update in updates {
+                guard bricks.indices.contains(update.brickIndex) else {
+                    throw DenrimRendererError.invalidScene("GPU sparse field dirty brick index is out of range.")
+                }
+                guard update.sourceBuffer.device === device else {
+                    throw DenrimRendererError.invalidScene("GPU sparse field dirty brick source buffer belongs to a different Metal device.")
+                }
+                let brick = bricks[update.brickIndex]
+                let copiedSamples = update.sampleCount ?? brick.sampleCount
+                guard copiedSamples >= 0, copiedSamples <= brick.sampleCount else {
+                    throw DenrimRendererError.invalidScene("GPU sparse field dirty brick sample count exceeds the destination brick.")
+                }
+                let byteCount = copiedSamples * Self.packedSampleStride
+                let destinationOffset = brick.sampleOffset * Self.packedSampleStride
+                guard update.sourceOffset >= 0,
+                      update.sourceOffset + byteCount <= update.sourceBuffer.length,
+                      destinationOffset + byteCount <= sampleBuffer.length else {
+                    throw DenrimRendererError.invalidScene("GPU sparse field dirty brick copy range is outside its buffer.")
+                }
+                guard byteCount > 0 else {
+                    continue
+                }
+                blitEncoder.copy(
+                    from: update.sourceBuffer,
+                    sourceOffset: update.sourceOffset,
+                    to: sampleBuffer,
+                    destinationOffset: destinationOffset,
+                    size: byteCount
+                )
+            }
+        } catch {
+            blitEncoder.endEncoding()
+            throw error
+        }
+        blitEncoder.endEncoding()
+    }
+}
+
+public enum RenderFieldStorage: Sendable {
     /// Dense row-major signed-distance samples.
     case dense(DistanceVolume)
 
     /// Sparse signed-distance bricks.
     case sparse(SparseDistanceVolume)
+
+    /// Sparse signed-distance bricks whose sample payload already lives on the GPU.
+    case gpuSparse(RenderGPUSparseFieldResource)
 
     /// Bounds covered by the field in bundle-local space.
     public var bounds: (minimum: SIMD3<Float>, maximum: SIMD3<Float>) {
@@ -461,6 +845,8 @@ public enum RenderFieldStorage: Sendable, Equatable {
             return (volume.boundsMin, volume.boundsMax)
         case .sparse(let volume):
             return (volume.boundsMin, volume.boundsMax)
+        case .gpuSparse(let resource):
+            return (resource.boundsMin, resource.boundsMax)
         }
     }
 
@@ -471,6 +857,8 @@ public enum RenderFieldStorage: Sendable, Equatable {
             return volume.attributeLayout
         case .sparse(let volume):
             return volume.attributeLayout
+        case .gpuSparse:
+            return DistanceVolumeAttributeLayout()
         }
     }
 }
@@ -482,6 +870,9 @@ public enum RenderFieldStorageKind: Sendable, Hashable {
 
     /// Sparse signed-distance bricks.
     case sparse
+
+    /// GPU-resident sparse signed-distance bricks.
+    case gpuSparse
 }
 
 /// Stable-enough scene handle returned when a render field bundle is added.
@@ -509,7 +900,7 @@ public struct RenderFieldID: Sendable, Hashable {
 /// like Denrim Form and RendererKit. Form owns its timeline/operator document;
 /// RendererKit owns this renderable payload shape and how it is uploaded to the
 /// active backend.
-public struct RenderFieldBundle: Sendable, Equatable {
+public struct RenderFieldBundle: Sendable {
     /// Dense or sparse field storage.
     public var storage: RenderFieldStorage
 
@@ -539,6 +930,14 @@ public struct RenderFieldBundle: Sendable, Equatable {
         fallbackMaterial: MaterialID
     ) {
         self.init(storage: .sparse(volume), fallbackMaterial: fallbackMaterial)
+    }
+
+    /// Creates a field bundle from GPU-resident sparse signed-distance bricks.
+    public init(
+        gpuSparse resource: RenderGPUSparseFieldResource,
+        fallbackMaterial: MaterialID
+    ) {
+        self.init(storage: .gpuSparse(resource), fallbackMaterial: fallbackMaterial)
     }
 
     /// Bounds covered by the field in bundle-local space.
@@ -593,6 +992,28 @@ public struct SparseDistanceVolumeInstance: Sendable, Equatable {
         transform: Transform = .identity
     ) {
         self.volume = volume
+        self.material = material
+        self.transform = transform
+    }
+}
+
+/// A GPU-resident sparse signed-distance volume placed in a render scene.
+public struct GPUSparseDistanceVolumeInstance: Sendable {
+    /// GPU-resident sparse volume data sampled by the renderer backend.
+    public var resource: RenderGPUSparseFieldResource
+
+    /// Material used as the fallback for the zero-distance surface.
+    public var material: MaterialID
+
+    /// Local-to-world transform for the volume.
+    public var transform: Transform
+
+    public init(
+        resource: RenderGPUSparseFieldResource,
+        material: MaterialID,
+        transform: Transform = .identity
+    ) {
+        self.resource = resource
         self.material = material
         self.transform = transform
     }
