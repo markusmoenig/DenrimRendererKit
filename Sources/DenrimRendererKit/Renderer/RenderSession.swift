@@ -111,6 +111,12 @@ public final class RenderSession {
     /// Number of accumulated samples.
     public private(set) var sampleCount: Int = 0
 
+    /// Camera currently used for primary rays.
+    public private(set) var camera: Camera
+
+    /// Previous camera currently used for motion-vector output.
+    public private(set) var previousCamera: Camera
+
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let pipeline: MTLComputePipelineState
@@ -118,8 +124,8 @@ public final class RenderSession {
     private let simpleSpatialDenoisePipeline: MTLComputePipelineState?
     private let svgfDepthNormalPipeline: MTLComputePipelineState?
     private let svgfOutputCopyPipeline: MTLComputePipelineState?
-    private let camera: GPUCamera
-    private let previousCamera: GPUCamera
+    private var gpuCamera: GPUCamera
+    private var previousGPUCamera: GPUCamera
     private let triangleBuffer: MTLBuffer
     private var volumeBuffer: MTLBuffer
     private var volumeSampleBuffer: MTLBuffer
@@ -326,8 +332,10 @@ public final class RenderSession {
         self.svgfOutputCopyPipeline = svgfOutputCopyPipeline
         self.settings = settings
         self.accelerationMode = accelerationMode
-        self.camera = scene.camera.gpuCamera(width: settings.width, height: settings.height)
-        self.previousCamera = (settings.previousCamera ?? scene.camera).gpuCamera(
+        self.camera = scene.camera
+        self.previousCamera = settings.previousCamera ?? scene.camera
+        self.gpuCamera = scene.camera.gpuCamera(width: settings.width, height: settings.height)
+        self.previousGPUCamera = self.previousCamera.gpuCamera(
             width: settings.width,
             height: settings.height
         )
@@ -561,6 +569,26 @@ public final class RenderSession {
         #if canImport(MetalPerformanceShaders)
         appleSVGFDenoiser?.reset()
         #endif
+    }
+
+    /// Updates only the camera used by this compiled session and restarts accumulation.
+    ///
+    /// Geometry, materials, textures, lights, acceleration structures, and render targets are
+    /// preserved. When `previousCamera` is omitted, the camera active before this update is used
+    /// for motion-vector output.
+    public func updateCamera(
+        _ camera: Camera,
+        previousCamera: Camera? = nil
+    ) {
+        let oldCamera = self.camera
+        self.camera = camera
+        self.previousCamera = previousCamera ?? oldCamera
+        self.gpuCamera = camera.gpuCamera(width: settings.width, height: settings.height)
+        self.previousGPUCamera = self.previousCamera.gpuCamera(
+            width: settings.width,
+            height: settings.height
+        )
+        resetAccumulation()
     }
 
     /// Resets accumulated SDF traversal counters to zero.
@@ -877,8 +905,8 @@ public final class RenderSession {
             tileWidth: UInt32(tileWidth),
             tileHeight: UInt32(tileHeight)
         )
-        var camera = camera
-        var previousCamera = previousCamera
+        var camera = gpuCamera
+        var previousCamera = previousGPUCamera
 
         let useHardwareRayTracing = canUseHardwareRayTracing
         encoder.setComputePipelineState(useHardwareRayTracing ? hardwareRayTracingPipeline! : pipeline)

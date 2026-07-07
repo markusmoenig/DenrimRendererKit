@@ -12,7 +12,7 @@ final class OpacityTransportTests: XCTestCase {
         let renderer = try DenrimRenderer(device: device)
         let session = try renderer.makeSession(
             scene: cutoutScene(),
-            settings: RenderSettings(width: 24, height: 24, maxBounces: 2),
+            settings: RenderSettings(width: 24, height: 24, maxBounces: 2, quality: .final),
             accelerationMode: .flatBVH
         )
 
@@ -41,7 +41,7 @@ final class OpacityTransportTests: XCTestCase {
         let renderer = try DenrimRenderer(device: device)
         let session = try renderer.makeSession(
             scene: cutoutScene(),
-            settings: RenderSettings(width: 24, height: 24, maxBounces: 2),
+            settings: RenderSettings(width: 24, height: 24, maxBounces: 2, quality: .final),
             accelerationMode: .flatBVH
         )
 

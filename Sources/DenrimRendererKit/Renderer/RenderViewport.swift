@@ -90,6 +90,22 @@ public final class RenderViewport {
         resetTilePlan()
     }
 
+    /// Updates the camera without rebuilding the compiled scene/session.
+    ///
+    /// The viewport scene snapshot and the current session stay in sync, render targets and
+    /// acceleration buffers are preserved, and progressive accumulation restarts. When
+    /// `previousCamera` is omitted, the camera active before this update is used for motion
+    /// vectors.
+    public func updateCamera(
+        _ camera: Camera,
+        previousCamera: Camera? = nil
+    ) {
+        let oldCamera = scene.camera
+        scene.camera = camera
+        session.updateCamera(camera, previousCamera: previousCamera ?? oldCamera)
+        resetTilePlan()
+    }
+
     /// Adds a render field bundle to the scene and starts a fresh accumulation session.
     @discardableResult
     public func addField(
@@ -336,6 +352,18 @@ public final class RenderViewport {
         tileWidth: Int = 128,
         tileHeight: Int = 128
     ) throws -> RenderTileProgress {
+        if settings.quality != .final {
+            let tile = RenderTile(x: 0, y: 0, width: settings.width, height: settings.height)
+            try session.renderNextTile(tile, completesSample: true)
+            resetTilePlan()
+            return RenderTileProgress(
+                tile: tile,
+                tileIndex: 0,
+                tileCount: 1,
+                completedSample: true,
+                sampleCount: session.sampleCount
+            )
+        }
         let step = nextTileStep(tileWidth: tileWidth, tileHeight: tileHeight)
         try session.renderNextTile(step.tile, completesSample: step.completedSample)
         return RenderTileProgress(
@@ -354,6 +382,18 @@ public final class RenderViewport {
         tileHeight: Int = 128,
         into commandBuffer: MTLCommandBuffer
     ) throws -> RenderTileProgress {
+        if settings.quality != .final {
+            let tile = RenderTile(x: 0, y: 0, width: settings.width, height: settings.height)
+            try session.encodeNextTile(tile, completesSample: true, into: commandBuffer)
+            resetTilePlan()
+            return RenderTileProgress(
+                tile: tile,
+                tileIndex: 0,
+                tileCount: 1,
+                completedSample: true,
+                sampleCount: session.sampleCount
+            )
+        }
         let step = nextTileStep(tileWidth: tileWidth, tileHeight: tileHeight)
         try session.encodeNextTile(step.tile, completesSample: step.completedSample, into: commandBuffer)
         return RenderTileProgress(

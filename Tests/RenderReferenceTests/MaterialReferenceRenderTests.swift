@@ -12,7 +12,7 @@ final class MaterialReferenceRenderTests: XCTestCase {
         let renderer = try DenrimRenderer(device: device)
         let session = try renderer.makeSession(
             scene: .materialReference(),
-            settings: RenderSettings(width: 56, height: 56, maxBounces: 2)
+            settings: RenderSettings(width: 56, height: 56, maxBounces: 2, quality: .final)
         )
 
         let outputURL = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -37,7 +37,7 @@ final class MaterialReferenceRenderTests: XCTestCase {
         let renderer = try DenrimRenderer(device: device)
         let session = try renderer.makeSession(
             scene: .transparentMaterialReference(),
-            settings: RenderSettings(width: 48, height: 48, maxBounces: 2)
+            settings: RenderSettings(width: 48, height: 48, maxBounces: 2, quality: .final)
         )
 
         try session.renderNextSample()

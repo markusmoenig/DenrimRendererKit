@@ -302,20 +302,66 @@ static float programSplineTubeDistance(
     return bestDistance;
 }
 
-static GPUDistanceFieldBakeSample combineProgramSample(
-    GPUDistanceFieldBakeSample current,
+static GPUDistanceFieldProgramSample combineProgramSample(
+    GPUDistanceFieldProgramSample current,
     float candidateDistance,
     uint candidateMaterial,
+    float4 candidateAttributes0,
+    float4 candidateAttributes1,
     float smoothRadius,
     uint operation
 ) {
     if (operation == 1u) {
-        if (isfinite(current.distance)) {
-            current.distance = max(current.distance, -candidateDistance);
+        if (isfinite(current.field.distance)) {
+            current.field.distance = max(current.field.distance, -candidateDistance);
         }
         return current;
     }
-    return unionSample(current, candidateDistance, candidateMaterial, smoothRadius);
+
+    if (!isfinite(current.field.distance)) {
+        current.field.distance = candidateDistance;
+        current.field.materialA = candidateMaterial;
+        current.field.materialB = candidateMaterial;
+        current.field.blend = 0.0;
+        current.attributes0 = candidateAttributes0;
+        current.attributes1 = candidateAttributes1;
+        return current;
+    }
+
+    float radius = max(smoothRadius, 0.0);
+    if (radius <= 1.0e-6) {
+        if (candidateDistance < current.field.distance) {
+            current.field.distance = candidateDistance;
+            current.field.materialA = candidateMaterial;
+            current.field.materialB = candidateMaterial;
+            current.field.blend = 0.0;
+            current.attributes0 = candidateAttributes0;
+            current.attributes1 = candidateAttributes1;
+        }
+        return current;
+    }
+
+    float h = clamp(0.5 + 0.5 * (candidateDistance - current.field.distance) / radius, 0.0, 1.0);
+    float distance = mix(candidateDistance, current.field.distance, h) - radius * h * (1.0 - h);
+    float candidateWeight = 1.0 - h;
+    current.field.distance = distance;
+    if (candidateWeight <= 0.001) {
+        return current;
+    }
+    if (candidateWeight >= 0.999) {
+        current.field.materialA = candidateMaterial;
+        current.field.materialB = candidateMaterial;
+        current.field.blend = 0.0;
+        current.attributes0 = candidateAttributes0;
+        current.attributes1 = candidateAttributes1;
+        return current;
+    }
+
+    current.field.materialB = candidateMaterial;
+    current.field.blend = candidateWeight;
+    current.attributes0 = mix(current.attributes0, candidateAttributes0, candidateWeight);
+    current.attributes1 = mix(current.attributes1, candidateAttributes1, candidateWeight);
+    return current;
 }
 
 static GPUDistanceFieldProgramSample sampleProgramField(
@@ -331,6 +377,8 @@ static GPUDistanceFieldProgramSample sampleProgramField(
     result.field.blend = 0.0;
     result.attributes0 = float4(0.0);
     result.attributes1 = float4(0.0);
+    float4 currentAttributes0 = float4(0.0);
+    float4 currentAttributes1 = float4(0.0);
 
     float4x4 programToLocal = float4x4(
         float4(1.0, 0.0, 0.0, 0.0),
@@ -373,19 +421,43 @@ static GPUDistanceFieldProgramSample sampleProgramField(
         case 10: {
             float3 local = programLocalPosition(position, programToLocal, twistYStrength);
             float distance = programSphereDistance(local, operation.p0.x) * distanceScale;
-            result.field = combineProgramSample(result.field, distance, operation.metadata.z, operation.p0.y, operation.metadata.y);
+            result = combineProgramSample(
+                result,
+                distance,
+                operation.metadata.z,
+                float4(0.0),
+                float4(0.0),
+                operation.p0.y,
+                operation.metadata.y
+            );
             break;
         }
         case 11: {
             float3 local = programLocalPosition(position, programToLocal, twistYStrength);
             float distance = programBoxDistance(local, operation.p0.xyz, operation.p0.w) * distanceScale;
-            result.field = combineProgramSample(result.field, distance, operation.metadata.z, operation.p1.x, operation.metadata.y);
+            result = combineProgramSample(
+                result,
+                distance,
+                operation.metadata.z,
+                float4(0.0),
+                float4(0.0),
+                operation.p1.x,
+                operation.metadata.y
+            );
             break;
         }
         case 12: {
             float3 local = programLocalPosition(position, programToLocal, twistYStrength);
             float distance = programCylinderDistance(local, operation.p0.x, operation.p0.y) * distanceScale;
-            result.field = combineProgramSample(result.field, distance, operation.metadata.z, operation.p0.z, operation.metadata.y);
+            result = combineProgramSample(
+                result,
+                distance,
+                operation.metadata.z,
+                float4(0.0),
+                float4(0.0),
+                operation.p0.z,
+                operation.metadata.y
+            );
             break;
         }
         case 100: {
@@ -543,10 +615,29 @@ static GPUDistanceFieldProgramSample sampleProgramField(
             break;
         }
         case 150: {
-            result.field = combineProgramSample(
-                result.field,
+            float4 candidateAttributes0 = currentAttributes0;
+            float4 candidateAttributes1 = currentAttributes1;
+            uint attributeCount = min(uint(operation.p0.y), 8u);
+            for (uint attributeIndex = 0u; attributeIndex < attributeCount; ++attributeIndex) {
+                uint channel = attributeIndex < 4u
+                    ? operation.indices[attributeIndex]
+                    : uint(operation.p2[attributeIndex - 4u]);
+                uint registerIndex = attributeIndex < 4u
+                    ? uint(operation.p1[attributeIndex])
+                    : uint(operation.p3[attributeIndex - 4u]);
+                float value = scalarRegisters[registerIndex & 31u];
+                if (channel < 4u) {
+                    candidateAttributes0[channel] = value;
+                } else if (channel < 8u) {
+                    candidateAttributes1[channel - 4u] = value;
+                }
+            }
+            result = combineProgramSample(
+                result,
                 scalarRegisters[operation.metadata.y & 31u],
                 operation.metadata.z,
+                candidateAttributes0,
+                candidateAttributes1,
                 operation.p0.x,
                 operation.metadata.w
             );
@@ -556,9 +647,9 @@ static GPUDistanceFieldProgramSample sampleProgramField(
             uint channel = operation.metadata.y;
             float value = scalarRegisters[operation.metadata.z & 31u];
             if (channel < 4u) {
-                result.attributes0[channel] = value;
+                currentAttributes0[channel] = value;
             } else if (channel < 8u) {
-                result.attributes1[channel - 4u] = value;
+                currentAttributes1[channel - 4u] = value;
             }
             break;
         }

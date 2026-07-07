@@ -1837,10 +1837,30 @@ public final class DistanceFieldBaker: @unchecked Sendable {
                 indices: SIMD4<UInt32>(control1.rawValue, control2.rawValue, control3.rawValue, startRadius.rawValue),
                 p0: SIMD4<Float>(Float(endRadius.rawValue), 0, 0, 0)
             )
-        case .emit(let distance, let material, let smoothUnionRadius, let combineOperation):
+        case .emit(let distance, let material, let smoothUnionRadius, let combineOperation, let attributes):
+            let clampedAttributes = Array(attributes.prefix(DistanceVolumeAttributeLayout.maximumChannelCount))
+            var channels0 = SIMD4<UInt32>(repeating: UInt32.max)
+            var registers0 = SIMD4<Float>(repeating: 0)
+            var channels1 = SIMD4<Float>(repeating: Float(UInt32.max))
+            var registers1 = SIMD4<Float>(repeating: 0)
+            for (index, attribute) in clampedAttributes.enumerated() {
+                let channel = UInt32(max(attribute.channel, 0))
+                let register = Float(attribute.value.rawValue)
+                if index < 4 {
+                    channels0[index] = channel
+                    registers0[index] = register
+                } else {
+                    channels1[index - 4] = Float(channel)
+                    registers1[index - 4] = register
+                }
+            }
             return GPUDistanceFieldProgramOperation(
                 metadata: SIMD4<UInt32>(150, distance.rawValue, material.rawValue, operationID(for: combineOperation)),
-                p0: SIMD4<Float>(smoothUnionRadius, 0, 0, 0)
+                indices: channels0,
+                p0: SIMD4<Float>(smoothUnionRadius, Float(clampedAttributes.count), 0, 0),
+                p1: registers0,
+                p2: channels1,
+                p3: registers1
             )
         case .writeAttribute(let channel, let value):
             return GPUDistanceFieldProgramOperation(

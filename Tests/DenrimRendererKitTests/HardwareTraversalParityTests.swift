@@ -14,7 +14,7 @@ final class HardwareTraversalParityTests: XCTestCase {
 
         let renderer = try DenrimRenderer(device: device)
         let scene = parityScene()
-        let settings = RenderSettings(width: 16, height: 16, maxBounces: 1)
+        let settings = RenderSettings(width: 16, height: 16, maxBounces: 1, quality: .final)
 
         let flatSession = try renderer.makeSession(
             scene: scene,
@@ -64,7 +64,7 @@ final class HardwareTraversalParityTests: XCTestCase {
         ]
 
         for testCase in cases {
-            let settings = RenderSettings(width: 24, height: 24, maxBounces: 1)
+            let settings = RenderSettings(width: 24, height: 24, maxBounces: 1, quality: .final)
             let flatSession = try renderer.makeSession(
                 scene: testCase.scene,
                 settings: settings,

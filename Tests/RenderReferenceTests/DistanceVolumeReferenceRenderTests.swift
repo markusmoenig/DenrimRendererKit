@@ -12,7 +12,7 @@ final class DistanceVolumeReferenceRenderTests: XCTestCase {
         let renderer = try DenrimRenderer(device: device)
         let session = try renderer.makeSession(
             scene: .distanceVolumeReference(),
-            settings: RenderSettings(width: 56, height: 56, maxBounces: 3)
+            settings: RenderSettings(width: 56, height: 56, maxBounces: 3, quality: .final)
         )
 
         let outputURL = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -37,7 +37,7 @@ final class DistanceVolumeReferenceRenderTests: XCTestCase {
         let renderer = try DenrimRenderer(device: device)
         let session = try renderer.makeSession(
             scene: .distanceVolumeReference(),
-            settings: RenderSettings(width: 48, height: 48, maxBounces: 3)
+            settings: RenderSettings(width: 48, height: 48, maxBounces: 3, quality: .final)
         )
 
         try session.renderNextSample()

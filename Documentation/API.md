@@ -197,7 +197,7 @@ let result = try baker.bake(DistanceFieldBakeRequest(
 ))
 ```
 
-The instruction VM currently includes scalar/vector constants, arithmetic, min/max/abs, sin/cos, clamp/mix, vector compose/extract, length, box/cylinder/tapered-capsule/spline-tube distance intrinsics, field `emit` with union/subtract plus smooth-union material blending, and `writeAttribute(channel:value:)` for compact semantic fields such as growth age, wetness, moss amount, cavity, and similar Form data. Twist, bends, masks, and growth-style controls should be compiled from those generic instructions where possible. RendererKit should only grow new VM intrinsics when the math vocabulary itself is missing.
+The instruction VM currently includes scalar/vector constants, arithmetic, min/max/abs, sin/cos, clamp/mix, vector compose/extract, length, box/cylinder/tapered-capsule/spline-tube distance intrinsics, field `emit` with union/subtract plus smooth-union material blending, and candidate-scoped compact semantic fields such as growth age, wetness, moss amount, cavity, and similar Form data. `writeAttribute(channel:value:)` updates the current candidate attribute registers; `emit` snapshots those registers into the emitted candidate, and `emit(... attributes:)` can attach explicit per-candidate attribute register bindings. The winning SDF candidate carries its own attributes, and smooth unions blend attributes using the same candidate weight as the material blend. Twist, bends, masks, and growth-style controls should be compiled from those generic instructions where possible. RendererKit should only grow new VM intrinsics when the math vocabulary itself is missing.
 
 For organic growth, `splineTubeDistance` is the preferred branch/stem primitive for one cubic Bezier tube segment with tapered endpoints. `taperedCapsuleDistance` remains useful for simple straight sections and as the lower-level segment primitive. Form can chain spline tube segments for longer branches while keeping the editable curve data in Form:
 
@@ -244,9 +244,22 @@ let program = DistanceFieldProgram(
 )
 ```
 
+Generated programs can also keep candidate attributes directly on the emit:
+
+```swift
+.emit(
+    distance: .init(2),
+    material: materialID,
+    smoothUnionRadius: 0.12,
+    attributes: [
+        DistanceFieldProgramAttributeBinding(channel: 0, value: .init(3))
+    ]
+)
+```
+
 `program.optimized()` applies conservative constant folding. The baker runs the same optimizer before CPU/reference program baking and GPU instruction packing.
 
-The program path has a CPU/reference baker for dense and sparse validation fields, including sparse `sampleScale` payloads and compact attribute writes. It can also bake directly into GPU-resident sparse fields when using `GPUResidentSparseMetadataMode.directGridGPU`, including resident compact attribute sample buffers for `writeAttribute` instructions. That is the intended live-edit path for Form-style operator graphs. Existing `SDFModel` primitive graphs remain supported; compacted GPU-resident metadata for `DistanceFieldProgram` is not implemented yet.
+The program path has a CPU/reference baker for dense and sparse validation fields, including sparse `sampleScale` payloads and candidate-scoped compact attributes. It can also bake directly into GPU-resident sparse fields when using `GPUResidentSparseMetadataMode.directGridGPU`, including resident compact attribute sample buffers for program attributes. That is the intended live-edit path for Form-style operator graphs. Existing `SDFModel` primitive graphs remain supported; compacted GPU-resident metadata for `DistanceFieldProgram` is not implemented yet.
 
 For live editors that can use RendererKit's Metal baker, `bakeGPUResident(_:)` avoids reading the baked sparse sample payload back to the CPU. RendererKit still keeps compact CPU brick metadata for bounds/grid setup, but the large `PackedDistanceVolumeSample` brick payload remains in an `MTLBuffer` and is bound directly by the render session:
 
@@ -381,6 +394,22 @@ try viewport.renderNextSample()
 
 `replaceField` is transactional: if the handle is invalid it returns `false`, and if rebuilding the session throws, the previous scene/session remain active. For app-owned Metal frame loops, call `viewport.encodeNextSample(into:)` and then sample `viewport.liveMetalTexture(for:)`.
 
+Camera-only interaction does not need a scene or field rebuild. `RenderViewport.updateCamera(_:)` updates the viewport scene snapshot and the current compiled `RenderSession` in place, preserves geometry/material/light buffers and render targets, resets accumulation, and clears the tile cursor. When no explicit previous camera is supplied, RendererKit uses the camera active before the update for motion-vector output:
+
+```swift
+viewport.updateCamera(Camera(
+    origin: orbitCameraOrigin,
+    target: orbitCameraTarget,
+    up: cameraUp,
+    verticalFieldOfViewDegrees: 45,
+    projection: .perspective
+))
+
+try viewport.encodeNextTile(tileWidth: 128, tileHeight: 128, into: commandBuffer)
+```
+
+Lower-level integrations that manage `RenderSession` directly can call `session.updateCamera(_:)` with the same semantics.
+
 For UI-constrained editors, `RenderViewport` can accumulate one spiral-ordered tile per call instead of rendering a whole frame. The first tile starts near the center of the image, then tiles expand outward. `sampleCount` advances only after the final tile in the sweep, so every tile in that sweep uses the same accumulation weight:
 
 ```swift
@@ -396,7 +425,7 @@ if progress.completedSample {
 }
 ```
 
-This is intended for Form-style viewports where the app wants to spend a small bounded amount of GPU work per display refresh, for example one 128x128 tile at 60 Hz. Full-frame `renderNextSample()` / `encodeNextSample(into:)` remain available and reset the tile cursor.
+This is intended for Form-style path-traced viewports where the app wants to spend a small bounded amount of GPU work per display refresh, for example one 128x128 tile at 60 Hz. Full-frame `renderNextSample()` / `encodeNextSample(into:)` remain available and reset the tile cursor. `.preview` and `.interactive` are single-pass renderers, so tile calls render the full frame immediately and return `tileCount == 1`; `.final` keeps the spiral tile sweep behavior.
 
 For same-topology GPU-resident edits, Form can update dirty brick payloads without readback and without rebuilding the render session. Encode the bake kernels that write changed brick samples, then encode the RendererKit copy into the field resource, then continue rendering. `RenderViewport` preserves the current session and resets progressive accumulation:
 
@@ -583,6 +612,39 @@ scene.camera = Camera(
 
 For viewport integrations, build `origin`, `target`, and `up` from the application's actual camera basis rather than reconstructing yaw and pitch through a different convention. `CameraProjection.orthographic(verticalScale:)` maps to the same vertical scale convention used by Forge's old render viewport: horizontal scale is derived from render width divided by render height.
 
+`RenderScene.worldBounds()` returns combined world-space bounds for mesh instances, dense SDF volumes, sparse SDF volumes, and GPU-resident sparse fields. Use it with `Camera.framing` to implement Form-style frame-all / frame-selection behavior without rebuilding render fields:
+
+```swift
+if let bounds = scene.worldBounds() {
+    let camera = Camera.framing(
+        bounds,
+        viewDirection: currentOrbitDirection,
+        up: SIMD3<Float>(0, 1, 0),
+        aspectRatio: Float(viewWidth) / Float(viewHeight),
+        padding: 1.18,
+        centerOffset: SIMD2<Float>(0.08, -0.04),
+        projection: .perspective(verticalFieldOfViewDegrees: 42)
+    )
+    viewport.updateCamera(camera)
+}
+```
+
+`centerOffset` is measured in fitted-frame units on the camera plane. Positive X moves the framed object center to the right of the image; positive Y moves it up. `targetOffset` is a world-space offset for hosts that want an explicit authored framing pivot.
+
+Depth of field is represented by `CameraLens`. `apertureRadius == 0` is pinhole rendering. For concept/look renders, either set a focus distance directly or derive it from a focus point:
+
+```swift
+let focused = viewport.scene.camera.focused(
+    on: selectedObjectCenter,
+    apertureRadius: 0.035
+)
+viewport.updateCamera(focused)
+```
+
+The path-traced renderers use the thin-lens model for beauty rays. `.preview` keeps camera rays deterministic and currently ignores aperture so editing remains crisp and cheap.
+
+Use `RenderViewport.updateCamera(_:)` for orbit, pan, zoom, FOV, and perspective/orthographic changes in an active viewport. That path only repacks the GPU camera arguments and resets accumulation; it does not rebuild SDF fields, triangle acceleration, material buffers, or render targets.
+
 ## Materials and Textures
 
 `SemanticMaterial` is the preferred authored material source. It stores an archetype, editable style colors, and compact semantic attributes:
@@ -763,7 +825,7 @@ let session = try renderer.makeSession(
 )
 ```
 
-`RenderSettings.quality` communicates preview, interactive, or final-render intent to renderer integrations. Today it provides the default for `sampleRadianceClamp`; command-line tools also use it to choose a default path depth when `--max-bounces` is omitted. `RenderSettings.sampleRadianceClamp` limits the peak RGB value of a single Monte Carlo sample contribution before progressive accumulation. It is a biased but useful firefly control for glossy metals, clearcoat, glass, small bright emitters, and HDR environments. Leave it as `nil` to inherit the quality default (`preview` is stricter, `final` is gentler), set a positive value for reproducible review renders, or set `0` to disable contribution clamping when validating physically unbounded energy.
+`RenderSettings.quality` communicates preview, interactive, or final-render intent to renderer integrations. `.preview` selects a backend-independent flat single-hit renderer that resolves the same mesh/SDF/volume intersections, material IDs, semantic attributes, texture base color, and AOVs without path-tracing bounces. `.interactive` selects a backend-independent realtime material-preview renderer: it resolves the same primary hits and material payloads, then approximates the path tracer with deterministic direct area-light shading, transparent shadows, environment fill/reflections, simple transmission, and SSS-style material cheats. `.final` remains the progressive path-traced reference integrator. Command-line tools also use quality to choose a default path depth when `--max-bounces` is omitted. `RenderSettings.sampleRadianceClamp` limits the peak RGB value of a single Monte Carlo sample contribution before progressive accumulation. It is a biased but useful firefly control for glossy metals, clearcoat, glass, small bright emitters, and HDR environments. Leave it as `nil` to inherit the quality default (`preview` is stricter, `final` is gentler), set a positive value for reproducible review renders, or set `0` to disable contribution clamping when validating physically unbounded energy.
 
 ```swift
 let cleanPreview = RenderSettings(

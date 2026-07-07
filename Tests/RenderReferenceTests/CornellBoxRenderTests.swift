@@ -11,7 +11,7 @@ final class CornellBoxRenderTests: XCTestCase {
         let renderer = try DenrimRenderer(device: device)
         let session = try renderer.makeSession(
             scene: .cornellBox(),
-            settings: RenderSettings(width: 48, height: 48, maxBounces: 2)
+            settings: RenderSettings(width: 48, height: 48, maxBounces: 2, quality: .final)
         )
 
         let outputURL = URL(fileURLWithPath: NSTemporaryDirectory())

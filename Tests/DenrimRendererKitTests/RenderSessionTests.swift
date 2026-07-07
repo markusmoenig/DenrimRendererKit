@@ -12,7 +12,7 @@ final class RenderSessionTests: XCTestCase {
         let renderer = try DenrimRenderer(device: device)
         let session = try renderer.makeSession(
             scene: .cornellBox(),
-            settings: RenderSettings(width: 16, height: 16, maxBounces: 1)
+            settings: RenderSettings(width: 16, height: 16, maxBounces: 1, quality: .final)
         )
 
         XCTAssertEqual(session.metalRayTracingDebugInfo.supportsRayTracing, device.supportsRaytracing)
@@ -68,7 +68,7 @@ final class RenderSessionTests: XCTestCase {
         let renderer = try DenrimRenderer(device: device)
         let viewport = try renderer.makeViewport(
             scene: .cornellBox(),
-            settings: RenderSettings(width: 48, height: 48, maxBounces: 1)
+            settings: RenderSettings(width: 48, height: 48, maxBounces: 1, quality: .final)
         )
 
         let first = try viewport.renderNextTile(tileWidth: 16, tileHeight: 16)
@@ -89,6 +89,46 @@ final class RenderSessionTests: XCTestCase {
         let next = try viewport.renderNextTile(tileWidth: 16, tileHeight: 16)
         XCTAssertEqual(next.tileIndex, 0)
         XCTAssertEqual(next.tile, RenderTile(x: 16, y: 16, width: 16, height: 16))
+        XCTAssertEqual(viewport.sampleCount, 1)
+    }
+
+    func testPreviewViewportTileCallRendersFullFrame() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer(device: device)
+        let viewport = try renderer.makeViewport(
+            scene: .cornellBox(),
+            settings: RenderSettings(width: 48, height: 40, maxBounces: 1, quality: .preview)
+        )
+
+        let progress = try viewport.renderNextTile(tileWidth: 16, tileHeight: 16)
+
+        XCTAssertEqual(progress.tile, RenderTile(x: 0, y: 0, width: 48, height: 40))
+        XCTAssertEqual(progress.tileIndex, 0)
+        XCTAssertEqual(progress.tileCount, 1)
+        XCTAssertTrue(progress.completedSample)
+        XCTAssertEqual(viewport.sampleCount, 1)
+    }
+
+    func testInteractiveViewportTileCallRendersFullFrame() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer(device: device)
+        let viewport = try renderer.makeViewport(
+            scene: .cornellBox(),
+            settings: RenderSettings(width: 48, height: 40, maxBounces: 1, quality: .interactive)
+        )
+
+        let progress = try viewport.renderNextTile(tileWidth: 16, tileHeight: 16)
+
+        XCTAssertEqual(progress.tile, RenderTile(x: 0, y: 0, width: 48, height: 40))
+        XCTAssertEqual(progress.tileIndex, 0)
+        XCTAssertEqual(progress.tileCount, 1)
+        XCTAssertTrue(progress.completedSample)
         XCTAssertEqual(viewport.sampleCount, 1)
     }
 
@@ -202,6 +242,51 @@ final class RenderSessionTests: XCTestCase {
         XCTAssertFalse(viewport.session === previousSession)
         XCTAssertEqual(viewport.sampleCount, 0)
         XCTAssertEqual(viewport.scene.volumeInstances[0].volume.dimensions, SIMD3<Int>(14, 14, 14))
+
+        try viewport.renderNextSample()
+        XCTAssertEqual(viewport.sampleCount, 1)
+    }
+
+    func testRenderViewportUpdatesCameraWithoutRebuildingSession() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        var scene = RenderScene(
+            camera: Camera(
+                origin: SIMD3<Float>(0, 0, 3),
+                target: SIMD3<Float>(0, 0, 0),
+                projection: .orthographic(verticalScale: 2.4)
+            )
+        )
+        let material = scene.addMaterial(SemanticMaterial.moss())
+        scene.add(fieldBundle: RenderFieldBundle(
+            dense: DistanceVolume.sphere(resolution: 12, radius: 0.5),
+            fallbackMaterial: material
+        ))
+        let renderer = try DenrimRenderer(device: device)
+        let viewport = try renderer.makeViewport(
+            scene: scene,
+            settings: RenderSettings(width: 16, height: 16, maxBounces: 1),
+            accelerationMode: .flatBVH
+        )
+
+        try viewport.renderNextSample()
+        let currentSession = viewport.session
+        let updatedCamera = Camera(
+            origin: SIMD3<Float>(0.25, 0.1, 3),
+            target: SIMD3<Float>(0.25, 0.1, 0),
+            projection: .orthographic(verticalScale: 1.8)
+        )
+
+        viewport.updateCamera(updatedCamera)
+
+        XCTAssertTrue(viewport.session === currentSession)
+        XCTAssertEqual(viewport.sampleCount, 0)
+        XCTAssertEqual(viewport.scene.camera.origin, updatedCamera.origin)
+        XCTAssertEqual(viewport.scene.camera.target, updatedCamera.target)
+        XCTAssertEqual(viewport.session.camera.origin, updatedCamera.origin)
+        XCTAssertEqual(viewport.session.previousCamera.origin, scene.camera.origin)
 
         try viewport.renderNextSample()
         XCTAssertEqual(viewport.sampleCount, 1)
@@ -729,7 +814,7 @@ final class RenderSessionTests: XCTestCase {
         let low = try renderSparseBrickQualityProbe(
             renderer: renderer,
             resolution: 28,
-            quality: .interactive,
+            quality: .final,
             sampleScale: 2
         )
         let reference = try renderSparseBrickQualityProbe(

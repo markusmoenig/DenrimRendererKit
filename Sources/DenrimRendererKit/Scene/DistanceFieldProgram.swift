@@ -79,6 +79,17 @@ public struct DistanceFieldVectorRegister: RawRepresentable, Sendable, Equatable
     }
 }
 
+/// Scalar attribute value attached to one emitted SDF candidate.
+public struct DistanceFieldProgramAttributeBinding: Sendable, Equatable {
+    public var channel: Int
+    public var value: DistanceFieldScalarRegister
+
+    public init(channel: Int, value: DistanceFieldScalarRegister) {
+        self.channel = channel
+        self.value = value
+    }
+}
+
 /// Generic instruction for `DistanceFieldProgram`.
 ///
 /// This is a small renderer-owned VM, not raw Metal source. It is intended to be
@@ -135,7 +146,13 @@ public enum DistanceFieldProgramInstruction: Sendable, Equatable {
         endRadius: DistanceFieldScalarRegister
     )
 
-    case emit(distance: DistanceFieldScalarRegister, material: MaterialID, smoothUnionRadius: Float = 0, operation: SDFPrimitiveOperation = .union)
+    case emit(
+        distance: DistanceFieldScalarRegister,
+        material: MaterialID,
+        smoothUnionRadius: Float = 0,
+        operation: SDFPrimitiveOperation = .union,
+        attributes: [DistanceFieldProgramAttributeBinding] = []
+    )
     case writeAttribute(channel: Int, value: DistanceFieldScalarRegister)
 }
 
@@ -539,7 +556,7 @@ enum DistanceFieldProgramEvaluator {
 
     static func defaultMaterial(for program: DistanceFieldProgram) -> MaterialID? {
         for instruction in program.instructions {
-            if case .emit(_, let material, _, _) = instruction {
+            if case .emit(_, let material, _, _, _) = instruction {
                 return material
             }
         }
@@ -592,7 +609,7 @@ enum DistanceFieldProgramEvaluator {
             case .sphere(let radius, let material, let smoothUnionRadius, let combineOperation):
                 let local = state.localPosition(for: position)
                 let distance = (simd_length(local) - radius) * state.distanceScale
-                field = combine(field, distance: distance, material: material, smoothUnionRadius: smoothUnionRadius, operation: combineOperation)
+                field = combine(field, distance: distance, material: material, attributes: [:], smoothUnionRadius: smoothUnionRadius, operation: combineOperation)
             case .box(let halfExtents, let cornerRadius, let material, let smoothUnionRadius, let combineOperation):
                 let local = state.localPosition(for: position)
                 let q = simd_abs(local) - halfExtents
@@ -601,7 +618,7 @@ enum DistanceFieldProgramEvaluator {
                         + min(max(q.x, max(q.y, q.z)), 0)
                         - max(cornerRadius, 0)
                 ) * state.distanceScale
-                field = combine(field, distance: distance, material: material, smoothUnionRadius: smoothUnionRadius, operation: combineOperation)
+                field = combine(field, distance: distance, material: material, attributes: [:], smoothUnionRadius: smoothUnionRadius, operation: combineOperation)
             case .cylinder(let radius, let halfHeight, let material, let smoothUnionRadius, let combineOperation):
                 let local = state.localPosition(for: position)
                 let d = SIMD2<Float>(
@@ -612,7 +629,7 @@ enum DistanceFieldProgramEvaluator {
                     min(max(d.x, d.y), 0)
                         + simd_length(simd_max(d, SIMD2<Float>(repeating: 0)))
                 ) * state.distanceScale
-                field = combine(field, distance: distance, material: material, smoothUnionRadius: smoothUnionRadius, operation: combineOperation)
+                field = combine(field, distance: distance, material: material, attributes: [:], smoothUnionRadius: smoothUnionRadius, operation: combineOperation)
             }
         }
 
@@ -633,6 +650,7 @@ enum DistanceFieldProgramEvaluator {
             blend: 0,
             attributes: [:]
         )
+        var currentAttributes: [Int: Float] = [:]
 
         func s(_ register: DistanceFieldScalarRegister) -> Int {
             Int(register.rawValue % UInt32(registerCount))
@@ -733,17 +751,22 @@ enum DistanceFieldProgramEvaluator {
                     startRadius: scalars[s(startRadius)],
                     endRadius: scalars[s(endRadius)]
                 )
-            case .emit(let distance, let material, let smoothUnionRadius, let operation):
+            case .emit(let distance, let material, let smoothUnionRadius, let operation, let attributes):
+                var candidateAttributes = currentAttributes
+                for attribute in attributes where attribute.channel >= 0 && attribute.channel < DistanceVolumeAttributeLayout.maximumChannelCount {
+                    candidateAttributes[attribute.channel] = scalars[s(attribute.value)]
+                }
                 field = combine(
                     field,
                     distance: scalars[s(distance)],
                     material: material,
+                    attributes: candidateAttributes,
                     smoothUnionRadius: smoothUnionRadius,
                     operation: operation
                 )
             case .writeAttribute(let channel, let value):
                 if channel >= 0 && channel < DistanceVolumeAttributeLayout.maximumChannelCount {
-                    field.attributes[channel] = scalars[s(value)]
+                    currentAttributes[channel] = scalars[s(value)]
                 }
             }
         }
@@ -755,6 +778,7 @@ enum DistanceFieldProgramEvaluator {
         _ current: DistanceFieldProgramSample,
         distance candidateDistance: Float,
         material candidateMaterial: MaterialID,
+        attributes candidateAttributes: [Int: Float],
         smoothUnionRadius: Float,
         operation: SDFPrimitiveOperation
     ) -> DistanceFieldProgramSample {
@@ -767,7 +791,13 @@ enum DistanceFieldProgramEvaluator {
             result.distance = max(current.distance, -candidateDistance)
             return result
         case .union:
-            return union(current, distance: candidateDistance, material: candidateMaterial, smoothUnionRadius: smoothUnionRadius)
+            return union(
+                current,
+                distance: candidateDistance,
+                material: candidateMaterial,
+                attributes: candidateAttributes,
+                smoothUnionRadius: smoothUnionRadius
+            )
         }
     }
 
@@ -775,6 +805,7 @@ enum DistanceFieldProgramEvaluator {
         _ current: DistanceFieldProgramSample,
         distance candidateDistance: Float,
         material candidateMaterial: MaterialID,
+        attributes candidateAttributes: [Int: Float],
         smoothUnionRadius: Float
     ) -> DistanceFieldProgramSample {
         guard current.distance.isFinite else {
@@ -783,7 +814,7 @@ enum DistanceFieldProgramEvaluator {
                 material: candidateMaterial,
                 secondaryMaterial: candidateMaterial,
                 blend: 0,
-                attributes: current.attributes
+                attributes: candidateAttributes
             )
         }
 
@@ -795,7 +826,7 @@ enum DistanceFieldProgramEvaluator {
                     material: candidateMaterial,
                     secondaryMaterial: candidateMaterial,
                     blend: 0,
-                    attributes: current.attributes
+                    attributes: candidateAttributes
                 )
             }
             return current
@@ -815,15 +846,23 @@ enum DistanceFieldProgramEvaluator {
                 material: candidateMaterial,
                 secondaryMaterial: candidateMaterial,
                 blend: 0,
-                attributes: current.attributes
+                attributes: candidateAttributes
             )
+        }
+        var blendedAttributes = current.attributes
+        for (channel, candidateValue) in candidateAttributes {
+            if let currentValue = current.attributes[channel] {
+                blendedAttributes[channel] = currentValue + (candidateValue - currentValue) * candidateWeight
+            } else {
+                blendedAttributes[channel] = candidateValue
+            }
         }
         return DistanceFieldProgramSample(
             distance: distance,
             material: current.material,
             secondaryMaterial: candidateMaterial,
             blend: candidateWeight,
-            attributes: current.attributes
+            attributes: blendedAttributes
         )
     }
 

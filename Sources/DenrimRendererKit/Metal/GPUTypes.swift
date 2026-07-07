@@ -6,6 +6,7 @@ struct GPUCamera {
     var lowerLeft: SIMD4<Float>
     var horizontal: SIMD4<Float>
     var vertical: SIMD4<Float>
+    var lens: SIMD4<Float>
 }
 
 struct GPUTriangle {

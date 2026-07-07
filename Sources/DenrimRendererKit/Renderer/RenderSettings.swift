@@ -3,13 +3,13 @@ import simd
 
 /// Preset quality intent for render sessions.
 public enum RenderQuality: Sendable {
-    /// Fast progressive rendering for editing and thumbnails.
+    /// Fast flat/material preview for editing and thumbnails.
     case preview
 
-    /// Higher quality progressive rendering for viewport work.
+    /// Realtime material-preview rendering for viewport work.
     case interactive
 
-    /// Maximum quality rendering for exports.
+    /// Maximum quality path-traced rendering for exports.
     case final
 
     /// Default per-sample radiance clamp used to reduce isolated glossy fireflies.
@@ -37,6 +37,10 @@ public struct RenderSettings: Sendable {
     public var maxBounces: Int
 
     /// Quality intent used by the renderer.
+    ///
+    /// `.preview` selects the fastest flat single-hit renderer, `.interactive`
+    /// selects the realtime material-preview renderer, and `.final` selects the
+    /// progressive path tracer.
     public var quality: RenderQuality
 
     /// Previous frame camera used for motion vector output.

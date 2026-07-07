@@ -8,6 +8,7 @@ struct GPUCamera {
     float4 lowerLeft;
     float4 horizontal;
     float4 vertical;
+    float4 lens;
 };
 
 struct GPUTriangle {
@@ -296,6 +297,12 @@ static float3 cosineHemisphere(float2 u) {
     float r = sqrt(u.x);
     float phi = 6.28318530718f * u.y;
     return float3(r * cos(phi), r * sin(phi), sqrt(max(0.0f, 1.0f - u.x)));
+}
+
+static float2 uniformDisk(float2 u) {
+    float r = sqrt(u.x);
+    float phi = 6.28318530718f * u.y;
+    return float2(r * cos(phi), r * sin(phi));
 }
 
 static float3 uniformSphere(float2 u) {
@@ -3568,7 +3575,16 @@ static Hit applyNormalMap(
     return hit;
 }
 
-static Ray makeCameraRay(GPUCamera camera, uint width, uint height, uint2 gid, float jitterX, float jitterY) {
+static Ray makeCameraRay(
+    GPUCamera camera,
+    uint width,
+    uint height,
+    uint2 gid,
+    float jitterX,
+    float jitterY,
+    float lensX,
+    float lensY
+) {
     float u = ((float)gid.x + jitterX) / (float)width;
     float v = 1.0f - (((float)gid.y + jitterY) / (float)height);
 
@@ -3580,6 +3596,18 @@ static Ray makeCameraRay(GPUCamera camera, uint width, uint height, uint2 gid, f
     } else {
         ray.origin = camera.origin.xyz;
         ray.direction = normalize(planePoint - ray.origin);
+    }
+    float apertureRadius = max(camera.lens.x, 0.0f);
+    if (camera.origin.w <= 0.5f && apertureRadius > 0.0f) {
+        float3 forward = normalize(cross(camera.vertical.xyz, camera.horizontal.xyz));
+        float focusDistance = max(camera.lens.y, 0.0001f);
+        float focalT = focusDistance / max(dot(ray.direction, forward), 0.0001f);
+        float3 focalPoint = ray.origin + ray.direction * focalT;
+        float2 disk = uniformDisk(float2(lensX, lensY)) * apertureRadius;
+        float3 right = normalize(camera.horizontal.xyz);
+        float3 trueUp = normalize(camera.vertical.xyz);
+        ray.origin += right * disk.x + trueUp * disk.y;
+        ray.direction = normalize(focalPoint - ray.origin);
     }
     return ray;
 }
@@ -4140,6 +4168,368 @@ static float3 sampleDirectLightingHardware(
     return direct;
 }
 
+kernel void flatPreviewKernel(
+    texture2d<float, access::read_write> accumulation [[texture(0)]],
+    texture2d<float, access::write> depthOutput [[texture(1)]],
+    texture2d<float, access::write> normalOutput [[texture(2)]],
+    texture2d<float, access::write> albedoOutput [[texture(3)]],
+    texture2d<float, access::write> materialIDOutput [[texture(4)]],
+    texture2d<float, access::write> objectIDOutput [[texture(5)]],
+    texture2d<float, access::write> motionVectorOutput [[texture(6)]],
+    constant GPURenderConstants &constants [[buffer(0)]],
+    constant GPUCamera &camera [[buffer(1)]],
+    constant GPUTriangle *triangles [[buffer(2)]],
+    constant GPUMaterial *materials [[buffer(3)]],
+    constant GPUAccelerationNode *nodes [[buffer(4)]],
+    constant uint *primitiveIndices [[buffer(5)]],
+    constant GPUCamera &previousCamera [[buffer(6)]],
+    constant GPUTextureDescriptor *textureDescriptors [[buffer(10)]],
+    constant float4 *texturePixels [[buffer(11)]],
+    constant GPULightRecord *lights [[buffer(12)]],
+    constant GPUEnvironmentSample *environmentSamples [[buffer(13)]],
+    constant GPUVolumeDescriptor *volumes [[buffer(14)]],
+    constant GPUVolumeSample *volumeSamples [[buffer(15)]],
+    constant GPUVolumeBrickDescriptor *volumeBricks [[buffer(16)]],
+    constant GPUVolumeBrickSample *volumeBrickSamples [[buffer(17)]],
+    constant GPUMaterialSemanticDescriptor *materialSemantics [[buffer(18)]],
+    constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors [[buffer(19)]],
+    constant float4 *volumeAttributeSamples [[buffer(20)]],
+    constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors [[buffer(21)]],
+    constant float4 *volumeBrickAttributeSamples [[buffer(22)]],
+    constant GPUAccelerationNode *volumeBrickBVHNodes [[buffer(23)]],
+    constant uint *volumeBrickBVHIndices [[buffer(24)]],
+    constant GPUVolumeBrickGrid *volumeBrickGrids [[buffer(25)]],
+    constant uint *volumeBrickGridIndices [[buffer(26)]],
+    constant GPUVolumeMaterialFieldSample *volumeBrickMaterialFieldSamples [[buffer(27)]],
+    device atomic_uint *sdfCounters [[buffer(28)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    (void)lights;
+    (void)environmentSamples;
+
+    if (gid.x >= constants.tileWidth || gid.y >= constants.tileHeight) {
+        return;
+    }
+    uint2 pixel = gid + uint2(constants.tileX, constants.tileY);
+    if (pixel.x >= constants.width || pixel.y >= constants.height) {
+        return;
+    }
+
+    Ray ray = makeCameraRay(
+        camera,
+        constants.width,
+        constants.height,
+        pixel,
+        0.5f,
+        0.5f,
+        0.0f,
+        0.0f
+    );
+
+    addSDFTraversalCounter(sdfCounters, constants, sdfCounterPrimarySceneQueries);
+    Hit hit = intersectScene(
+        ray,
+        constants,
+        triangles,
+        nodes,
+        primitiveIndices,
+        volumes,
+        volumeSamples,
+        volumeAttributeDescriptors,
+        volumeAttributeSamples,
+        volumeBricks,
+        volumeBrickSamples,
+        volumeBrickMaterialFieldSamples,
+        volumeBrickAttributeDescriptors,
+        volumeBrickAttributeSamples,
+        volumeBrickBVHNodes,
+        volumeBrickBVHIndices,
+        volumeBrickGrids,
+        volumeBrickGridIndices,
+        sdfCounters
+    );
+
+    if (!hit.hit) {
+        float alpha = constants.transparentBackground != 0u ? 0.0f : 1.0f;
+        float3 color = max(constants.backgroundColor.xyz, float3(0.0f));
+        if (constants.transparentBackground == 0u && constants.showsEnvironmentBackground != 0u) {
+            color = sampleEnvironment(ray.direction, constants, textureDescriptors, texturePixels);
+        }
+        accumulation.write(float4(color, alpha), pixel);
+        depthOutput.write(float4(0.0f), pixel);
+        normalOutput.write(float4(0.5f, 0.5f, 0.5f, 0.0f), pixel);
+        albedoOutput.write(float4(0.0f), pixel);
+        materialIDOutput.write(float4(0.0f), pixel);
+        objectIDOutput.write(float4(0.0f), pixel);
+        motionVectorOutput.write(float4(0.0f), pixel);
+        return;
+    }
+
+    GPUMaterial material = materialForHit(hit, materials, materialSemantics, constants.materialCount);
+    hit = applyNormalMap(hit, material, textureDescriptors, texturePixels, ray.direction);
+    material = applyBaseColorTexture(material, hit, textureDescriptors, texturePixels);
+
+    float3 normal = normalize(hit.normal);
+    float3 viewDirection = normalize(-ray.direction);
+    float3 keyDirection = normalize(float3(0.35f, 0.72f, 0.58f));
+    float lambert = max(dot(normal, keyDirection), 0.0f);
+    float facing = max(dot(normal, viewDirection), 0.0f);
+    float rim = pow(1.0f - facing, 2.0f) * 0.08f;
+    float shade = 0.32f + 0.68f * lambert + rim;
+    float3 color = max(material.baseColor.xyz, float3(0.0f)) * shade + max(material.emission.xyz, float3(0.0f));
+    float alpha = constants.transparentBackground != 0u ? clamp(material.baseColor.w, 0.0f, 1.0f) : 1.0f;
+
+    accumulation.write(float4(color, alpha), pixel);
+
+    float3 encodedNormal = normal * 0.5f + 0.5f;
+    depthOutput.write(float4(hit.t, hit.t, hit.t, 1.0f), pixel);
+    normalOutput.write(float4(encodedNormal, 1.0f), pixel);
+    albedoOutput.write(float4(material.baseColor.xyz, material.baseColor.w), pixel);
+    float materialID = (float)(hit.materialID + 1u);
+    float objectID = (float)(hit.objectID + 1u);
+    materialIDOutput.write(float4(materialID, materialID, materialID, 1.0f), pixel);
+    objectIDOutput.write(float4(objectID, objectID, objectID, 1.0f), pixel);
+
+    float2 currentScreen;
+    float2 previousScreen;
+    if (projectToScreen(camera, hit.position, constants.width, constants.height, currentScreen)
+        && projectToScreen(previousCamera, hit.position, constants.width, constants.height, previousScreen)) {
+        float2 motion = previousScreen - currentScreen;
+        motionVectorOutput.write(float4(motion.x, motion.y, 0.0f, 1.0f), pixel);
+    } else {
+        motionVectorOutput.write(float4(0.0f), pixel);
+    }
+}
+
+kernel void interactiveMaterialKernel(
+    texture2d<float, access::read_write> accumulation [[texture(0)]],
+    texture2d<float, access::write> depthOutput [[texture(1)]],
+    texture2d<float, access::write> normalOutput [[texture(2)]],
+    texture2d<float, access::write> albedoOutput [[texture(3)]],
+    texture2d<float, access::write> materialIDOutput [[texture(4)]],
+    texture2d<float, access::write> objectIDOutput [[texture(5)]],
+    texture2d<float, access::write> motionVectorOutput [[texture(6)]],
+    constant GPURenderConstants &constants [[buffer(0)]],
+    constant GPUCamera &camera [[buffer(1)]],
+    constant GPUTriangle *triangles [[buffer(2)]],
+    constant GPUMaterial *materials [[buffer(3)]],
+    constant GPUAccelerationNode *nodes [[buffer(4)]],
+    constant uint *primitiveIndices [[buffer(5)]],
+    constant GPUCamera &previousCamera [[buffer(6)]],
+    constant GPUTextureDescriptor *textureDescriptors [[buffer(10)]],
+    constant float4 *texturePixels [[buffer(11)]],
+    constant GPULightRecord *lights [[buffer(12)]],
+    constant GPUEnvironmentSample *environmentSamples [[buffer(13)]],
+    constant GPUVolumeDescriptor *volumes [[buffer(14)]],
+    constant GPUVolumeSample *volumeSamples [[buffer(15)]],
+    constant GPUVolumeBrickDescriptor *volumeBricks [[buffer(16)]],
+    constant GPUVolumeBrickSample *volumeBrickSamples [[buffer(17)]],
+    constant GPUMaterialSemanticDescriptor *materialSemantics [[buffer(18)]],
+    constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors [[buffer(19)]],
+    constant float4 *volumeAttributeSamples [[buffer(20)]],
+    constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors [[buffer(21)]],
+    constant float4 *volumeBrickAttributeSamples [[buffer(22)]],
+    constant GPUAccelerationNode *volumeBrickBVHNodes [[buffer(23)]],
+    constant uint *volumeBrickBVHIndices [[buffer(24)]],
+    constant GPUVolumeBrickGrid *volumeBrickGrids [[buffer(25)]],
+    constant uint *volumeBrickGridIndices [[buffer(26)]],
+    constant GPUVolumeMaterialFieldSample *volumeBrickMaterialFieldSamples [[buffer(27)]],
+    device atomic_uint *sdfCounters [[buffer(28)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    (void)environmentSamples;
+
+    if (gid.x >= constants.tileWidth || gid.y >= constants.tileHeight) {
+        return;
+    }
+    uint2 pixel = gid + uint2(constants.tileX, constants.tileY);
+    if (pixel.x >= constants.width || pixel.y >= constants.height) {
+        return;
+    }
+
+    Ray ray = makeCameraRay(
+        camera,
+        constants.width,
+        constants.height,
+        pixel,
+        0.5f,
+        0.5f,
+        0.0f,
+        0.0f
+    );
+
+    addSDFTraversalCounter(sdfCounters, constants, sdfCounterPrimarySceneQueries);
+    Hit hit = intersectScene(
+        ray,
+        constants,
+        triangles,
+        nodes,
+        primitiveIndices,
+        volumes,
+        volumeSamples,
+        volumeAttributeDescriptors,
+        volumeAttributeSamples,
+        volumeBricks,
+        volumeBrickSamples,
+        volumeBrickMaterialFieldSamples,
+        volumeBrickAttributeDescriptors,
+        volumeBrickAttributeSamples,
+        volumeBrickBVHNodes,
+        volumeBrickBVHIndices,
+        volumeBrickGrids,
+        volumeBrickGridIndices,
+        sdfCounters
+    );
+
+    if (!hit.hit) {
+        float alpha = constants.transparentBackground != 0u ? 0.0f : 1.0f;
+        float3 color = max(constants.backgroundColor.xyz, float3(0.0f));
+        if (constants.transparentBackground == 0u && constants.showsEnvironmentBackground != 0u) {
+            color = sampleEnvironment(ray.direction, constants, textureDescriptors, texturePixels);
+        }
+        accumulation.write(float4(color, alpha), pixel);
+        depthOutput.write(float4(0.0f), pixel);
+        normalOutput.write(float4(0.5f, 0.5f, 0.5f, 0.0f), pixel);
+        albedoOutput.write(float4(0.0f), pixel);
+        materialIDOutput.write(float4(0.0f), pixel);
+        objectIDOutput.write(float4(0.0f), pixel);
+        motionVectorOutput.write(float4(0.0f), pixel);
+        return;
+    }
+
+    GPUMaterial material = materialForHit(hit, materials, materialSemantics, constants.materialCount);
+    hit = applyNormalMap(hit, material, textureDescriptors, texturePixels, ray.direction);
+    material = applyBaseColorTexture(material, hit, textureDescriptors, texturePixels);
+
+    float3 normal = normalize(hit.normal);
+    float3 viewDirection = normalize(-ray.direction);
+    float roughness = clamp(material.parameters.x, 0.02f, 1.0f);
+    float metallic = clamp(material.parameters.y, 0.0f, 1.0f);
+    float opacity = clamp(material.baseColor.w, 0.0f, 1.0f);
+    float3 baseColor = max(material.baseColor.xyz, float3(0.0f));
+    float3 color = max(material.emission.xyz, float3(0.0f));
+
+    uint interactiveLightCount = min(constants.lightCount, 12u);
+    for (uint lightIndex = 0u; lightIndex < interactiveLightCount; ++lightIndex) {
+        constant GPULightRecord &light = lights[lightIndex];
+        if (light.triangleIndex >= constants.triangleCount || light.materialIndex >= constants.materialCount) {
+            continue;
+        }
+
+        constant GPUTriangle &lightTriangle = triangles[light.triangleIndex];
+        GPUMaterial lightMaterial = materials[light.materialIndex];
+        float3 emission = max(lightMaterial.emission.xyz, float3(0.0f));
+        if (maxComponent(emission) <= 0.0f || light.area <= 0.0f) {
+            continue;
+        }
+
+        float3 lightPoint = (lightTriangle.v0.xyz + lightTriangle.v1.xyz + lightTriangle.v2.xyz) / 3.0f;
+        float3 toLight = lightPoint - hit.position;
+        float distanceSquared = max(dot(toLight, toLight), 1e-5f);
+        float distanceToLight = sqrt(distanceSquared);
+        float3 lightDirection = toLight / distanceToLight;
+        float cosSurface = max(dot(normal, lightDirection), 0.0f);
+        float cosLight = max(dot(light.normal.xyz, -lightDirection), 0.0f);
+        if (cosSurface <= 0.0f || cosLight <= 0.0f) {
+            continue;
+        }
+
+        Ray shadowRay;
+        shadowRay.origin = hit.position + normal * 0.001f;
+        shadowRay.direction = lightDirection;
+        float3 shadowTransmittance = float3(1.0f);
+        if (shadowOccluded(
+            shadowRay,
+            distanceToLight - 0.002f,
+            constants,
+            triangles,
+            materials,
+            materialSemantics,
+            nodes,
+            primitiveIndices,
+            volumes,
+            volumeSamples,
+            volumeAttributeDescriptors,
+            volumeAttributeSamples,
+            volumeBricks,
+            volumeBrickSamples,
+            volumeBrickMaterialFieldSamples,
+            volumeBrickAttributeDescriptors,
+            volumeBrickAttributeSamples,
+            volumeBrickBVHNodes,
+            volumeBrickBVHIndices,
+            volumeBrickGrids,
+            volumeBrickGridIndices,
+            sdfCounters,
+            shadowTransmittance
+        )) {
+            continue;
+        }
+
+        float3 brdf = evaluateMaterialBRDF(
+            material,
+            normal,
+            hit.tangent,
+            hit.bitangent,
+            viewDirection,
+            lightDirection
+        );
+        float geometryTerm = cosSurface * cosLight * light.area / distanceSquared;
+        color += brdf * emission * geometryTerm * shadowTransmittance;
+    }
+
+    float3 environmentDiffuse = sampleEnvironment(normal, constants, textureDescriptors, texturePixels);
+    float3 reflectionDirection = normalize(reflect(-viewDirection, normal));
+    float3 environmentReflection = sampleEnvironment(reflectionDirection, constants, textureDescriptors, texturePixels);
+    float nDotV = max(dot(normal, viewDirection), 0.0f);
+    float3 fresnel = fresnelSchlickThinFilm(nDotV, materialF0(material), material);
+    float ambientOcclusion = 0.58f + 0.42f * clamp(normal.y * 0.5f + 0.5f, 0.0f, 1.0f);
+    float diffuseStrength = 0.58f * (1.0f - metallic) * ambientOcclusion;
+    float reflectionStrength = mix(0.24f, 1.08f, metallic) * (1.0f - roughness * 0.68f);
+    color += baseColor * environmentDiffuse * diffuseStrength;
+    color += environmentReflection * fresnel * reflectionStrength;
+
+    float3 keyDirection = normalize(float3(-0.32f, 0.78f, 0.52f));
+    float keyAmount = max(dot(normal, keyDirection), 0.0f);
+    color += baseColor * (1.0f - metallic) * keyAmount * 0.16f;
+
+    float subsurface = materialSubsurface(material);
+    if (subsurface > 0.0f) {
+        float wrap = pow(1.0f - nDotV, 2.0f);
+        color += materialSubsurfaceColor(material) * baseColor * environmentDiffuse * subsurface * (0.12f + 0.22f * wrap);
+    }
+
+    float transmission = materialTransmission(material);
+    if (transmission > 0.0f) {
+        float3 transmitted = sampleEnvironment(ray.direction, constants, textureDescriptors, texturePixels);
+        color = mix(color, transmitted * materialTransmissionTint(material, 0.65f), transmission * 0.55f);
+        color += environmentReflection * fresnel * transmission * 0.35f;
+    }
+
+    color = clamp(color, float3(0.0f), float3(max(constants.sampleRadianceClamp, 1.0f)));
+    float alpha = constants.transparentBackground != 0u ? opacity : 1.0f;
+    accumulation.write(float4(color, alpha), pixel);
+
+    float3 encodedNormal = normal * 0.5f + 0.5f;
+    depthOutput.write(float4(hit.t, hit.t, hit.t, 1.0f), pixel);
+    normalOutput.write(float4(encodedNormal, 1.0f), pixel);
+    albedoOutput.write(float4(baseColor, opacity), pixel);
+    float materialID = (float)(hit.materialID + 1u);
+    float objectID = (float)(hit.objectID + 1u);
+    materialIDOutput.write(float4(materialID, materialID, materialID, 1.0f), pixel);
+    objectIDOutput.write(float4(objectID, objectID, objectID, 1.0f), pixel);
+
+    float2 currentScreen;
+    float2 previousScreen;
+    if (projectToScreen(camera, hit.position, constants.width, constants.height, currentScreen)
+        && projectToScreen(previousCamera, hit.position, constants.width, constants.height, previousScreen)) {
+        float2 motion = previousScreen - currentScreen;
+        motionVectorOutput.write(float4(motion.x, motion.y, 0.0f, 1.0f), pixel);
+    } else {
+        motionVectorOutput.write(float4(0.0f), pixel);
+    }
+}
+
 kernel void pathTraceKernel(
     texture2d<float, access::read_write> accumulation [[texture(0)]],
     texture2d<float, access::write> depthOutput [[texture(1)]],
@@ -4193,6 +4583,8 @@ kernel void pathTraceKernel(
         constants.width,
         constants.height,
         pixel,
+        randomFloat(state),
+        randomFloat(state),
         randomFloat(state),
         randomFloat(state)
     );
@@ -4497,7 +4889,7 @@ kernel void pathTraceKernel(
     aovMaterial = primaryMaterial;
     if (constants.denoiserEnabled != 0u) {
         hasAOVHit = tracePrimaryAOV(
-            makeCameraRay(camera, constants.width, constants.height, pixel, 0.5f, 0.5f),
+            makeCameraRay(camera, constants.width, constants.height, pixel, 0.5f, 0.5f, 0.0f, 0.0f),
             constants,
             triangles,
             nodes,
@@ -4598,6 +4990,8 @@ kernel void pathTraceHardwareKernel(
         constants.width,
         constants.height,
         pixel,
+        randomFloat(state),
+        randomFloat(state),
         randomFloat(state),
         randomFloat(state)
     );
@@ -4848,7 +5242,7 @@ kernel void pathTraceHardwareKernel(
     aovMaterial = primaryMaterial;
     if (constants.denoiserEnabled != 0u) {
         hasAOVHit = tracePrimaryAOVHardware(
-            makeCameraRay(camera, constants.width, constants.height, pixel, 0.5f, 0.5f),
+            makeCameraRay(camera, constants.width, constants.height, pixel, 0.5f, 0.5f, 0.0f, 0.0f),
             scene,
             rtInstances,
             localTriangles,

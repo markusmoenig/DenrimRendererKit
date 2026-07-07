@@ -32,7 +32,9 @@ public final class DenrimRenderer {
 
     private let commandQueue: MTLCommandQueue
     private let library: MTLLibrary
-    private let pipeline: MTLComputePipelineState
+    private var cachedFlatPreviewPipeline: MTLComputePipelineState?
+    private var cachedInteractivePipeline: MTLComputePipelineState?
+    private var cachedPathTracePipeline: MTLComputePipelineState?
     private var cachedHardwareRayTracingPipeline: MTLComputePipelineState?
     private var cachedSimpleSpatialDenoisePipeline: MTLComputePipelineState?
     private var cachedSVGFDepthNormalPipeline: MTLComputePipelineState?
@@ -55,15 +57,9 @@ public final class DenrimRenderer {
             throw DenrimRendererError.noMetalDevice
         }
 
-        let library = try Self.makeLibrary(device: device)
-        guard let function = library.makeFunction(name: "pathTraceKernel") else {
-            throw DenrimRendererError.missingShaderFunction("pathTraceKernel")
-        }
-
         self.device = device
         self.commandQueue = commandQueue
-        self.library = library
-        self.pipeline = try device.makeComputePipelineState(function: function)
+        self.library = try Self.makeLibrary(device: device)
     }
 
     private static func makeLibrary(device: MTLDevice) throws -> MTLLibrary {
@@ -72,6 +68,8 @@ public final class DenrimRenderer {
             withExtension: "metallib"
         ),
            let library = try? device.makeLibrary(URL: metallibURL),
+           library.makeFunction(name: "flatPreviewKernel") != nil,
+           library.makeFunction(name: "interactiveMaterialKernel") != nil,
            library.makeFunction(name: "pathTraceKernel") != nil,
            library.makeFunction(name: "simpleSpatialDenoiseKernel") != nil,
            library.makeFunction(name: "packSVGFDepthNormalKernel") != nil,
@@ -87,6 +85,8 @@ public final class DenrimRenderer {
         }
 
         if let library = try? device.makeDefaultLibrary(bundle: .module),
+           library.makeFunction(name: "flatPreviewKernel") != nil,
+           library.makeFunction(name: "interactiveMaterialKernel") != nil,
            library.makeFunction(name: "pathTraceKernel") != nil,
            library.makeFunction(name: "simpleSpatialDenoiseKernel") != nil,
            library.makeFunction(name: "packSVGFDepthNormalKernel") != nil,
@@ -159,6 +159,25 @@ public final class DenrimRenderer {
         return pipeline
     }
 
+    private func requiredPipeline(
+        named functionName: String,
+        cache keyPath: ReferenceWritableKeyPath<DenrimRenderer, MTLComputePipelineState?>
+    ) throws -> MTLComputePipelineState {
+        pipelineLock.lock()
+        defer {
+            pipelineLock.unlock()
+        }
+        if let cached = self[keyPath: keyPath] {
+            return cached
+        }
+        guard let function = library.makeFunction(name: functionName) else {
+            throw DenrimRendererError.missingShaderFunction(functionName)
+        }
+        let pipeline = try device.makeComputePipelineState(function: function)
+        self[keyPath: keyPath] = pipeline
+        return pipeline
+    }
+
     private func hardwarePipelineIfNeeded(
         scene: RenderScene,
         accelerationMode: RenderAccelerationMode
@@ -174,6 +193,26 @@ public final class DenrimRenderer {
             named: "pathTraceHardwareKernel",
             cache: \.cachedHardwareRayTracingPipeline
         )
+    }
+
+    private func primaryPipeline(for settings: RenderSettings) throws -> MTLComputePipelineState {
+        switch settings.quality {
+        case .preview:
+            return try requiredPipeline(
+                named: "flatPreviewKernel",
+                cache: \.cachedFlatPreviewPipeline
+            )
+        case .interactive:
+            return try requiredPipeline(
+                named: "interactiveMaterialKernel",
+                cache: \.cachedInteractivePipeline
+            )
+        case .final:
+            return try requiredPipeline(
+                named: "pathTraceKernel",
+                cache: \.cachedPathTracePipeline
+            )
+        }
     }
 
     private func denoisePipelines(
@@ -236,11 +275,13 @@ public final class DenrimRenderer {
         return try RenderSession(
             device: device,
             commandQueue: commandQueue,
-            pipeline: pipeline,
-            hardwareRayTracingPipeline: try hardwarePipelineIfNeeded(
-                scene: scene,
-                accelerationMode: accelerationMode
-            ),
+            pipeline: try primaryPipeline(for: settings),
+            hardwareRayTracingPipeline: settings.quality == .final
+                ? try hardwarePipelineIfNeeded(
+                    scene: scene,
+                    accelerationMode: accelerationMode
+                )
+                : nil,
             simpleSpatialDenoisePipeline: denoisePipelines.simpleSpatial,
             svgfDepthNormalPipeline: denoisePipelines.svgfDepthNormal,
             svgfOutputCopyPipeline: denoisePipelines.svgfOutputCopy,
