@@ -237,6 +237,71 @@ static float programCylinderDistance(float3 local, float radius, float halfHeigh
     return min(max(d.x, d.y), 0.0) + length(max(d, float2(0.0)));
 }
 
+static float programTaperedCapsuleDistance(
+    float3 position,
+    float3 start,
+    float3 end,
+    float startRadius,
+    float endRadius
+) {
+    float3 segment = end - start;
+    float lengthSquared = dot(segment, segment);
+    float t = lengthSquared > 1.0e-8
+        ? clamp(dot(position - start, segment) / lengthSquared, 0.0, 1.0)
+        : 0.0;
+    float radius = max(mix(startRadius, endRadius, t), 0.0);
+    return length(position - (start + segment * t)) - radius;
+}
+
+static float3 programCubicBezierPoint(
+    float3 control0,
+    float3 control1,
+    float3 control2,
+    float3 control3,
+    float t
+) {
+    float oneMinusT = 1.0 - t;
+    float oneMinusT2 = oneMinusT * oneMinusT;
+    float t2 = t * t;
+    return control0 * (oneMinusT2 * oneMinusT)
+        + control1 * (3.0 * oneMinusT2 * t)
+        + control2 * (3.0 * oneMinusT * t2)
+        + control3 * (t2 * t);
+}
+
+static float programSplineTubeDistance(
+    float3 position,
+    float3 control0,
+    float3 control1,
+    float3 control2,
+    float3 control3,
+    float startRadius,
+    float endRadius
+) {
+    constexpr uint segmentCount = 16u;
+    float bestDistance = INFINITY;
+    float3 previousPoint = control0;
+    float previousRadius = max(startRadius, 0.0);
+    for (uint segmentIndex = 1u; segmentIndex <= segmentCount; ++segmentIndex) {
+        float t = float(segmentIndex) / float(segmentCount);
+        float3 point = programCubicBezierPoint(control0, control1, control2, control3, t);
+        float radius = max(mix(startRadius, endRadius, t), 0.0);
+        bestDistance = min(
+            bestDistance,
+            programTaperedCapsuleDistance(
+                position,
+                previousPoint,
+                point,
+                previousRadius,
+                radius
+            )
+        );
+        previousPoint = point;
+        previousRadius = radius;
+    }
+    return bestDistance;
+}
+
 static GPUDistanceFieldBakeSample combineProgramSample(
     GPUDistanceFieldBakeSample current,
     float candidateDistance,
@@ -452,6 +517,28 @@ static GPUDistanceFieldProgramSample sampleProgramField(
                 vectorRegisters[operation.indices.y & 31u],
                 scalarRegisters[operation.indices.z & 31u],
                 scalarRegisters[operation.indices.w & 31u]
+            );
+            break;
+        }
+        case 143: {
+            scalarRegisters[operation.metadata.y & 31u] = programTaperedCapsuleDistance(
+                vectorRegisters[operation.metadata.z & 31u],
+                vectorRegisters[operation.metadata.w & 31u],
+                vectorRegisters[operation.indices.x & 31u],
+                scalarRegisters[operation.indices.y & 31u],
+                scalarRegisters[operation.indices.z & 31u]
+            );
+            break;
+        }
+        case 144: {
+            scalarRegisters[operation.metadata.y & 31u] = programSplineTubeDistance(
+                vectorRegisters[operation.metadata.z & 31u],
+                vectorRegisters[operation.metadata.w & 31u],
+                vectorRegisters[operation.indices.x & 31u],
+                vectorRegisters[operation.indices.y & 31u],
+                vectorRegisters[operation.indices.z & 31u],
+                scalarRegisters[operation.indices.w & 31u],
+                scalarRegisters[uint(operation.p0.x) & 31u]
             );
             break;
         }

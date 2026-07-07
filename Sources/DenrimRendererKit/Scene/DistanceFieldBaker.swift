@@ -1826,6 +1826,17 @@ public final class DistanceFieldBaker: @unchecked Sendable {
                 metadata: SIMD4<UInt32>(142, 0, 0, 0),
                 indices: SIMD4<UInt32>(destination.rawValue, position.rawValue, radius.rawValue, halfHeight.rawValue)
             )
+        case .taperedCapsuleDistance(let destination, let position, let start, let end, let startRadius, let endRadius):
+            return GPUDistanceFieldProgramOperation(
+                metadata: SIMD4<UInt32>(143, destination.rawValue, position.rawValue, start.rawValue),
+                indices: SIMD4<UInt32>(end.rawValue, startRadius.rawValue, endRadius.rawValue, 0)
+            )
+        case .splineTubeDistance(let destination, let position, let control0, let control1, let control2, let control3, let startRadius, let endRadius):
+            return GPUDistanceFieldProgramOperation(
+                metadata: SIMD4<UInt32>(144, destination.rawValue, position.rawValue, control0.rawValue),
+                indices: SIMD4<UInt32>(control1.rawValue, control2.rawValue, control3.rawValue, startRadius.rawValue),
+                p0: SIMD4<Float>(Float(endRadius.rawValue), 0, 0, 0)
+            )
         case .emit(let distance, let material, let smoothUnionRadius, let combineOperation):
             return GPUDistanceFieldProgramOperation(
                 metadata: SIMD4<UInt32>(150, distance.rawValue, material.rawValue, operationID(for: combineOperation)),

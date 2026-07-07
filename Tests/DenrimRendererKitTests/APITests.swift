@@ -290,6 +290,169 @@ final class APITests: XCTestCase {
         XCTAssertLessThan(maxError, 0.00001)
     }
 
+    func testDistanceFieldProgramInstructionsCanDefineTaperedCapsule() throws {
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.4, 0.85, 0.35)))
+        let program = DistanceFieldProgram(instructions: [
+            .loadPosition(.init(0)),
+            .setVector(.init(1), SIMD3<Float>(0, -0.5, 0)),
+            .setVector(.init(2), SIMD3<Float>(0, 0.5, 0)),
+            .setFloat(.init(0), 0.2),
+            .setFloat(.init(1), 0.4),
+            .taperedCapsuleDistance(
+                .init(2),
+                position: .init(0),
+                start: .init(1),
+                end: .init(2),
+                startRadius: .init(0),
+                endRadius: .init(1)
+            ),
+            .emit(distance: .init(2), material: material)
+        ])
+
+        func distance(at position: SIMD3<Float>) -> Float {
+            DistanceFieldProgramEvaluator.sample(
+                program: program,
+                at: position,
+                fallbackMaterial: material
+            ).distance
+        }
+
+        XCTAssertEqual(distance(at: SIMD3<Float>(0, -0.5, 0)), -0.2, accuracy: 0.00001)
+        XCTAssertEqual(distance(at: SIMD3<Float>(0, 0.5, 0)), -0.4, accuracy: 0.00001)
+        XCTAssertEqual(distance(at: SIMD3<Float>(0.3, 0, 0)), 0, accuracy: 0.00001)
+        XCTAssertEqual(distance(at: SIMD3<Float>(0.6, 0.5, 0)), 0.2, accuracy: 0.00001)
+    }
+
+    func testDistanceFieldProgramTaperedCapsuleRunsOnGPUResidentBaker() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.4, 0.85, 0.35)))
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .metalCompute)
+        let program = DistanceFieldProgram(instructions: [
+            .loadPosition(.init(0)),
+            .setVector(.init(1), SIMD3<Float>(0, -0.55, 0)),
+            .setVector(.init(2), SIMD3<Float>(0, 0.55, 0)),
+            .setFloat(.init(0), 0.18),
+            .setFloat(.init(1), 0.34),
+            .taperedCapsuleDistance(
+                .init(2),
+                position: .init(0),
+                start: .init(1),
+                end: .init(2),
+                startRadius: .init(0),
+                endRadius: .init(1)
+            ),
+            .emit(distance: .init(2), material: material)
+        ])
+        let result = try baker.bakeGPUResident(
+            DistanceFieldBakeRequest(
+                graph: DistanceFieldBakeGraph(program: program),
+                resolution: 24,
+                storage: .sparseBricks(brickSize: 6, narrowBand: 0.28, sampleScale: 2),
+                fallbackMaterial: material,
+                backend: .metalCompute
+            ),
+            metadataMode: .directGridGPU
+        )
+
+        guard case .gpuSparse(let resource) = result.bundle.storage else {
+            return XCTFail("Expected GPU-resident sparse field storage.")
+        }
+        XCTAssertEqual(result.backend, .metalCompute)
+        XCTAssertGreaterThan(resource.sampleCount, 0)
+        XCTAssertEqual(resource.dimensions, SIMD3<Int>(repeating: 47))
+    }
+
+    func testDistanceFieldProgramInstructionsCanDefineSplineTube() throws {
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.3, 0.75, 0.55)))
+        let program = DistanceFieldProgram(instructions: [
+            .loadPosition(.init(0)),
+            .setVector(.init(1), SIMD3<Float>(0, -0.5, 0)),
+            .setVector(.init(2), SIMD3<Float>(0, -0.16666667, 0)),
+            .setVector(.init(3), SIMD3<Float>(0, 0.16666667, 0)),
+            .setVector(.init(4), SIMD3<Float>(0, 0.5, 0)),
+            .setFloat(.init(0), 0.2),
+            .setFloat(.init(1), 0.4),
+            .splineTubeDistance(
+                .init(2),
+                position: .init(0),
+                control0: .init(1),
+                control1: .init(2),
+                control2: .init(3),
+                control3: .init(4),
+                startRadius: .init(0),
+                endRadius: .init(1)
+            ),
+            .emit(distance: .init(2), material: material)
+        ])
+
+        func distance(at position: SIMD3<Float>) -> Float {
+            DistanceFieldProgramEvaluator.sample(
+                program: program,
+                at: position,
+                fallbackMaterial: material
+            ).distance
+        }
+
+        XCTAssertEqual(distance(at: SIMD3<Float>(0, -0.5, 0)), -0.2, accuracy: 0.00001)
+        XCTAssertEqual(distance(at: SIMD3<Float>(0, 0.5, 0)), -0.4, accuracy: 0.00001)
+        XCTAssertEqual(distance(at: SIMD3<Float>(0.3, 0, 0)), 0, accuracy: 0.01)
+    }
+
+    func testDistanceFieldProgramSplineTubeRunsOnGPUResidentBaker() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.3, 0.75, 0.55)))
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .metalCompute)
+        let program = DistanceFieldProgram(instructions: [
+            .loadPosition(.init(0)),
+            .setVector(.init(1), SIMD3<Float>(-0.42, -0.55, 0)),
+            .setVector(.init(2), SIMD3<Float>(0.35, -0.18, 0.2)),
+            .setVector(.init(3), SIMD3<Float>(-0.35, 0.18, -0.2)),
+            .setVector(.init(4), SIMD3<Float>(0.42, 0.55, 0)),
+            .setFloat(.init(0), 0.16),
+            .setFloat(.init(1), 0.3),
+            .splineTubeDistance(
+                .init(2),
+                position: .init(0),
+                control0: .init(1),
+                control1: .init(2),
+                control2: .init(3),
+                control3: .init(4),
+                startRadius: .init(0),
+                endRadius: .init(1)
+            ),
+            .emit(distance: .init(2), material: material)
+        ])
+        let result = try baker.bakeGPUResident(
+            DistanceFieldBakeRequest(
+                graph: DistanceFieldBakeGraph(program: program),
+                resolution: 24,
+                storage: .sparseBricks(brickSize: 6, narrowBand: 0.28, sampleScale: 2),
+                fallbackMaterial: material,
+                backend: .metalCompute
+            ),
+            metadataMode: .directGridGPU
+        )
+
+        guard case .gpuSparse(let resource) = result.bundle.storage else {
+            return XCTFail("Expected GPU-resident sparse field storage.")
+        }
+        XCTAssertEqual(result.backend, .metalCompute)
+        XCTAssertGreaterThan(resource.sampleCount, 0)
+        XCTAssertEqual(resource.dimensions, SIMD3<Int>(repeating: 47))
+    }
+
     func testDistanceFieldProgramInstructionsCanDefineTwistedBox() throws {
         let renderer = try DenrimRenderer()
         var scene = RenderScene()

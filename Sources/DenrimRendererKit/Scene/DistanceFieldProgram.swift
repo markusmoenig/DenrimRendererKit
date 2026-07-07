@@ -116,9 +116,92 @@ public enum DistanceFieldProgramInstruction: Sendable, Equatable {
 
     case boxDistance(DistanceFieldScalarRegister, position: DistanceFieldVectorRegister, halfExtents: DistanceFieldVectorRegister, cornerRadius: DistanceFieldScalarRegister)
     case cylinderDistance(DistanceFieldScalarRegister, position: DistanceFieldVectorRegister, radius: DistanceFieldScalarRegister, halfHeight: DistanceFieldScalarRegister)
+    case taperedCapsuleDistance(
+        DistanceFieldScalarRegister,
+        position: DistanceFieldVectorRegister,
+        start: DistanceFieldVectorRegister,
+        end: DistanceFieldVectorRegister,
+        startRadius: DistanceFieldScalarRegister,
+        endRadius: DistanceFieldScalarRegister
+    )
+    case splineTubeDistance(
+        DistanceFieldScalarRegister,
+        position: DistanceFieldVectorRegister,
+        control0: DistanceFieldVectorRegister,
+        control1: DistanceFieldVectorRegister,
+        control2: DistanceFieldVectorRegister,
+        control3: DistanceFieldVectorRegister,
+        startRadius: DistanceFieldScalarRegister,
+        endRadius: DistanceFieldScalarRegister
+    )
 
     case emit(distance: DistanceFieldScalarRegister, material: MaterialID, smoothUnionRadius: Float = 0, operation: SDFPrimitiveOperation = .union)
     case writeAttribute(channel: Int, value: DistanceFieldScalarRegister)
+}
+
+private func taperedCapsuleDistance(
+    position: SIMD3<Float>,
+    start: SIMD3<Float>,
+    end: SIMD3<Float>,
+    startRadius: Float,
+    endRadius: Float
+) -> Float {
+    let segment = end - start
+    let lengthSquared = simd_length_squared(segment)
+    let t = lengthSquared > 1e-8
+        ? simd_clamp(simd_dot(position - start, segment) / lengthSquared, 0, 1)
+        : Float(0)
+    let radius = max(startRadius + (endRadius - startRadius) * t, 0)
+    return simd_length(position - (start + segment * t)) - radius
+}
+
+private func cubicBezierPoint(
+    _ control0: SIMD3<Float>,
+    _ control1: SIMD3<Float>,
+    _ control2: SIMD3<Float>,
+    _ control3: SIMD3<Float>,
+    _ t: Float
+) -> SIMD3<Float> {
+    let oneMinusT = 1 - t
+    let oneMinusT2 = oneMinusT * oneMinusT
+    let t2 = t * t
+    return control0 * (oneMinusT2 * oneMinusT)
+        + control1 * (3 * oneMinusT2 * t)
+        + control2 * (3 * oneMinusT * t2)
+        + control3 * (t2 * t)
+}
+
+private func splineTubeDistance(
+    position: SIMD3<Float>,
+    control0: SIMD3<Float>,
+    control1: SIMD3<Float>,
+    control2: SIMD3<Float>,
+    control3: SIMD3<Float>,
+    startRadius: Float,
+    endRadius: Float
+) -> Float {
+    let segmentCount = 16
+    var bestDistance = Float.greatestFiniteMagnitude
+    var previousPoint = control0
+    var previousRadius = max(startRadius, 0)
+    for segmentIndex in 1...segmentCount {
+        let t = Float(segmentIndex) / Float(segmentCount)
+        let point = cubicBezierPoint(control0, control1, control2, control3, t)
+        let radius = max(startRadius + (endRadius - startRadius) * t, 0)
+        bestDistance = min(
+            bestDistance,
+            taperedCapsuleDistance(
+                position: position,
+                start: previousPoint,
+                end: point,
+                startRadius: previousRadius,
+                endRadius: radius
+            )
+        )
+        previousPoint = point
+        previousRadius = radius
+    }
+    return bestDistance
 }
 
 enum DistanceFieldProgramOptimizer {
@@ -356,6 +439,50 @@ enum DistanceFieldProgramOptimizer {
                     remember(destination, nil)
                     result.append(instruction)
                 }
+            case .taperedCapsuleDistance(let destination, let source, let start, let end, let startRadius, let endRadius):
+                if let source = vector(source),
+                   let start = vector(start),
+                   let end = vector(end),
+                   let startRadius = scalar(startRadius),
+                   let endRadius = scalar(endRadius) {
+                    appendSet(
+                        destination,
+                        taperedCapsuleDistance(
+                            position: source,
+                            start: start,
+                            end: end,
+                            startRadius: startRadius,
+                            endRadius: endRadius
+                        )
+                    )
+                } else {
+                    remember(destination, nil)
+                    result.append(instruction)
+                }
+            case .splineTubeDistance(let destination, let source, let control0, let control1, let control2, let control3, let startRadius, let endRadius):
+                if let source = vector(source),
+                   let control0 = vector(control0),
+                   let control1 = vector(control1),
+                   let control2 = vector(control2),
+                   let control3 = vector(control3),
+                   let startRadius = scalar(startRadius),
+                   let endRadius = scalar(endRadius) {
+                    appendSet(
+                        destination,
+                        splineTubeDistance(
+                            position: source,
+                            control0: control0,
+                            control1: control1,
+                            control2: control2,
+                            control3: control3,
+                            startRadius: startRadius,
+                            endRadius: endRadius
+                        )
+                    )
+                } else {
+                    remember(destination, nil)
+                    result.append(instruction)
+                }
             case .emit:
                 result.append(instruction)
             case .writeAttribute:
@@ -588,6 +715,24 @@ enum DistanceFieldProgramEvaluator {
                 ) - SIMD2<Float>(scalars[s(radius)], scalars[s(halfHeight)])
                 scalars[s(destination)] = min(max(d.x, d.y), 0)
                     + simd_length(simd_max(d, SIMD2<Float>(repeating: 0)))
+            case .taperedCapsuleDistance(let destination, let source, let start, let end, let startRadius, let endRadius):
+                scalars[s(destination)] = taperedCapsuleDistance(
+                    position: vectors[v(source)],
+                    start: vectors[v(start)],
+                    end: vectors[v(end)],
+                    startRadius: scalars[s(startRadius)],
+                    endRadius: scalars[s(endRadius)]
+                )
+            case .splineTubeDistance(let destination, let source, let control0, let control1, let control2, let control3, let startRadius, let endRadius):
+                scalars[s(destination)] = splineTubeDistance(
+                    position: vectors[v(source)],
+                    control0: vectors[v(control0)],
+                    control1: vectors[v(control1)],
+                    control2: vectors[v(control2)],
+                    control3: vectors[v(control3)],
+                    startRadius: scalars[s(startRadius)],
+                    endRadius: scalars[s(endRadius)]
+                )
             case .emit(let distance, let material, let smoothUnionRadius, let operation):
                 field = combine(
                     field,

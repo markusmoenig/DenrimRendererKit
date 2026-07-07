@@ -197,7 +197,32 @@ let result = try baker.bake(DistanceFieldBakeRequest(
 ))
 ```
 
-The instruction VM currently includes scalar/vector constants, arithmetic, min/max/abs, sin/cos, clamp/mix, vector compose/extract, length, box/cylinder distance intrinsics, field `emit` with union/subtract plus smooth-union material blending, and `writeAttribute(channel:value:)` for compact semantic fields such as growth age, wetness, moss amount, cavity, and similar Form data. Twist, bends, masks, and growth-style controls should be compiled from those generic instructions where possible. RendererKit should only grow new VM intrinsics when the math vocabulary itself is missing.
+The instruction VM currently includes scalar/vector constants, arithmetic, min/max/abs, sin/cos, clamp/mix, vector compose/extract, length, box/cylinder/tapered-capsule/spline-tube distance intrinsics, field `emit` with union/subtract plus smooth-union material blending, and `writeAttribute(channel:value:)` for compact semantic fields such as growth age, wetness, moss amount, cavity, and similar Form data. Twist, bends, masks, and growth-style controls should be compiled from those generic instructions where possible. RendererKit should only grow new VM intrinsics when the math vocabulary itself is missing.
+
+For organic growth, `splineTubeDistance` is the preferred branch/stem primitive for one cubic Bezier tube segment with tapered endpoints. `taperedCapsuleDistance` remains useful for simple straight sections and as the lower-level segment primitive. Form can chain spline tube segments for longer branches while keeping the editable curve data in Form:
+
+```swift
+let program = DistanceFieldProgram(instructions: [
+    .loadPosition(.init(0)),
+    .setVector(.init(1), SIMD3<Float>(-0.4, -0.5, 0)),
+    .setVector(.init(2), SIMD3<Float>(0.35, -0.2, 0.18)),
+    .setVector(.init(3), SIMD3<Float>(-0.35, 0.2, -0.18)),
+    .setVector(.init(4), SIMD3<Float>(0.4, 0.5, 0)),
+    .setFloat(.init(0), 0.18),
+    .setFloat(.init(1), 0.34),
+    .splineTubeDistance(
+        .init(2),
+        position: .init(0),
+        control0: .init(1),
+        control1: .init(2),
+        control2: .init(3),
+        control3: .init(4),
+        startRadius: .init(0),
+        endRadius: .init(1)
+    ),
+    .emit(distance: .init(2), material: materialID)
+])
+```
 
 ```swift
 let layout = DistanceVolumeAttributeLayout(channels: [
