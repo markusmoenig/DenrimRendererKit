@@ -184,7 +184,7 @@ final class APITests: XCTestCase {
 
     func testRenderFieldBundleAddsDenseStorage() throws {
         var scene = RenderScene()
-        let material = scene.addMaterial(SemanticMaterial.moss())
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.12, 0.38, 0.12), roughness: 0.86, specular: 0.2))
         let volume = DistanceVolume.sphere(resolution: 12, radius: 0.55)
         let bundle = RenderFieldBundle(dense: volume, fallbackMaterial: material)
         let field = scene.add(
@@ -208,7 +208,7 @@ final class APITests: XCTestCase {
 
     func testRenderFieldBundleAddsSparseStorageAndReplacesWholeBundle() throws {
         var scene = RenderScene()
-        let material = scene.addMaterial(SemanticMaterial.moss())
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.12, 0.38, 0.12), roughness: 0.86, specular: 0.2))
         let model = SDFModel(primitives: [
             SDFPrimitive(shape: .sphere(radius: 0.48), material: material)
         ])
@@ -378,6 +378,126 @@ final class APITests: XCTestCase {
         }
         let maxError = zip(modelVolume.distances, programVolume.distances).map { abs($0 - $1) }.max() ?? 0
         XCTAssertLessThan(maxError, 0.00001)
+    }
+
+    func testDistanceFieldProgramProceduralSurfaceCoreEvaluatesOnCPU() {
+        let material = MaterialID(rawValue: 0)
+        let program = DistanceFieldProgram(instructions: [
+            .setFloat(.init(0), 0),
+            .setFloat(.init(1), 1),
+            .setFloat(.init(2), 0.5),
+            .smoothstep(.init(3), edge0: .init(0), edge1: .init(1), x: .init(2)),
+            .step(.init(4), edge: .init(2), x: .init(1)),
+            .setFloat(.init(5), 1.35),
+            .saturate(.init(6), .init(5)),
+            .setFloat(.init(7), 2.75),
+            .fractFloat(.init(8), .init(7)),
+            .floorFloat(.init(9), .init(7)),
+            .setFloat(.init(10), 2),
+            .modFloat(.init(11), .init(7), .init(10)),
+            .setVector(.init(0), SIMD3<Float>(1, 0, 0)),
+            .setVector(.init(1), SIMD3<Float>(0, 1, 0)),
+            .dot(.init(12), .init(0), .init(1)),
+            .normalize(.init(2), .init(0)),
+            .distance(.init(13), .init(0), .init(1)),
+            .setVector(.init(3), SIMD3<Float>(0.37, 0.59, 0.23)),
+            .setFloat(.init(14), 3),
+            .setFloat(.init(15), 7),
+            .setFloat(.init(16), 4),
+            .setFloat(.init(17), 2),
+            .setFloat(.init(18), 0.5),
+            .valueNoise3D(.init(19), position: .init(3), scale: .init(14), seed: .init(15)),
+            .fbm3D(.init(20), position: .init(3), scale: .init(14), octaves: .init(16), lacunarity: .init(17), gain: .init(18), seed: .init(15)),
+            .cellular3D(distance: .init(21), secondDistance: .init(22), cellID: .init(23), position: .init(3), scale: .init(14), seed: .init(15)),
+            .composeVector(.init(4), .init(3), .init(8), .init(13)),
+            .writeMaterialFieldVector(.baseColor, vector: .init(4)),
+            .writeAttribute(channel: 0, value: .init(19)),
+            .writeAttribute(channel: 1, value: .init(20)),
+            .writeAttribute(channel: 2, value: .init(21)),
+            .writeAttribute(channel: 3, value: .init(22)),
+            .writeAttribute(channel: 4, value: .init(23)),
+            .writeAttribute(channel: 5, value: .init(4)),
+            .writeAttribute(channel: 6, value: .init(6)),
+            .writeAttribute(channel: 7, value: .init(9)),
+            .setFloat(.init(24), -0.25),
+            .emit(distance: .init(24), material: material)
+        ])
+
+        let sample = DistanceFieldProgramEvaluator.sample(
+            program: program,
+            at: .zero,
+            fallbackMaterial: material
+        )
+
+        XCTAssertEqual(sample.materialFields.baseColor?.x ?? -1, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(sample.materialFields.baseColor?.y ?? -1, 0.75, accuracy: 0.0001)
+        XCTAssertEqual(sample.materialFields.baseColor?.z ?? -1, sqrt(Float(2)), accuracy: 0.0001)
+        XCTAssertEqual(sample.attributes[5] ?? -1, 1, accuracy: 0.0001)
+        XCTAssertEqual(sample.attributes[6] ?? -1, 1, accuracy: 0.0001)
+        XCTAssertEqual(sample.attributes[7] ?? -1, 2, accuracy: 0.0001)
+        XCTAssertGreaterThanOrEqual(sample.attributes[0] ?? -1, 0)
+        XCTAssertLessThanOrEqual(sample.attributes[0] ?? 2, 1)
+        XCTAssertGreaterThanOrEqual(sample.attributes[1] ?? -1, 0)
+        XCTAssertLessThanOrEqual(sample.attributes[1] ?? 2, 1)
+        XCTAssertGreaterThanOrEqual(sample.attributes[2] ?? -1, 0)
+        XCTAssertGreaterThan(sample.attributes[3] ?? 0, sample.attributes[2] ?? 0)
+        XCTAssertGreaterThanOrEqual(sample.attributes[4] ?? -1, 0)
+        XCTAssertLessThanOrEqual(sample.attributes[4] ?? 2, 1)
+        XCTAssertEqual(sample.distance, -0.25, accuracy: 0.0001)
+    }
+
+    func testDistanceFieldProgramProceduralSurfaceCoreRunsOnGPUResidentBaker() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let renderer = try DenrimRenderer()
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.4, 0.72, 0.9)))
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .metalCompute)
+        let program = DistanceFieldProgram(instructions: [
+            .loadPosition(.init(0)),
+            .length(.init(0), .init(0)),
+            .setFloat(.init(1), 0.42),
+            .subtractFloat(.init(2), .init(0), .init(1)),
+            .setVector(.init(1), SIMD3<Float>(0.37, 0.59, 0.23)),
+            .setFloat(.init(3), 3),
+            .setFloat(.init(4), 7),
+            .setFloat(.init(5), 4),
+            .setFloat(.init(6), 2),
+            .setFloat(.init(7), 0.5),
+            .valueNoise3D(.init(8), position: .init(1), scale: .init(3), seed: .init(4)),
+            .fbm3D(.init(9), position: .init(1), scale: .init(3), octaves: .init(5), lacunarity: .init(6), gain: .init(7), seed: .init(4)),
+            .cellular3D(distance: .init(10), secondDistance: .init(11), cellID: .init(12), position: .init(1), scale: .init(3), seed: .init(4)),
+            .smoothstep(.init(13), edge0: .init(7), edge1: .init(6), x: .init(10)),
+            .fractFloat(.init(14), .init(11)),
+            .modFloat(.init(15), .init(14), .init(7)),
+            .setFloat(.init(16), 0),
+            .multiplyFloat(.init(17), .init(8), .init(16)),
+            .multiplyFloat(.init(18), .init(9), .init(16)),
+            .multiplyFloat(.init(19), .init(13), .init(16)),
+            .addFloat(.init(20), .init(2), .init(17)),
+            .addFloat(.init(21), .init(20), .init(18)),
+            .addFloat(.init(22), .init(21), .init(19)),
+            .emit(distance: .init(22), material: material)
+        ])
+
+        let result = try baker.bakeGPUResident(
+            DistanceFieldBakeRequest(
+                graph: DistanceFieldBakeGraph(program: program),
+                resolution: 16,
+                storage: .sparseBricks(brickSize: 4, narrowBand: 0.24),
+                fallbackMaterial: material,
+                backend: .metalCompute
+            ),
+            metadataMode: .directGridGPU
+        )
+
+        guard case .gpuSparse(let resource) = result.bundle.storage else {
+            return XCTFail("Expected GPU-resident sparse field storage.")
+        }
+        XCTAssertEqual(result.backend, .metalCompute)
+        XCTAssertGreaterThan(resource.sampleCount, 0)
     }
 
     func testDistanceFieldProgramInstructionsCanDefineTaperedCapsule() throws {
@@ -638,10 +758,10 @@ final class APITests: XCTestCase {
     func testDistanceFieldProgramInstructionsWriteCompactAttributes() throws {
         let renderer = try DenrimRenderer()
         var scene = RenderScene()
-        let material = scene.addMaterial(SemanticMaterial.moss())
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.12, 0.38, 0.12), roughness: 0.86, specular: 0.2))
         let layout = DistanceVolumeAttributeLayout(channels: [
-            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
-            DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness)
+            DistanceVolumeAttributeChannel(name: "growthAge"),
+            DistanceVolumeAttributeChannel(name: "wetness")
         ])
         let program = DistanceFieldProgram(
             instructions: [
@@ -680,7 +800,7 @@ final class APITests: XCTestCase {
         let leftMaterial = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.2, 0.2)))
         let rightMaterial = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.2, 0.2, 0.9)))
         let layout = DistanceVolumeAttributeLayout(channels: [
-            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge)
+            DistanceVolumeAttributeChannel(name: "growthAge")
         ])
         let program = DistanceFieldProgram(
             instructions: [
@@ -726,7 +846,7 @@ final class APITests: XCTestCase {
         let leftMaterial = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.9, 0.2, 0.2)))
         let rightMaterial = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.2, 0.2, 0.9)))
         let layout = DistanceVolumeAttributeLayout(channels: [
-            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge)
+            DistanceVolumeAttributeChannel(name: "growthAge")
         ])
         let program = DistanceFieldProgram(
             instructions: [
@@ -770,10 +890,10 @@ final class APITests: XCTestCase {
     func testDistanceFieldProgramSparseSampleScalePreservesCompactAttributes() throws {
         let renderer = try DenrimRenderer()
         var scene = RenderScene()
-        let material = scene.addMaterial(SemanticMaterial.moss())
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.12, 0.38, 0.12), roughness: 0.86, specular: 0.2))
         let layout = DistanceVolumeAttributeLayout(channels: [
-            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
-            DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness)
+            DistanceVolumeAttributeChannel(name: "growthAge"),
+            DistanceVolumeAttributeChannel(name: "wetness")
         ])
         let program = DistanceFieldProgram(
             instructions: [
@@ -819,7 +939,7 @@ final class APITests: XCTestCase {
 
         let renderer = try DenrimRenderer()
         var scene = RenderScene()
-        let material = scene.addMaterial(SemanticMaterial.moss())
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.12, 0.38, 0.12), roughness: 0.86, specular: 0.2))
         let program = DistanceFieldProgram(
             instructions: [
                 .loadPosition(.init(0)),
@@ -833,8 +953,8 @@ final class APITests: XCTestCase {
                 .emit(distance: .init(2), material: material)
             ],
             attributeLayout: DistanceVolumeAttributeLayout(channels: [
-                DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
-                DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness)
+                DistanceVolumeAttributeChannel(name: "growthAge"),
+                DistanceVolumeAttributeChannel(name: "wetness")
             ])
         )
         let baker = renderer.makeDistanceFieldBaker(preferredBackend: .metalCompute)
@@ -865,8 +985,7 @@ final class APITests: XCTestCase {
         )
         XCTAssertTrue((0..<metadata.attributeDescriptorCount).contains { index in
             descriptors[index].metadata.y == 1
-                && descriptors[index].semantics0.x == DistanceVolumeAttributeSemantic.growthAge.rawValue
-                && descriptors[index].semantics0.y == DistanceVolumeAttributeSemantic.wetness.rawValue
+                && descriptors[index].reserved0 == SIMD4<UInt32>(repeating: 0)
         })
 
         let samples = attributeSampleBuffer.contents().bindMemory(
@@ -907,7 +1026,7 @@ final class APITests: XCTestCase {
                 .emit(distance: .init(5), material: rightMaterial)
             ],
             attributeLayout: DistanceVolumeAttributeLayout(channels: [
-                DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge)
+                DistanceVolumeAttributeChannel(name: "growthAge")
             ])
         )
         let baker = renderer.makeDistanceFieldBaker(preferredBackend: .metalCompute)
@@ -1288,10 +1407,10 @@ final class APITests: XCTestCase {
             throw XCTSkip("Could not create Metal command queue.")
         }
         var scene = RenderScene()
-        let material = scene.addMaterial(SemanticMaterial.moss())
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.12, 0.38, 0.12), roughness: 0.86, specular: 0.2))
         let layout = DistanceVolumeAttributeLayout(channels: [
-            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
-            DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness)
+            DistanceVolumeAttributeChannel(name: "growthAge"),
+            DistanceVolumeAttributeChannel(name: "wetness")
         ])
         func program(growthAge: Float, wetness: Float) -> DistanceFieldProgram {
             DistanceFieldProgram(
@@ -1354,8 +1473,7 @@ final class APITests: XCTestCase {
         )
         let descriptor = descriptors[activeBrickIndex]
         XCTAssertEqual(descriptor.metadata.y, 1)
-        XCTAssertEqual(descriptor.semantics0.x, DistanceVolumeAttributeSemantic.growthAge.rawValue)
-        XCTAssertEqual(descriptor.semantics0.y, DistanceVolumeAttributeSemantic.wetness.rawValue)
+        XCTAssertEqual(descriptor.reserved0, SIMD4<UInt32>(repeating: 0))
         let samples = attributeSampleBuffer.contents().bindMemory(
             to: SIMD4<Float>.self,
             capacity: max(resource.attributeSampleCount, 1)
@@ -1369,7 +1487,7 @@ final class APITests: XCTestCase {
     func testDistanceFieldBakerFallsBackForAttributeGraphs() throws {
         let renderer = try DenrimRenderer()
         var scene = RenderScene()
-        let material = scene.addMaterial(SemanticMaterial.moss())
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.12, 0.38, 0.12), roughness: 0.86, specular: 0.2))
         let baker = renderer.makeDistanceFieldBaker(preferredBackend: .metalCompute)
         let result = try baker.bake(DistanceFieldBakeRequest(
             graph: DistanceFieldBakeGraph(
@@ -1381,7 +1499,7 @@ final class APITests: XCTestCase {
                     )
                 ],
                 attributeLayout: DistanceVolumeAttributeLayout(channels: [
-                    DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge)
+                    DistanceVolumeAttributeChannel(name: "growthAge")
                 ])
             ),
             resolution: 14,
@@ -1448,42 +1566,22 @@ final class APITests: XCTestCase {
         XCTAssertTrue(scene.materials.contains { $0.specularAnisotropy > 0 })
     }
 
-    func testSemanticMaterialResolvesArtistEditableStyle() {
-        let moss = SemanticMaterial.moss(
-            youngColor: SIMD3<Float>(0.6, 0.9, 0.25),
-            matureColor: SIMD3<Float>(0.1, 0.42, 0.12),
-            dryColor: SIMD3<Float>(0.48, 0.34, 0.18),
-            age: 0.5,
-            wetness: 0.7
-        )
-
-        let material = moss.resolvedMaterial()
-
-        XCTAssertGreaterThan(material.baseColor.y, material.baseColor.x)
-        XCTAssertGreaterThan(material.baseColor.y, material.baseColor.z)
-        XCTAssertLessThan(material.roughness, 0.7)
-        XCTAssertGreaterThan(material.sheen, 0)
-        XCTAssertGreaterThan(material.subsurface, 0)
-    }
-
-    func testRenderSceneStoresSemanticMaterialsAsSourceOfTruth() throws {
+    func testRenderSceneStoresPlainMaterialsAsSourceOfTruth() throws {
         var scene = RenderScene()
-        let moss = SemanticMaterial.moss(
-            youngColor: SIMD3<Float>(0.3, 0.8, 0.2),
-            matureColor: SIMD3<Float>(0.05, 0.32, 0.08),
-            age: 0.25,
-            wetness: 0.4
+        let source = Material(
+            baseColor: SIMD3<Float>(0.3, 0.8, 0.2),
+            roughness: 0.64,
+            specular: 0.42
         )
-        let material = scene.addMaterial(moss)
+        let material = scene.addMaterial(source)
 
         XCTAssertEqual(material.rawValue, 0)
-        XCTAssertEqual(scene.materialSources.count, 1)
-        XCTAssertEqual(scene.materialSources[0].archetype, .moss)
         XCTAssertEqual(scene.materials.count, 1)
+        XCTAssertEqual(scene.materials[0].baseColor.x, source.baseColor.x, accuracy: 0.0001)
 
         let compiled = try scene.compileForGPU()
         XCTAssertEqual(compiled.materials.count, 1)
-        XCTAssertEqual(compiled.materials[0].baseColor.x, moss.resolvedMaterial().baseColor.x, accuracy: 0.0001)
+        XCTAssertEqual(compiled.materials[0].baseColor.x, source.baseColor.x, accuracy: 0.0001)
     }
 
     func testTransparentMaterialReferenceSceneCompiles() throws {
@@ -1586,7 +1684,9 @@ final class APITests: XCTestCase {
             emission: SIMD3<Float>(1.5, 0.2, 0.1),
             roughness: 0.87,
             metallic: 0.23,
-            transmission: 0.31
+            specular: 0.64,
+            transmission: 0.31,
+            emissionStrength: 2.5
         )
         let volume = DistanceVolume(
             width: 4,
@@ -1611,12 +1711,87 @@ final class APITests: XCTestCase {
         XCTAssertEqual(sample.emissionTransmission.w, 0.31, accuracy: 0.0001)
         XCTAssertEqual(sample.surface.x, 0.87, accuracy: 0.0001)
         XCTAssertEqual(sample.surface.y, 0.23, accuracy: 0.0001)
+        XCTAssertEqual(sample.surface.z, 0.64, accuracy: 0.0001)
+        XCTAssertEqual(sample.surface.w, 2.5, accuracy: 0.0001)
         XCTAssertNotEqual(sample.materialFieldFlags.x & DistanceVolumeMaterialFields.baseColorFlag, 0)
         XCTAssertNotEqual(sample.materialFieldFlags.x & DistanceVolumeMaterialFields.opacityFlag, 0)
         XCTAssertNotEqual(sample.materialFieldFlags.x & DistanceVolumeMaterialFields.emissionFlag, 0)
         XCTAssertNotEqual(sample.materialFieldFlags.x & DistanceVolumeMaterialFields.roughnessFlag, 0)
         XCTAssertNotEqual(sample.materialFieldFlags.x & DistanceVolumeMaterialFields.metallicFlag, 0)
         XCTAssertNotEqual(sample.materialFieldFlags.x & DistanceVolumeMaterialFields.transmissionFlag, 0)
+        XCTAssertNotEqual(sample.materialFieldFlags.x & DistanceVolumeMaterialFields.specularFlag, 0)
+        XCTAssertNotEqual(sample.materialFieldFlags.x & DistanceVolumeMaterialFields.emissionStrengthFlag, 0)
+    }
+
+    func testDistanceFieldProgramWritesGenericMaterialFields() throws {
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.75, 0.75, 0.75)))
+        let program = DistanceFieldProgram(instructions: [
+            .loadPosition(.init(0)),
+            .setFloat(.init(0), 0.48),
+            .length(.init(1), .init(0)),
+            .subtractFloat(.init(2), .init(1), .init(0)),
+            .setVector(.init(1), SIMD3<Float>(0.18, 0.42, 0.11)),
+            .writeMaterialFieldVector(.baseColor, vector: .init(1)),
+            .setFloat(.init(4), 0.86),
+            .writeMaterialField(.roughness, scalar: .init(4)),
+            .setFloat(.init(5), 0.33),
+            .writeMaterialField(.specular, scalar: .init(5)),
+            .emit(distance: .init(2), material: material)
+        ])
+
+        let volume = try DistanceFieldProgramBuilder.build(
+            program: program,
+            settings: DistanceVolumeBuildSettings(resolution: 8),
+            fallbackMaterial: material
+        )
+
+        XCTAssertTrue(volume.attributeLayout.isEmpty)
+        XCTAssertTrue(volume.materialSamples.contains { sample in
+            sample.fields.baseColor == SIMD3<Float>(0.18, 0.42, 0.11)
+                && sample.fields.roughness == 0.86
+                && sample.fields.specular == 0.33
+        })
+    }
+
+    func testDistanceFieldMaterialProgramOwnsHitTimeMasksAndMaterialWrites() {
+        let program = DistanceFieldMaterialProgram(instructions: [
+            .loadVectorInput(.init(0), .localPosition),
+            .extractY(.init(0), .init(0)),
+            .clampFloatConstant(.init(1), .init(0), min: 0, max: 1),
+            .writeMask(.a, .init(1)),
+            .readMask(.a, .init(2)),
+            .writeMaterialField(.roughness, scalar: .init(2)),
+            .setVector(.init(1), SIMD3<Float>(0.18, 0.42, 0.11)),
+            .writeMaterialFieldVector(.baseColor, vector: .init(1))
+        ])
+
+        XCTAssertEqual(program.instructions.count, 8)
+        XCTAssertTrue(program.instructions.contains(.writeMask(.a, .init(1))))
+        XCTAssertTrue(program.instructions.contains(.readMask(.a, .init(2))))
+    }
+
+    func testDistanceFieldProgramSmoothUnionBlendsGenericMaterialFields() {
+        let materialA = MaterialID(rawValue: 0)
+        let materialB = MaterialID(rawValue: 1)
+        let program = DistanceFieldProgram(instructions: [
+            .setFloat(.init(0), 0),
+            .setFloat(.init(2), 0.2),
+            .writeMaterialField(.roughness, scalar: .init(2)),
+            .emit(distance: .init(0), material: materialA),
+            .setFloat(.init(4), 0.8),
+            .writeMaterialField(.roughness, scalar: .init(4)),
+            .emit(distance: .init(0), material: materialB, smoothUnionRadius: 0.4)
+        ])
+
+        let sample = DistanceFieldProgramEvaluator.sample(
+            program: program,
+            at: .zero,
+            fallbackMaterial: materialA
+        )
+
+        XCTAssertEqual(sample.blend, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(sample.materialFields.roughness ?? -1, 0.5, accuracy: 0.0001)
     }
 
     func testSDFPrimitiveMaterialFieldsBakeIntoDenseAndSparseVolumes() throws {
@@ -1680,9 +1855,9 @@ final class APITests: XCTestCase {
         var scene = RenderScene()
         let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.4, 0.8, 0.25)))
         let layout = DistanceVolumeAttributeLayout(channels: [
-            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge, defaultValue: 0),
-            DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness, defaultValue: 0),
-            DistanceVolumeAttributeChannel(name: "mossAmount", semantic: .mossAmount, defaultValue: 0)
+            DistanceVolumeAttributeChannel(name: "growthAge", defaultValue: 0),
+            DistanceVolumeAttributeChannel(name: "wetness", defaultValue: 0),
+            DistanceVolumeAttributeChannel(name: "mossAmount", defaultValue: 0)
         ])
         let model = SDFModel(
             primitives: [
@@ -1736,10 +1911,10 @@ final class APITests: XCTestCase {
         var scene = RenderScene()
         let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.4, 0.8, 0.25)))
         let layout = DistanceVolumeAttributeLayout(channels: [
-            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
-            DistanceVolumeAttributeChannel(name: "cavity", semantic: .cavity),
-            DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness),
-            DistanceVolumeAttributeChannel(name: "polish", semantic: .polish)
+            DistanceVolumeAttributeChannel(name: "growthAge"),
+            DistanceVolumeAttributeChannel(name: "cavity"),
+            DistanceVolumeAttributeChannel(name: "wetness"),
+            DistanceVolumeAttributeChannel(name: "polish")
         ])
         let sampleCount = 4 * 4 * 4
         let packed = packedAttributeSample(
@@ -1774,10 +1949,8 @@ final class APITests: XCTestCase {
         XCTAssertEqual(descriptor.metadata.y, 1)
         XCTAssertEqual(descriptor.metadata.z, UInt32(sampleCount))
         XCTAssertEqual(descriptor.metadata.w, 0)
-        XCTAssertEqual(descriptor.semantics0.x, DistanceVolumeAttributeSemantic.growthAge.rawValue)
-        XCTAssertEqual(descriptor.semantics0.y, DistanceVolumeAttributeSemantic.cavity.rawValue)
-        XCTAssertEqual(descriptor.semantics0.z, DistanceVolumeAttributeSemantic.wetness.rawValue)
-        XCTAssertEqual(descriptor.semantics0.w, DistanceVolumeAttributeSemantic.polish.rawValue)
+        XCTAssertEqual(descriptor.reserved0, SIMD4<UInt32>(repeating: 0))
+        XCTAssertEqual(descriptor.reserved1, SIMD4<UInt32>(repeating: 0))
     }
 
     func testSparseSDFBuildStoresOnlyActiveBricks() throws {
@@ -2080,6 +2253,8 @@ final class APITests: XCTestCase {
         XCTAssertTrue(BuiltInMaterialLibrary.identifiers.contains("glass.thin-pane"))
         XCTAssertTrue(BuiltInMaterialLibrary.identifiers.contains("subsurface.skin-warm"))
         XCTAssertTrue(BuiltInMaterialLibrary.identifiers.contains("coating.iridescent-amber"))
+        XCTAssertTrue(BuiltInMaterialLibrary.identifiers.contains("organic.wood"))
+        XCTAssertTrue(BuiltInMaterialLibrary.identifiers.contains("organic.plant"))
         XCTAssertTrue(BuiltInMaterialLibrary.presets(in: .metal).contains { $0.identifier == "metal.brushed-aluminum" })
 
         let glass = try XCTUnwrap(BuiltInMaterialLibrary.material(named: "glass.thin_pane"))
@@ -2106,6 +2281,16 @@ final class APITests: XCTestCase {
         XCTAssertGreaterThan(milk.material.transmission, 0)
         XCTAssertGreaterThan(milk.material.volumeScattering, 0)
         XCTAssertGreaterThan(milk.material.transmissionAbsorptionDistance, 0)
+
+        let wood = try XCTUnwrap(BuiltInMaterialLibrary.preset(named: "ORGANIC.WOOD"))
+        XCTAssertEqual(wood.category, .diffuse)
+        XCTAssertGreaterThan(wood.material.roughness, 0.7)
+        XCTAssertEqual(wood.material.metallic, 0, accuracy: 0.0001)
+
+        let plant = try XCTUnwrap(BuiltInMaterialLibrary.preset(named: "ORGANIC.PLANT"))
+        XCTAssertEqual(plant.category, .subsurface)
+        XCTAssertGreaterThan(plant.material.baseColor.y, plant.material.baseColor.x)
+        XCTAssertGreaterThan(plant.material.subsurface, 0)
     }
 
     func testBuiltInMaterialPreviewManifestMatchesPresets() throws {

@@ -92,16 +92,10 @@ material amberPreset preset coating.iridescent-amber
 material glassPreset preset glass.thin-pane
 material warmPanel preset emission.warm-panel emission 1 0.82 0.55 6
 
-# Semantic materials are the preferred source for SDF-heavy products.
-# material name semantic archetype [color r g b] [secondaryColor r g b] [accentColor r g b]
-#                        [youngColor r g b] [matureColor r g b] [dryColor r g b]
-#                        [roughness value] [metallic value] [opacity value]
-#                        [transmission value] [emissionStrength value]
-#                        [amount value] [age value] [wetness value] [polish value]
-#                        [cavity value] [emission value]
-material mossy semantic moss youngColor 0.9 0.95 0.12 matureColor 0.04 0.34 0.04 dryColor 0.52 0.36 0.12
-material wet semantic wetFilm tint 0.55 0.72 0.82 wetness 1
-material crystal semantic crystal color 0.72 0.9 1 clarity 0.82 polish 0.92
+# SDF-heavy products should use plain materials plus generic material fields.
+material mossy 0.12 0.38 0.12 roughness 0.86 specular 0.22 sheen 0.28 subsurface 0.18
+material wet 0.55 0.72 0.82 roughness 0.025 specular 0.85 opacity 0.55 transmission 0.65 thinWalled 1
+material crystal 0.72 0.9 1 roughness 0.02 specular 1 opacity 0.8 transmission 0.82 transmissionIOR 1.5
 
 # include reusable script fragment
 include commonMaterials
@@ -161,11 +155,11 @@ When a script contains `render` defaults, `denrim` uses them for omitted CLI opt
 
 `render sdfResolution n` sets the default build resolution for every `sdf` / `volume` command that omits its own `resolution n`. Per-SDF `resolution n` remains useful for intentionally lower- or higher-detail fields. The CLI flag `--sdf-resolution n` overrides both script defaults and per-SDF values at parse time, so it changes the actual baked dense fields or sparse bricks.
 
-The `denrim` CLI passes a renderer-backed `DistanceFieldBaker` into SceneScript parsing. Bakeable primitive SDF scenes use the Metal compute baker during scene load; scripts with compact attributes or baked material fields fall back to the CPU reference baker until those lanes are implemented on the GPU.
+The `denrim` CLI passes a renderer-backed `DistanceFieldBaker` into SceneScript parsing. Bakeable primitive SDF scenes use the Metal compute baker during scene load when the requested graph fits the current GPU primitive path; scripts with compact attributes or baked material fields can fall back to the CPU reference baker when needed so those lanes are preserved. `DistanceFieldProgram` direct-grid resources are the no-readback path for live Form-style masks and material fields.
 
 Denoising is off by default. `--denoise apple-svgf` and `--denoise experimental-simple` are explicit opt-in comparison modes, not baseline output modes.
 
-The repository includes a self-contained material-variant script template at `Examples/SceneScripts/MaterialVariants/material-variants.denrim`. It uses a bundled toy PLY mesh so tests can run without external assets. `Examples/SceneScripts/SDF/semantic-sdf.denrim` is the current scripted validation scene for sparse SDF bricks, semantic materials, compact volume attributes, smooth primitive blending, and baked material field overrides. `Examples/SceneScripts/SDF/shadertoy-material-testball.denrim` is an SDF material-test scene derived from Markus Moenig's 2018 Shadertoy preview scene; it uses a rounded beveled SDF box environment, pedestal cylinders, sphere/cylinder CSG subtraction, and the original preview camera.
+The repository includes a self-contained material-variant script template at `Examples/SceneScripts/MaterialVariants/material-variants.denrim`. It uses a bundled toy PLY mesh so tests can run without external assets. `Examples/SceneScripts/SDF/custom-attribute-sdf.denrim` is the current scripted validation scene for sparse SDF bricks, compact custom volume attributes, smooth primitive blending, and baked material field overrides. `Examples/SceneScripts/SDF/shadertoy-material-testball.denrim` is an SDF material-test scene derived from Markus Moenig's 2018 Shadertoy preview scene; it uses a rounded beveled SDF box environment, pedestal cylinders, sphere/cylinder CSG subtraction, and the original preview camera.
 
 The Stanford Dragon example lives at `Examples/SceneScripts/MaterialVariants/dragon-material-variants.denrim`. Run `./Examples/Tools/render-quality-examples.sh` to fetch the mesh if needed and render local comparison outputs into `/tmp/denrim-quality-examples`.
 

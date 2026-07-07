@@ -10,6 +10,7 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
         ).build(scene: scene)
         let materialResources = Self.gpuMaterialsAndTextures(scene: scene)
         let volumeResources = try Self.gpuVolumes(scene: scene)
+        let materialProgramResources = MaterialProgramGPUEncoding.encode(volumeResources.materialPrograms)
         let volumeBrickResources = try Self.gpuVolumeBricks(
             scene: scene,
             buildsBVH: buildsVolumeBrickBVH
@@ -29,6 +30,9 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
             volumeSamples: volumeResources.samples,
             volumeAttributeDescriptors: volumeResources.attributeDescriptors,
             volumeAttributeSamples: volumeResources.attributeSamples,
+            volumeMaterialPrograms: volumeResources.materialPrograms,
+            materialProgramDescriptors: materialProgramResources.descriptors,
+            materialProgramOperations: materialProgramResources.operations,
             volumeBricks: volumeBrickResources.descriptors,
             volumeBrickSamples: volumeBrickResources.samples,
             volumeBrickMaterialFieldSamples: volumeBrickResources.materialFieldSamples,
@@ -41,6 +45,8 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
             gpuVolumeBrickCount: volumeBrickResources.gpuBrickCount,
             gpuVolumeBrickSampleBuffer: volumeBrickResources.gpuSampleBuffer,
             gpuVolumeBrickSampleCount: volumeBrickResources.gpuSampleCount,
+            gpuVolumeBrickMaterialFieldSampleBuffer: volumeBrickResources.gpuMaterialFieldSampleBuffer,
+            gpuVolumeBrickMaterialFieldSampleCount: volumeBrickResources.gpuMaterialFieldSampleCount,
             gpuVolumeBrickAttributeDescriptorBuffer: volumeBrickResources.gpuAttributeDescriptorBuffer,
             gpuVolumeBrickAttributeDescriptorCount: volumeBrickResources.gpuAttributeDescriptorCount,
             gpuVolumeBrickAttributeSampleBuffer: volumeBrickResources.gpuAttributeSampleBuffer,
@@ -50,7 +56,6 @@ struct LinearTriangleAccelerationBackend: AccelerationBackend {
             gpuVolumeBrickGridIndexBuffer: volumeBrickResources.gpuGridIndexBuffer,
             gpuVolumeBrickGridIndexCount: volumeBrickResources.gpuGridIndexCount,
             materials: materialResources.materials,
-            materialSemantics: materialResources.semantics,
             textureDescriptors: materialResources.descriptors,
             texturePixels: materialResources.pixels,
             environmentTextureIndexPlusOne: materialResources.environmentTextureIndexPlusOne,

@@ -62,7 +62,6 @@ Initial public types:
 * `DistanceVolume`
 * `DistanceVolumeAttributeChannel`
 * `DistanceVolumeAttributeLayout`
-* `DistanceVolumeAttributeSemantic`
 * `DistanceVolumeAttributeValues`
 * `DistanceVolumeInstance`
 * `DistanceVolumeMaterialFields`
@@ -90,10 +89,6 @@ Initial public types:
 * `DistanceVolumeBuildSettings`
 * `SparseDistanceVolumeBuildSettings`
 * `DistanceVolumeBuilder`
-* `SemanticMaterial`
-* `MaterialArchetype`
-* `MaterialStyle`
-* `MaterialSemanticAttributes`
 * `Material`
 * `MaterialID`
 * `BuiltInMaterialLibrary`
@@ -114,11 +109,10 @@ Meshes can be added with a material and an optional transform:
 
 ```swift
 var scene = RenderScene()
-let material = scene.addMaterial(SemanticMaterial.moss(
-    youngColor: SIMD3<Float>(0.42, 0.68, 0.22),
-    matureColor: SIMD3<Float>(0.12, 0.38, 0.12),
-    age: 0.35,
-    wetness: 0.2
+let material = scene.addMaterial(Material(
+    baseColor: SIMD3<Float>(0.12, 0.38, 0.12),
+    roughness: 0.86,
+    specular: 0.22
 ))
 
 scene.add(
@@ -152,11 +146,11 @@ scene.add(
 
 `DistanceVolumeMaterialSample` can carry a two-material blend plus optional baked `DistanceVolumeMaterialFields`. These fields override selected material channels after material-ID blending, which lets procedural SDF systems bake color, opacity, emission, roughness, metallic, and transmission fields without generating a unique static material for every voxel.
 
-`RenderFieldBundle` is the preferred Form-to-RendererKit boundary. Products should add semantic materials to the scene, compile their procedural model into dense or sparse field storage, and pass the bundle to `RenderScene`. For bakeable primitive graphs, use the renderer's `DistanceFieldBaker` instead of calling the CPU reference builder directly:
+`RenderFieldBundle` is the preferred Form-to-RendererKit boundary. Products should add plain renderer materials to the scene, compile their procedural model into dense or sparse field storage, and pass the bundle to `RenderScene`. For bakeable primitive graphs, use the renderer's `DistanceFieldBaker` instead of calling the CPU reference builder directly:
 
 ```swift
 let renderer = try DenrimRenderer()
-let moss = scene.addMaterial(SemanticMaterial.moss())
+let moss = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.12, 0.38, 0.12), roughness: 0.86))
 let baker = renderer.makeDistanceFieldBaker()
 let result = try baker.bake(DistanceFieldBakeRequest(
     graph: DistanceFieldBakeGraph(model: formCompiledModel),
@@ -169,7 +163,7 @@ let fieldID = scene.add(fieldBundle: result.bundle, transform: objectTransform)
 
 Form should own its editable timeline/operator document format. RendererKit owns the renderable field-bundle API and storage semantics. SceneScript can emit or load comparable scenes for debugging and fixtures, but it is not the realtime interchange layer between Form and RendererKit.
 
-`DistanceFieldBaker` is the shared bake service for SceneScript, Denrim Form, and other procedural hosts. It accepts a `DistanceFieldBakeGraph`, target bounds/resolution, and dense or sparse-brick storage. `DistanceFieldBakeStorage.sparseBricks(..., sampleScale:)` requests refined sparse payloads for quality: the baker increases sample dimensions and brick payload size together while keeping the coarse brick grid stable. The current Metal compute path supports transformed spheres, rounded boxes, cylinders, union/subtract, smooth-union material IDs, sparse-brick extraction, and sample-scaled GPU-resident direct-grid bakes. Direct-grid `DistanceFieldProgram` bakes can keep compact attribute samples GPU-resident; generic `SDFModel` graphs with compact attributes or baked material fields still fall back to the CPU reference baker so semantic/material data is preserved. Future work should move those generic graph lanes and cache lookup behind the same API.
+`DistanceFieldBaker` is the shared bake service for SceneScript, Denrim Form, and other procedural hosts. It accepts a `DistanceFieldBakeGraph`, target bounds/resolution, and dense or sparse-brick storage. `DistanceFieldBakeStorage.sparseBricks(..., sampleScale:)` requests refined sparse payloads for quality: the baker increases sample dimensions and brick payload size together while keeping the coarse brick grid stable. The current Metal compute path supports transformed spheres, rounded boxes, cylinders, union/subtract, smooth-union material IDs, sparse-brick extraction, and sample-scaled GPU-resident direct-grid bakes. Direct-grid `DistanceFieldProgram` bakes can keep compact mask/custom attribute samples and generic material-field override samples GPU-resident; generic `SDFModel` graphs with compact attributes or baked material fields may still fall back to the CPU reference baker so those lanes are preserved. Future work should move those generic graph lanes and cache lookup behind the same API.
 
 `DistanceFieldProgram` is the first modular SDF IR for Form-style operator graphs. It is a small renderer-owned VM rather than arbitrary Metal source. Form should compile timeline modules into scalar/vector instructions and `emit` calls, so RendererKit does not need a new public SDF operation for every product-level component. The higher-level named operations are kept as conveniences and test fixtures, not as the main Form integration layer.
 
@@ -197,7 +191,7 @@ let result = try baker.bake(DistanceFieldBakeRequest(
 ))
 ```
 
-The instruction VM currently includes scalar/vector constants, arithmetic, min/max/abs, sin/cos, clamp/mix, vector compose/extract, length, box/cylinder/tapered-capsule/spline-tube distance intrinsics, field `emit` with union/subtract plus smooth-union material blending, and candidate-scoped compact semantic fields such as growth age, wetness, moss amount, cavity, and similar Form data. `writeAttribute(channel:value:)` updates the current candidate attribute registers; `emit` snapshots those registers into the emitted candidate, and `emit(... attributes:)` can attach explicit per-candidate attribute register bindings. The winning SDF candidate carries its own attributes, and smooth unions blend attributes using the same candidate weight as the material blend. Twist, bends, masks, and growth-style controls should be compiled from those generic instructions where possible. RendererKit should only grow new VM intrinsics when the math vocabulary itself is missing.
+The geometry instruction VM currently includes scalar/vector constants, arithmetic, min/max/abs, sin/cos, clamp/mix/smoothstep/step/saturate, fract/floor/mod, vector compose/extract, dot/length/normalize/distance, 3D value noise, 3D FBM, 3D cellular/Worley noise, box/cylinder/tapered-capsule/spline-tube distance intrinsics, field `emit` with union/subtract plus smooth-union material blending, candidate-scoped custom attributes, and coarse/volumetric material field writes. `DistanceFieldProgram` should be used for distance, deformation, and stable low-frequency geometric attributes such as growth age, radius, branch id, or local growth coordinates. Visible surface styling should compile into `DistanceFieldMaterialProgram`, which runs at the final hit point and owns masks, color variation, roughness/wetness changes, dots, cracks, rings, moss, age tint, and material overrides. The material VM intentionally supports the same scalar/vector math set, procedural noise intrinsics, and distance intrinsics as the geometry VM, plus hit inputs, baked attribute reads, hit-time mask registers, and generic material field writes. RendererKit should only grow new VM intrinsics when the math vocabulary itself is missing.
 
 For organic growth, `splineTubeDistance` is the preferred branch/stem primitive for one cubic Bezier tube segment with tapered endpoints. `taperedCapsuleDistance` remains useful for simple straight sections and as the lower-level segment primitive. Form can chain spline tube segments for longer branches while keeping the editable curve data in Form:
 
@@ -224,23 +218,24 @@ let program = DistanceFieldProgram(instructions: [
 ])
 ```
 
+Surface style is a separate hit-time program:
+
 ```swift
-let layout = DistanceVolumeAttributeLayout(channels: [
-    DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
-    DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness)
+let materialProgram = DistanceFieldMaterialProgram(instructions: [
+    .loadVectorInput(.init(0), .localPosition),
+    .extractY(.init(0), .init(0)),
+    .clampFloatConstant(.init(1), .init(0), min: 0, max: 1),
+    .writeMask(.a, .init(1)),
+    .readMask(.a, .init(2)),
+    .writeMaterialField(.roughness, scalar: .init(2)),
+    .setVector(.init(1), SIMD3<Float>(0.18, 0.42, 0.11)),
+    .writeMaterialFieldVector(.baseColor, vector: .init(1))
 ])
 
-let program = DistanceFieldProgram(
-    instructions: [
-        .loadPosition(.init(0)),
-        .length(.init(0), .init(0)),
-        .setFloat(.init(1), 0.55),
-        .subtractFloat(.init(2), .init(0), .init(1)),
-        .setFloat(.init(3), 0.75),
-        .writeAttribute(channel: 0, value: .init(3)),
-        .emit(distance: .init(2), material: materialID)
-    ],
-    attributeLayout: layout
+let field = RenderFieldBundle(
+    sparse: sparseVolume,
+    fallbackMaterial: materialID,
+    materialProgram: materialProgram
 )
 ```
 
@@ -365,7 +360,7 @@ try baker.encodeUpdateGPUResidentProgramBricks(
 )
 ```
 
-GPU-resident direct-grid program resources can carry a resident compact attribute sample buffer. Programs with `attributeLayout` write up to eight scalar channels as packed `float4` samples, and scene compilation binds that buffer to the same shader path used by CPU sparse attributes. GPU-resident material-field override lanes are still future work; use compact semantic attributes where possible for live Form-style materials.
+GPU-resident direct-grid program resources can carry resident compact custom scalar samples and resident generic material-field samples. These fields are intended for geometric attributes and genuinely volumetric/coarse cached data. Surface masks and material decisions should live in `DistanceFieldMaterialProgram` and are associated with the field bundle/instance rather than baked into the sparse payload.
 
 The first replacement API is whole-bundle based and uses the scene-local handle returned by `add(fieldBundle:)`:
 
@@ -508,14 +503,12 @@ try viewport.replaceGPUSparseFieldPreservingSession(fieldID, with: updated.bundl
 
 This path refreshes volume descriptors, sparse brick descriptors, sparse grids, and the GPU sample buffer binding, then resets accumulation. It reuses existing render-side SDF buffers when the new compact payload fits; otherwise it grows only the buffers that need more capacity. Direct-grid GPU metadata resources can provide those descriptor/grid buffers directly. This path is meant for edits where the field's brick occupancy changes but the rest of the scene is stable. Use full `replaceField` / `replaceScene` if the edit also changes meshes, material tables, textures, lights, camera, or other non-field scene state.
 
-`DistanceVolumeAttributeLayout` declares compact scalar fields that operators and semantic materials can share. Samples are packed in `SIMD4<Float>` groups, so a Form-style object can store fields such as growth age, cavity, wetness, and moss amount without carrying a full material parameter block per voxel:
+`DistanceVolumeAttributeLayout` supports named compact scalar fields for geometric attributes and custom tools. Samples are packed in `SIMD4<Float>` groups. Use this for stable field data such as growth age, radius, branch id, or other low-frequency structure values:
 
 ```swift
 let attributes = DistanceVolumeAttributeLayout(channels: [
-    DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
-    DistanceVolumeAttributeChannel(name: "cavity", semantic: .cavity),
-    DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness),
-    DistanceVolumeAttributeChannel(name: "mossAmount", semantic: .mossAmount)
+    DistanceVolumeAttributeChannel(name: "growthAge"),
+    DistanceVolumeAttributeChannel(name: "growthRadius")
 ])
 ```
 
@@ -530,7 +523,7 @@ let model = SDFModel(
             shape: .sphere(radius: 0.55),
             material: red,
             materialFields: DistanceVolumeMaterialFields(baseColor: SIMD3<Float>(0.9, 0.16, 0.08), roughness: 0.82),
-            attributes: DistanceVolumeAttributeValues(["growthAge": 0.35, "wetness": 0.6]),
+            attributes: DistanceVolumeAttributeValues(["growthAge": 0.35, "growthRadius": 0.6]),
             transform: .translation(SIMD3<Float>(-0.25, 0, 0))
         ),
         SDFPrimitive(shape: .sphere(radius: 0.55), material: blue, transform: .translation(SIMD3<Float>(0.25, 0, 0)), smoothUnionRadius: 0.2)
@@ -541,7 +534,7 @@ let field = try DistanceVolumeBuilder.build(model: model, settings: DistanceVolu
 scene.add(volume: field, material: red)
 ```
 
-The dense builder writes distance, material payload samples, and packed attribute samples. Smooth unions can produce two-material blend weights so material transitions follow the same blend region as the distance field. Primitive material fields and attributes are baked into the volume samples and can be blended when both sides contribute the same channel. The flat Metal path forwards those attributes to the semantic material resolver for volume hits, so fields such as `growthAge`, `wetness`, `mossAmount`, `polish`, and `burnAmount` can affect both shading and albedo AOVs. The scene instance material remains the fallback for manually authored single-material volumes.
+The dense builder writes distance, material payload samples, packed custom attribute samples, and optional generic baked material fields. Smooth unions can produce two-material blend weights so material transitions follow the same blend region as the distance field. Primitive and program material fields are candidate-aware and can be blended when both sides contribute the same channel. The flat Metal path applies baked material fields generically after material-ID blending; this path is for volumetric/coarse data, while visible surface styling should be evaluated by the field's hit-time material program. The scene instance material remains the fallback for manually authored single-material volumes.
 
 For larger or editable SDF compositions, the same model can be compiled into sparse CPU-side bricks:
 
@@ -647,20 +640,6 @@ Use `RenderViewport.updateCamera(_:)` for orbit, pan, zoom, FOV, and perspective
 
 ## Materials and Textures
 
-`SemanticMaterial` is the preferred authored material source. It stores an archetype, editable style colors, and compact semantic attributes:
-
-```swift
-let moss = scene.addMaterial(SemanticMaterial.moss(
-    youngColor: SIMD3<Float>(0.5, 0.82, 0.22),
-    matureColor: SIMD3<Float>(0.08, 0.36, 0.11),
-    dryColor: SIMD3<Float>(0.45, 0.32, 0.16),
-    age: 0.45,
-    wetness: 0.6
-))
-```
-
-`RenderScene.materialSources` stores these authored semantic materials. `RenderScene.materials` stores the resolved renderer payloads used by the current GPU path.
-
 `Material` is the expanded renderer material representation. It currently exposes scalar base color, emission, roughness, metallic, dielectric specular weight/color/anisotropy, index of refraction, clearcoat weight/tint/attenuation/thickness/roughness/IOR, thin-film interference strength/thickness/IOR, sheen/fuzz weight/color/roughness, random-walk subsurface weight/color/radius/scale/anisotropy, opacity, dielectric transmission weight/color/roughness/IOR/absorption/thin-wall mode, transmissive volume scattering controls, plus optional in-memory texture inputs:
 
 ```swift
@@ -737,7 +716,7 @@ let preview = BuiltInMaterialLibrary.preview(named: "metal.brushed-aluminum")
 let thumbnailPath = preview?.thumbnailPath
 ```
 
-Preset identifiers are stable strings such as `matte.clay`, `metal.brushed-aluminum`, `coating.iridescent-amber`, `glass.thin-pane`, `ceramic.white`, and `emission.warm-panel`. Lookup is case-insensitive and treats underscores like hyphens. `BuiltInMaterialLibrary.previews` exposes the same ordered identifiers with display name, category, description, and repository-relative generated thumbnail path for material-browser UIs.
+Preset identifiers are stable strings such as `matte.clay`, `organic.wood`, `organic.plant`, `metal.brushed-aluminum`, `coating.iridescent-amber`, `glass.thin-pane`, `ceramic.white`, and `emission.warm-panel`. Lookup is case-insensitive and treats underscores like hyphens. `BuiltInMaterialLibrary.previews` exposes the same ordered identifiers with display name, category, description, and repository-relative generated thumbnail path for material-browser UIs.
 
 Denrim product integrations should prefer these presets as material-family baselines rather than recreating simple one-off materials in each app. A product can tint the preset by replacing `baseColor` and can override simple user-facing controls such as roughness, while leaving renderer-owned lobe weights for metallic, transmission, subsurface, clearcoat, and emission behavior in the preset. Denrim Forge's Render-mode bridge follows this pattern: Matte uses `matte.clay`, Plastic uses `plastic.gloss-white`, Metal uses `metal.brushed-aluminum`, Glass uses `glass.clear`, Wax uses `subsurface.wax-cream`, and Emission uses `emission.warm-panel`, with Forge color and roughness layered on top.
 
@@ -825,7 +804,7 @@ let session = try renderer.makeSession(
 )
 ```
 
-`RenderSettings.quality` communicates preview, interactive, or final-render intent to renderer integrations. `.preview` selects a backend-independent flat single-hit renderer that resolves the same mesh/SDF/volume intersections, material IDs, semantic attributes, texture base color, and AOVs without path-tracing bounces. `.interactive` selects a backend-independent realtime material-preview renderer: it resolves the same primary hits and material payloads, then approximates the path tracer with deterministic direct area-light shading, transparent shadows, environment fill/reflections, simple transmission, and SSS-style material cheats. `.final` remains the progressive path-traced reference integrator. Command-line tools also use quality to choose a default path depth when `--max-bounces` is omitted. `RenderSettings.sampleRadianceClamp` limits the peak RGB value of a single Monte Carlo sample contribution before progressive accumulation. It is a biased but useful firefly control for glossy metals, clearcoat, glass, small bright emitters, and HDR environments. Leave it as `nil` to inherit the quality default (`preview` is stricter, `final` is gentler), set a positive value for reproducible review renders, or set `0` to disable contribution clamping when validating physically unbounded energy.
+`RenderSettings.quality` communicates preview, interactive, or final-render intent to renderer integrations. `.preview` selects a backend-independent flat single-hit renderer that resolves the same mesh/SDF/volume intersections, material IDs, generic material fields, masks/custom attributes, texture base color, and AOVs without path-tracing bounces. `.interactive` selects a backend-independent realtime material-preview renderer: it resolves the same primary hits and material payloads, then approximates the path tracer with deterministic direct area-light shading, transparent shadows, short-range contact ambient occlusion, low-frequency diffuse environment fill, roughness-filtered reflections with separate clearcoat response, simple transmission, and SSS-style material cheats. `.final` remains the progressive path-traced reference integrator. Command-line tools also use quality to choose a default path depth when `--max-bounces` is omitted. `RenderSettings.sampleRadianceClamp` limits the peak RGB value of a single Monte Carlo sample contribution before progressive accumulation. It is a biased but useful firefly control for glossy metals, clearcoat, glass, small bright emitters, and HDR environments. Leave it as `nil` to inherit the quality default (`preview` is stricter, `final` is gentler), set a positive value for reproducible review renders, or set `0` to disable contribution clamping when validating physically unbounded energy.
 
 ```swift
 let cleanPreview = RenderSettings(

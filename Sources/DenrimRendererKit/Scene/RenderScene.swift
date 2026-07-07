@@ -77,10 +77,6 @@ public struct RenderScene: Sendable {
     /// Materials available to scene geometry.
     public private(set) var materials: [Material]
 
-    /// Authored material sources. These are the material system source of truth;
-    /// `materials` stores their resolved renderer payloads.
-    public private(set) var materialSources: [SemanticMaterial]
-
     /// Mesh instances in the scene.
     public private(set) var meshInstances: [MeshInstance]
 
@@ -111,7 +107,6 @@ public struct RenderScene: Sendable {
         self.camera = camera
         self.environment = environment
         self.renderDefaults = renderDefaults
-        self.materialSources = []
         self.materials = []
         self.meshInstances = []
         self.volumeInstances = []
@@ -122,15 +117,8 @@ public struct RenderScene: Sendable {
     /// Adds an expanded renderer material and returns its scene-local identifier.
     @discardableResult
     public mutating func addMaterial(_ material: Material) -> MaterialID {
-        addMaterial(SemanticMaterial.physical(material))
-    }
-
-    /// Adds an authored semantic material and returns its scene-local identifier.
-    @discardableResult
-    public mutating func addMaterial(_ material: SemanticMaterial) -> MaterialID {
-        let id = MaterialID(rawValue: UInt32(materialSources.count))
-        materialSources.append(material)
-        materials.append(material.resolvedMaterial())
+        let id = MaterialID(rawValue: UInt32(materials.count))
+        materials.append(material)
         return id
     }
 
@@ -151,12 +139,14 @@ public struct RenderScene: Sendable {
     public mutating func add(
         volume: DistanceVolume,
         material: MaterialID,
-        transform: Transform = .identity
+        transform: Transform = .identity,
+        materialProgram: DistanceFieldMaterialProgram? = nil
     ) {
         volumeInstances.append(DistanceVolumeInstance(
             volume: volume,
             material: material,
-            transform: transform
+            transform: transform,
+            materialProgram: materialProgram
         ))
     }
 
@@ -164,12 +154,14 @@ public struct RenderScene: Sendable {
     public mutating func add(
         sparseVolume: SparseDistanceVolume,
         material: MaterialID,
-        transform: Transform = .identity
+        transform: Transform = .identity,
+        materialProgram: DistanceFieldMaterialProgram? = nil
     ) {
         sparseVolumeInstances.append(SparseDistanceVolumeInstance(
             volume: sparseVolume,
             material: material,
-            transform: transform
+            transform: transform,
+            materialProgram: materialProgram
         ))
     }
 
@@ -177,12 +169,14 @@ public struct RenderScene: Sendable {
     public mutating func add(
         gpuSparseVolume resource: RenderGPUSparseFieldResource,
         material: MaterialID,
-        transform: Transform = .identity
+        transform: Transform = .identity,
+        materialProgram: DistanceFieldMaterialProgram? = nil
     ) {
         gpuSparseVolumeInstances.append(GPUSparseDistanceVolumeInstance(
             resource: resource,
             material: material,
-            transform: transform
+            transform: transform,
+            materialProgram: materialProgram
         ))
     }
 
@@ -199,15 +193,15 @@ public struct RenderScene: Sendable {
         switch fieldBundle.storage {
         case .dense(let volume):
             let index = volumeInstances.count
-            add(volume: volume, material: fieldBundle.fallbackMaterial, transform: transform)
+            add(volume: volume, material: fieldBundle.fallbackMaterial, transform: transform, materialProgram: fieldBundle.materialProgram)
             return RenderFieldID(storage: .dense, index: index)
         case .sparse(let volume):
             let index = sparseVolumeInstances.count
-            add(sparseVolume: volume, material: fieldBundle.fallbackMaterial, transform: transform)
+            add(sparseVolume: volume, material: fieldBundle.fallbackMaterial, transform: transform, materialProgram: fieldBundle.materialProgram)
             return RenderFieldID(storage: .sparse, index: index)
         case .gpuSparse(let resource):
             let index = gpuSparseVolumeInstances.count
-            add(gpuSparseVolume: resource, material: fieldBundle.fallbackMaterial, transform: transform)
+            add(gpuSparseVolume: resource, material: fieldBundle.fallbackMaterial, transform: transform, materialProgram: fieldBundle.materialProgram)
             return RenderFieldID(storage: .gpuSparse, index: index)
         }
     }
@@ -254,7 +248,8 @@ public struct RenderScene: Sendable {
         volumeInstances[index] = DistanceVolumeInstance(
             volume: volume,
             material: fieldBundle.fallbackMaterial,
-            transform: transform ?? existingTransform
+            transform: transform ?? existingTransform,
+            materialProgram: fieldBundle.materialProgram
         )
         return true
     }
@@ -280,7 +275,8 @@ public struct RenderScene: Sendable {
         sparseVolumeInstances[index] = SparseDistanceVolumeInstance(
             volume: volume,
             material: fieldBundle.fallbackMaterial,
-            transform: transform ?? existingTransform
+            transform: transform ?? existingTransform,
+            materialProgram: fieldBundle.materialProgram
         )
         return true
     }
@@ -302,7 +298,8 @@ public struct RenderScene: Sendable {
         gpuSparseVolumeInstances[index] = GPUSparseDistanceVolumeInstance(
             resource: resource,
             material: fieldBundle.fallbackMaterial,
-            transform: transform ?? existingTransform
+            transform: transform ?? existingTransform,
+            materialProgram: fieldBundle.materialProgram
         )
         return true
     }
@@ -833,24 +830,25 @@ public struct RenderScene: Sendable {
     }
 
     func compileForGPU() throws -> SceneCompilation {
-        guard !materialSources.isEmpty else {
+        guard !materials.isEmpty else {
             throw DenrimRendererError.invalidScene("At least one material is required.")
         }
 
         let instanceAcceleration = try InstanceAccelerationBuilder().build(scene: self)
 
         let volumeResources = try LinearTriangleAccelerationBackend.gpuVolumes(scene: self)
+        let materialProgramResources = MaterialProgramGPUEncoding.encode(volumeResources.materialPrograms)
         let volumeBrickResources = try LinearTriangleAccelerationBackend.gpuVolumeBricks(scene: self)
-        let resolvedMaterials = materialSources.map { $0.resolvedMaterial() }
-
         return SceneCompilation(
             triangles: instanceAcceleration.materializedTriangles(),
-            materials: resolvedMaterials.map { $0.gpuMaterial() },
-            materialSemantics: materialSources.map(LinearTriangleAccelerationBackend.gpuMaterialSemanticDescriptor),
+            materials: materials.map { $0.gpuMaterial() },
             volumes: volumeResources.descriptors,
             volumeSamples: volumeResources.samples,
             volumeAttributeDescriptors: volumeResources.attributeDescriptors,
             volumeAttributeSamples: volumeResources.attributeSamples,
+            volumeMaterialPrograms: volumeResources.materialPrograms,
+            materialProgramDescriptors: materialProgramResources.descriptors,
+            materialProgramOperations: materialProgramResources.operations,
             volumeBricks: volumeBrickResources.descriptors,
             volumeBrickSamples: volumeBrickResources.samples,
             volumeBrickMaterialFieldSamples: volumeBrickResources.materialFieldSamples,
@@ -864,11 +862,13 @@ public struct RenderScene: Sendable {
 struct SceneCompilation {
     var triangles: [GPUTriangle]
     var materials: [GPUMaterial]
-    var materialSemantics: [GPUMaterialSemanticDescriptor]
     var volumes: [GPUVolumeDescriptor]
     var volumeSamples: [GPUVolumeSample]
     var volumeAttributeDescriptors: [GPUVolumeAttributeDescriptor]
     var volumeAttributeSamples: [SIMD4<Float>]
+    var volumeMaterialPrograms: [DistanceFieldMaterialProgram]
+    var materialProgramDescriptors: [GPUMaterialProgramDescriptor]
+    var materialProgramOperations: [GPUMaterialProgramOperation]
     var volumeBricks: [GPUVolumeBrickDescriptor]
     var volumeBrickSamples: [GPUVolumeBrickSample]
     var volumeBrickMaterialFieldSamples: [GPUVolumeMaterialFieldSample]

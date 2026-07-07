@@ -2,34 +2,16 @@ import Foundation
 import Metal
 import simd
 
-/// Semantic meaning for compact scalar attributes baked alongside a distance field.
-public enum DistanceVolumeAttributeSemantic: UInt32, Sendable, Equatable, CaseIterable {
-    case custom = 0
-    case growthAge = 1
-    case branchID = 2
-    case curvature = 3
-    case cavity = 4
-    case noise = 5
-    case wetness = 6
-    case mossAmount = 7
-    case polish = 8
-    case fracture = 9
-    case burnAmount = 10
-}
-
 /// One scalar channel in a compact volume attribute layout.
 public struct DistanceVolumeAttributeChannel: Sendable, Equatable {
     public var name: String
-    public var semantic: DistanceVolumeAttributeSemantic
     public var defaultValue: Float
 
     public init(
         name: String,
-        semantic: DistanceVolumeAttributeSemantic = .custom,
         defaultValue: Float = 0
     ) {
         self.name = name
-        self.semantic = semantic
         self.defaultValue = defaultValue
     }
 }
@@ -62,15 +44,12 @@ public struct DistanceVolumeAttributeLayout: Sendable, Equatable {
         channels.firstIndex { $0.name == name }
     }
 
-    public func channelIndex(semantic: DistanceVolumeAttributeSemantic) -> Int? {
-        channels.firstIndex { $0.semantic == semantic }
-    }
-
     public func defaultPackedSample() -> [SIMD4<Float>] {
         packedAttributeSample(values: DistanceVolumeAttributeValues(), layout: self)
     }
 
     public static let maximumChannelCount = 8
+
 }
 
 /// Named scalar values emitted by an SDF primitive or operator.
@@ -120,7 +99,9 @@ public struct DistanceVolumeMaterialFields: Sendable, Equatable {
     public var emission: SIMD3<Float>?
     public var roughness: Float?
     public var metallic: Float?
+    public var specular: Float?
     public var transmission: Float?
+    public var emissionStrength: Float?
 
     public init(
         baseColor: SIMD3<Float>? = nil,
@@ -128,14 +109,18 @@ public struct DistanceVolumeMaterialFields: Sendable, Equatable {
         emission: SIMD3<Float>? = nil,
         roughness: Float? = nil,
         metallic: Float? = nil,
-        transmission: Float? = nil
+        specular: Float? = nil,
+        transmission: Float? = nil,
+        emissionStrength: Float? = nil
     ) {
         self.baseColor = baseColor
         self.opacity = opacity
         self.emission = emission
         self.roughness = roughness
         self.metallic = metallic
+        self.specular = specular
         self.transmission = transmission
+        self.emissionStrength = emissionStrength
     }
 
     var flags: UInt32 {
@@ -146,6 +131,8 @@ public struct DistanceVolumeMaterialFields: Sendable, Equatable {
         if roughness != nil { value |= Self.roughnessFlag }
         if metallic != nil { value |= Self.metallicFlag }
         if transmission != nil { value |= Self.transmissionFlag }
+        if specular != nil { value |= Self.specularFlag }
+        if emissionStrength != nil { value |= Self.emissionStrengthFlag }
         return value
     }
 
@@ -155,6 +142,8 @@ public struct DistanceVolumeMaterialFields: Sendable, Equatable {
     static let roughnessFlag: UInt32 = 1 << 3
     static let metallicFlag: UInt32 = 1 << 4
     static let transmissionFlag: UInt32 = 1 << 5
+    static let specularFlag: UInt32 = 1 << 6
+    static let emissionStrengthFlag: UInt32 = 1 << 7
 }
 
 /// Per-voxel material payload for a dense signed-distance volume.
@@ -630,6 +619,8 @@ public final class RenderGPUSparseFieldResource: @unchecked Sendable {
     public let bricks: [RenderGPUSparseFieldBrick]
     public let sampleBuffer: MTLBuffer
     public let sampleCount: Int
+    public let materialFieldSampleBuffer: MTLBuffer?
+    public let materialFieldSampleCount: Int
     public let attributeSampleBuffer: MTLBuffer?
     public let attributeSampleCount: Int
     public let metadataBuffers: RenderGPUSparseFieldMetadataBuffers?
@@ -659,6 +650,8 @@ public final class RenderGPUSparseFieldResource: @unchecked Sendable {
         bricks: [RenderGPUSparseFieldBrick],
         sampleBuffer: MTLBuffer,
         sampleCount: Int,
+        materialFieldSampleBuffer: MTLBuffer? = nil,
+        materialFieldSampleCount: Int = 0,
         attributeSampleBuffer: MTLBuffer? = nil,
         attributeSampleCount: Int = 0,
         metadataBuffers: RenderGPUSparseFieldMetadataBuffers? = nil
@@ -673,6 +666,8 @@ public final class RenderGPUSparseFieldResource: @unchecked Sendable {
         self.bricks = bricks
         self.sampleBuffer = sampleBuffer
         self.sampleCount = sampleCount
+        self.materialFieldSampleBuffer = materialFieldSampleBuffer
+        self.materialFieldSampleCount = materialFieldSampleCount
         self.attributeSampleBuffer = attributeSampleBuffer
         self.attributeSampleCount = attributeSampleCount
         self.metadataBuffers = metadataBuffers
@@ -907,37 +902,45 @@ public struct RenderFieldBundle: Sendable {
     /// Fallback material for samples or regions that do not provide a material payload.
     public var fallbackMaterial: MaterialID
 
+    /// Optional hit-time material program evaluated after an SDF surface hit.
+    public var materialProgram: DistanceFieldMaterialProgram?
+
     /// Creates a field bundle from dense or sparse storage.
     public init(
         storage: RenderFieldStorage,
-        fallbackMaterial: MaterialID
+        fallbackMaterial: MaterialID,
+        materialProgram: DistanceFieldMaterialProgram? = nil
     ) {
         self.storage = storage
         self.fallbackMaterial = fallbackMaterial
+        self.materialProgram = materialProgram
     }
 
     /// Creates a field bundle from a dense signed-distance volume.
     public init(
         dense volume: DistanceVolume,
-        fallbackMaterial: MaterialID
+        fallbackMaterial: MaterialID,
+        materialProgram: DistanceFieldMaterialProgram? = nil
     ) {
-        self.init(storage: .dense(volume), fallbackMaterial: fallbackMaterial)
+        self.init(storage: .dense(volume), fallbackMaterial: fallbackMaterial, materialProgram: materialProgram)
     }
 
     /// Creates a field bundle from a sparse signed-distance volume.
     public init(
         sparse volume: SparseDistanceVolume,
-        fallbackMaterial: MaterialID
+        fallbackMaterial: MaterialID,
+        materialProgram: DistanceFieldMaterialProgram? = nil
     ) {
-        self.init(storage: .sparse(volume), fallbackMaterial: fallbackMaterial)
+        self.init(storage: .sparse(volume), fallbackMaterial: fallbackMaterial, materialProgram: materialProgram)
     }
 
     /// Creates a field bundle from GPU-resident sparse signed-distance bricks.
     public init(
         gpuSparse resource: RenderGPUSparseFieldResource,
-        fallbackMaterial: MaterialID
+        fallbackMaterial: MaterialID,
+        materialProgram: DistanceFieldMaterialProgram? = nil
     ) {
-        self.init(storage: .gpuSparse(resource), fallbackMaterial: fallbackMaterial)
+        self.init(storage: .gpuSparse(resource), fallbackMaterial: fallbackMaterial, materialProgram: materialProgram)
     }
 
     /// Bounds covered by the field in bundle-local space.
@@ -962,15 +965,20 @@ public struct DistanceVolumeInstance: Sendable, Equatable {
     /// Local-to-world transform for the volume.
     public var transform: Transform
 
+    /// Optional hit-time material program evaluated for hits on this instance.
+    public var materialProgram: DistanceFieldMaterialProgram?
+
     /// Creates a distance-volume instance.
     public init(
         volume: DistanceVolume,
         material: MaterialID,
-        transform: Transform = .identity
+        transform: Transform = .identity,
+        materialProgram: DistanceFieldMaterialProgram? = nil
     ) {
         self.volume = volume
         self.material = material
         self.transform = transform
+        self.materialProgram = materialProgram
     }
 }
 
@@ -985,15 +993,20 @@ public struct SparseDistanceVolumeInstance: Sendable, Equatable {
     /// Local-to-world transform for the volume.
     public var transform: Transform
 
+    /// Optional hit-time material program evaluated for hits on this instance.
+    public var materialProgram: DistanceFieldMaterialProgram?
+
     /// Creates a sparse distance-volume instance.
     public init(
         volume: SparseDistanceVolume,
         material: MaterialID,
-        transform: Transform = .identity
+        transform: Transform = .identity,
+        materialProgram: DistanceFieldMaterialProgram? = nil
     ) {
         self.volume = volume
         self.material = material
         self.transform = transform
+        self.materialProgram = materialProgram
     }
 }
 
@@ -1008,13 +1021,18 @@ public struct GPUSparseDistanceVolumeInstance: Sendable {
     /// Local-to-world transform for the volume.
     public var transform: Transform
 
+    /// Optional hit-time material program evaluated for hits on this instance.
+    public var materialProgram: DistanceFieldMaterialProgram?
+
     public init(
         resource: RenderGPUSparseFieldResource,
         material: MaterialID,
-        transform: Transform = .identity
+        transform: Transform = .identity,
+        materialProgram: DistanceFieldMaterialProgram? = nil
     ) {
         self.resource = resource
         self.material = material
         self.transform = transform
+        self.materialProgram = materialProgram
     }
 }

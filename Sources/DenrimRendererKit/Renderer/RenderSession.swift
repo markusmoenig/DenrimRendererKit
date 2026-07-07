@@ -140,8 +140,9 @@ public final class RenderSession {
     private var volumeBrickBVHIndexBuffer: MTLBuffer
     private var volumeBrickGridBuffer: MTLBuffer
     private var volumeBrickGridIndexBuffer: MTLBuffer
+    private var materialProgramDescriptorBuffer: MTLBuffer
+    private var materialProgramOperationBuffer: MTLBuffer
     private let materialBuffer: MTLBuffer
-    private let materialSemanticBuffer: MTLBuffer
     private let textureDescriptorBuffer: MTLBuffer
     private let texturePixelBuffer: MTLBuffer
     private let lightBuffer: MTLBuffer
@@ -169,6 +170,8 @@ public final class RenderSession {
     private var volumeBrickBVHIndexCount: Int
     private var volumeBrickGridCount: Int
     private var volumeBrickGridIndexCount: Int
+    private var materialProgramCount: Int
+    private var materialProgramOperationCount: Int
     private let materialCount: Int
     private let textureDescriptorCount: Int
     private let texturePixelCount: Int
@@ -345,12 +348,14 @@ public final class RenderSession {
         self.volumeAttributeSampleCount = compiled.volumeAttributeSamples.count
         self.volumeBrickCount = compiled.gpuVolumeBrickCount ?? compiled.volumeBricks.count
         self.volumeBrickSampleCount = compiled.gpuVolumeBrickSampleCount ?? compiled.volumeBrickSamples.count
-        self.volumeBrickMaterialFieldSampleCount = compiled.volumeBrickMaterialFieldSamples.count
+        self.volumeBrickMaterialFieldSampleCount = compiled.gpuVolumeBrickMaterialFieldSampleCount ?? compiled.volumeBrickMaterialFieldSamples.count
         self.volumeBrickAttributeSampleCount = compiled.gpuVolumeBrickAttributeSampleCount ?? compiled.volumeBrickAttributeSamples.count
         self.volumeBrickBVHNodeCount = compiled.volumeBrickBVH.nodes.count
         self.volumeBrickBVHIndexCount = compiled.volumeBrickBVH.primitiveIndices.count
         self.volumeBrickGridCount = compiled.gpuVolumeBrickGridCount ?? compiled.volumeBrickGrids.count
         self.volumeBrickGridIndexCount = compiled.gpuVolumeBrickGridIndexCount ?? compiled.volumeBrickGridIndices.count
+        self.materialProgramCount = compiled.materialProgramDescriptors.count
+        self.materialProgramOperationCount = compiled.materialProgramOperations.count
         self.materialCount = compiled.materials.count
         self.textureDescriptorCount = compiled.textureDescriptors.count
         self.texturePixelCount = compiled.texturePixels.count
@@ -405,10 +410,17 @@ public final class RenderSession {
                 values: compiled.volumeBrickSamples
             )
         }
-        self.volumeBrickMaterialFieldSampleBuffer = try Self.makeRequiredShaderBindingBuffer(
-            device: device,
-            values: compiled.volumeBrickMaterialFieldSamples
-        )
+        if let gpuVolumeBrickMaterialFieldSampleBuffer = compiled.gpuVolumeBrickMaterialFieldSampleBuffer {
+            guard gpuVolumeBrickMaterialFieldSampleBuffer.device === device else {
+                throw DenrimRendererError.invalidScene("GPU sparse distance field material-field sample buffer belongs to a different Metal device.")
+            }
+            self.volumeBrickMaterialFieldSampleBuffer = gpuVolumeBrickMaterialFieldSampleBuffer
+        } else {
+            self.volumeBrickMaterialFieldSampleBuffer = try Self.makeRequiredShaderBindingBuffer(
+                device: device,
+                values: compiled.volumeBrickMaterialFieldSamples
+            )
+        }
         if let gpuVolumeBrickAttributeDescriptorBuffer = compiled.gpuVolumeBrickAttributeDescriptorBuffer {
             guard gpuVolumeBrickAttributeDescriptorBuffer.device === device else {
                 throw DenrimRendererError.invalidScene("GPU sparse distance field attribute metadata buffer belongs to a different Metal device.")
@@ -461,15 +473,19 @@ public final class RenderSession {
                 values: compiled.volumeBrickGridIndices
             )
         }
+        self.materialProgramDescriptorBuffer = try Self.makeRequiredShaderBindingBuffer(
+            device: device,
+            values: compiled.materialProgramDescriptors
+        )
+        self.materialProgramOperationBuffer = try Self.makeRequiredShaderBindingBuffer(
+            device: device,
+            values: compiled.materialProgramOperations
+        )
         self.materialBuffer = device.makeBuffer(
             bytes: compiled.materials,
             length: MemoryLayout<GPUMaterial>.stride * compiled.materials.count,
             options: .storageModeShared
         )!
-        self.materialSemanticBuffer = try Self.makeRequiredShaderBindingBuffer(
-            device: device,
-            values: compiled.materialSemantics
-        )
         self.textureDescriptorBuffer = try Self.makeRequiredShaderBindingBuffer(
             device: device,
             values: compiled.textureDescriptors
@@ -669,11 +685,19 @@ public final class RenderSession {
                 values: compiled.volumeBrickSamples
             )
         }
-        let newVolumeBrickMaterialFieldSampleBuffer = try Self.reuseOrMakeRequiredShaderBindingBuffer(
-            existing: volumeBrickMaterialFieldSampleBuffer,
-            device: device,
-            values: compiled.volumeBrickMaterialFieldSamples
-        )
+        let newVolumeBrickMaterialFieldSampleBuffer: MTLBuffer
+        if let gpuVolumeBrickMaterialFieldSampleBuffer = compiled.gpuVolumeBrickMaterialFieldSampleBuffer {
+            guard gpuVolumeBrickMaterialFieldSampleBuffer.device === device else {
+                throw DenrimRendererError.invalidScene("GPU sparse distance field material-field sample buffer belongs to a different Metal device.")
+            }
+            newVolumeBrickMaterialFieldSampleBuffer = gpuVolumeBrickMaterialFieldSampleBuffer
+        } else {
+            newVolumeBrickMaterialFieldSampleBuffer = try Self.reuseOrMakeRequiredShaderBindingBuffer(
+                existing: volumeBrickMaterialFieldSampleBuffer,
+                device: device,
+                values: compiled.volumeBrickMaterialFieldSamples
+            )
+        }
         let newVolumeBrickAttributeDescriptorBuffer: MTLBuffer
         if let gpuVolumeBrickAttributeDescriptorBuffer = compiled.gpuVolumeBrickAttributeDescriptorBuffer {
             guard gpuVolumeBrickAttributeDescriptorBuffer.device === device else {
@@ -736,6 +760,16 @@ public final class RenderSession {
                 values: compiled.volumeBrickGridIndices
             )
         }
+        let newMaterialProgramDescriptorBuffer = try Self.reuseOrMakeRequiredShaderBindingBuffer(
+            existing: materialProgramDescriptorBuffer,
+            device: device,
+            values: compiled.materialProgramDescriptors
+        )
+        let newMaterialProgramOperationBuffer = try Self.reuseOrMakeRequiredShaderBindingBuffer(
+            existing: materialProgramOperationBuffer,
+            device: device,
+            values: compiled.materialProgramOperations
+        )
 
         volumeBuffer = newVolumeBuffer
         volumeSampleBuffer = newVolumeSampleBuffer
@@ -750,18 +784,22 @@ public final class RenderSession {
         volumeBrickBVHIndexBuffer = newVolumeBrickBVHIndexBuffer
         volumeBrickGridBuffer = newVolumeBrickGridBuffer
         volumeBrickGridIndexBuffer = newVolumeBrickGridIndexBuffer
+        materialProgramDescriptorBuffer = newMaterialProgramDescriptorBuffer
+        materialProgramOperationBuffer = newMaterialProgramOperationBuffer
 
         volumeCount = compiled.volumes.count
         volumeSampleCount = compiled.volumeSamples.count
         volumeAttributeSampleCount = compiled.volumeAttributeSamples.count
         volumeBrickCount = compiled.gpuVolumeBrickCount ?? compiled.volumeBricks.count
         volumeBrickSampleCount = compiled.gpuVolumeBrickSampleCount ?? compiled.volumeBrickSamples.count
-        volumeBrickMaterialFieldSampleCount = compiled.volumeBrickMaterialFieldSamples.count
+        volumeBrickMaterialFieldSampleCount = compiled.gpuVolumeBrickMaterialFieldSampleCount ?? compiled.volumeBrickMaterialFieldSamples.count
         volumeBrickAttributeSampleCount = compiled.gpuVolumeBrickAttributeSampleCount ?? compiled.volumeBrickAttributeSamples.count
         volumeBrickBVHNodeCount = compiled.volumeBrickBVH.nodes.count
         volumeBrickBVHIndexCount = compiled.volumeBrickBVH.primitiveIndices.count
         volumeBrickGridCount = compiled.gpuVolumeBrickGridCount ?? compiled.volumeBrickGrids.count
         volumeBrickGridIndexCount = compiled.gpuVolumeBrickGridIndexCount ?? compiled.volumeBrickGridIndices.count
+        materialProgramCount = compiled.materialProgramDescriptors.count
+        materialProgramOperationCount = compiled.materialProgramOperations.count
 
         resetAccumulation()
     }
@@ -898,6 +936,8 @@ public final class RenderSession {
             volumeBrickBVHIndexCount: UInt32(volumeBrickBVHIndexCount),
             volumeBrickGridCount: UInt32(volumeBrickGridCount),
             volumeBrickGridIndexCount: UInt32(volumeBrickGridIndexCount),
+            materialProgramCount: UInt32(materialProgramCount),
+            materialProgramOperationCount: UInt32(materialProgramOperationCount),
             denoiserEnabled: settings.denoise.denoiser == .none ? 0 : 1,
             sdfTraversalStatsEnabled: settings.collectsSDFTraversalStats ? 1 : 0,
             tileX: UInt32(tileX),
@@ -932,17 +972,18 @@ public final class RenderSession {
         encoder.setBuffer(volumeSampleBuffer, offset: 0, index: 15)
         encoder.setBuffer(volumeBrickBuffer, offset: 0, index: 16)
         encoder.setBuffer(volumeBrickSampleBuffer, offset: 0, index: 17)
-        encoder.setBuffer(materialSemanticBuffer, offset: 0, index: 18)
-        encoder.setBuffer(volumeAttributeDescriptorBuffer, offset: 0, index: 19)
-        encoder.setBuffer(volumeAttributeSampleBuffer, offset: 0, index: 20)
-        encoder.setBuffer(volumeBrickAttributeDescriptorBuffer, offset: 0, index: 21)
-        encoder.setBuffer(volumeBrickAttributeSampleBuffer, offset: 0, index: 22)
-        encoder.setBuffer(volumeBrickBVHNodeBuffer, offset: 0, index: 23)
-        encoder.setBuffer(volumeBrickBVHIndexBuffer, offset: 0, index: 24)
-        encoder.setBuffer(volumeBrickGridBuffer, offset: 0, index: 25)
-        encoder.setBuffer(volumeBrickGridIndexBuffer, offset: 0, index: 26)
-        encoder.setBuffer(volumeBrickMaterialFieldSampleBuffer, offset: 0, index: 27)
-        encoder.setBuffer(sdfTraversalStatsBuffer, offset: 0, index: 28)
+        encoder.setBuffer(volumeAttributeDescriptorBuffer, offset: 0, index: 18)
+        encoder.setBuffer(volumeAttributeSampleBuffer, offset: 0, index: 19)
+        encoder.setBuffer(volumeBrickAttributeDescriptorBuffer, offset: 0, index: 20)
+        encoder.setBuffer(volumeBrickAttributeSampleBuffer, offset: 0, index: 21)
+        encoder.setBuffer(volumeBrickBVHNodeBuffer, offset: 0, index: 22)
+        encoder.setBuffer(volumeBrickBVHIndexBuffer, offset: 0, index: 23)
+        encoder.setBuffer(volumeBrickGridBuffer, offset: 0, index: 24)
+        encoder.setBuffer(volumeBrickGridIndexBuffer, offset: 0, index: 25)
+        encoder.setBuffer(volumeBrickMaterialFieldSampleBuffer, offset: 0, index: 26)
+        encoder.setBuffer(sdfTraversalStatsBuffer, offset: 0, index: 27)
+        encoder.setBuffer(materialProgramDescriptorBuffer, offset: 0, index: 28)
+        encoder.setBuffer(materialProgramOperationBuffer, offset: 0, index: 29)
         if useHardwareRayTracing,
            let tlasResource = metalRayTracingExperiment?.tlasResource,
            let sceneBuffers = metalRayTracingExperiment?.sceneBuffers {

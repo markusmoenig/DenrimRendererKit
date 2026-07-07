@@ -1,10 +1,10 @@
 # Materials
 
-DenrimRendererKit's material source of truth is moving toward semantic material intent plus compact procedural fields.
+DenrimRendererKit's procedural material source of truth is a hit-time material program that can compute generic masks and write generic material fields at the final surface intersection.
 
-Artists and host products should author `SemanticMaterial` values such as moss, wet film, crystal, wax, bark, metal, rust, burn, ice, lava, ceramic, emissive, or plain. A semantic material stores an archetype, editable style colors, and compact attributes such as age, wetness, polish, cavity, amount, and emission. RendererKit expands that source into the renderer-facing `Material` payload at scene compilation time.
+Scenes store plain `Material` payloads. Built-in presets are convenience `Material` values, not a second authored material system. Form-style procedural components should compile visible surface styling into `DistanceFieldMaterialProgram`, where neutral mask values and generic material fields are evaluated at hit time from exact surface position, normal, base material state, and baked geometric attributes.
 
-For SDF-backed products, compact scalar fields should live in `DistanceVolumeAttributeLayout` / packed attribute samples. This lets operators bake `growthAge`, `branchID`, `curvature`, `cavity`, `wetness`, `mossAmount`, or similar fields into dense and sparse volumes without expanding them into full material parameters. The flat Metal path samples those fields for volume hits and lets semantic material resolvers consume them during shading and AOV material evaluation.
+For SDF-backed products, `DistanceFieldProgram` owns distance and stable geometric attributes such as growth age, radius, branch id, or other low-frequency structure data. `DistanceFieldMaterialProgram` owns surface masks and material decisions. It supports the same scalar/vector math, procedural noise intrinsics, and SDF distance intrinsics as the geometry VM, then adds hit inputs, baked attribute reads, hit-time mask registers, and generic material field writes. The procedural core includes smoothstep/step/saturate, fract/floor/mod, dot/length/normalize/distance, 3D value noise, 3D FBM, and 3D cellular/Worley noise. Its `writeMask(.a/.b/.c/.d, value)` / `readMask(.a/.b/.c/.d, destination)` instructions are hit-time routing registers, not volume fields. RendererKit gives those lanes no meaning. Cracks, dots, wood rings, wetness, moss coverage, age tint, and similar concepts belong in the host product's operator/material graph.
 
 The expanded public `Material` remains the compiled renderer representation. It supports:
 
@@ -59,18 +59,18 @@ The expanded public `Material` remains the compiled renderer representation. It 
 
 This expanded payload is enough for the current path tracing shader, but it is not the intended authored material system. It should increasingly be treated like compiled code: useful for renderer internals, tests, and compatibility, but not the main abstraction Denrim products expose to artists.
 
-## Semantic Source Direction
+## Procedural Source Direction
 
-The Form-style material model should avoid carrying large MoonRay-like parameter blocks through every SDF sample. Instead, the source representation should be:
+The Form-style material model should avoid carrying large MoonRay-like parameter blocks through every SDF sample, and RendererKit should not hardcode product concepts such as moss, cavity, wetness, cracks, dots, or wood rings. Instead, the source representation should be:
 
-* Material archetype: moss, wet film, bark, crystal, wax, rust, ice, lava, and similar semantic families.
-* Editable style: artist-controlled colors, ramps, roughness feel, polish, clarity, glow, and related high-level settings.
-* Compact attributes: per-object, per-operator, or per-volume fields such as age, wetness, cavity, growth age, branch ID, moss amount, and polish.
-* Resolver: renderer-owned code that expands the semantic source and sampled compact fields into the active `Material` / shader parameters.
+* Host-owned operators: growth, cracks, dots, wood rings, wetness, moss, and similar product concepts.
+* Hit-time generic masks: `.a`, `.b`, `.c`, and `.d` as material-program routing lanes.
+* Host-owned material components: nodes that read masks, baked geometric attributes, and authored controls, then emit generic renderer fields.
+* Generic field outputs: base color/albedo, roughness, metallic, specular, transmission, opacity, emission color, and emission strength.
 
-This keeps baked SDF bricks small. A mossy surface can store `mossAmount`, `mossAge`, `wetness`, and `cavity` instead of a full base-color, specular, sheen, subsurface, clearcoat, and transmission struct per sample. The editable palette still lives in the semantic material style, so colors are art-directable without becoming per-voxel baggage.
+This keeps baked SDF bricks small and avoids voxel shell artifacts. A crack operator can write mask `.a`, a dot operator can write mask `.b`, a wood material component can turn those masks into darker base color and higher roughness fields, and a wetness component can write roughness/specular/transmission fields. RendererKit stores geometry and low-frequency attributes in the field, then evaluates the generic surface result at the final hit point.
 
-`RenderScene` now stores `materialSources` as authored `SemanticMaterial` values and keeps `materials` as the resolved renderer cache used by current mesh, volume, and GPU paths. Scene compilation also emits compact semantic material descriptors so volume attributes can modulate semantic families such as moss, wet film, crystal/ice, burn, and lava without allocating unique static materials per voxel.
+`RenderScene.materials` is the material source of truth used by current mesh, volume, and GPU paths. For SDF procedural styling, the material program starts from the resolved base material and overrides selected generic channels. Baked volume material fields remain available for genuinely volumetric or coarse cached data, but they are no longer the preferred surface-style path.
 
 ## MoonRay Reference
 
@@ -143,7 +143,7 @@ Current built-in material reference scenes:
 * `RenderScene.transparentMaterialReference()` covers opacity planning, semi-transparent albedo alpha, fully transparent camera-ray cutout pass-through, measured absorption setup, and a rear visible surface for transmission / refraction comparison.
 * `RenderScene.distanceVolumeReference()` covers material and AOV behavior on one dense SDF volume compiled from multiple primitives, including semi-transparent / transmissive volume hits, material payload selection, and curved distance-gradient normals.
 
-Reusable built-in material presets are exposed through `BuiltInMaterialLibrary` and SceneScript's `material name preset preset-id` form. The first catalog includes matte surfaces, plastics, fabrics, metals, coated paints, `coating.iridescent-amber`, glass, water, ceramics, and emissive panels. These are renderer-native presets rather than a full MoonRay clone, but their identifiers are stable enough for Denrim product UIs to query and display.
+Reusable built-in material presets are exposed through `BuiltInMaterialLibrary` and SceneScript's `material name preset preset-id` form. The first catalog includes matte surfaces, plastics, fabrics, organic `organic.wood` / `organic.plant` baselines, metals, coated paints, `coating.iridescent-amber`, glass, water, ceramics, and emissive panels. These are renderer-native presets rather than a full MoonRay clone, but their identifiers are stable enough for Denrim product UIs to query and display.
 
 Denrim product bridges should treat these presets as renderer-owned material family definitions. Product-side material controls can tint the preset by replacing `baseColor` and can override simple user-facing controls such as roughness, but they should not recreate hidden lobe weights for metallic, transmission, subsurface, or emission behavior. Denrim Forge currently maps its simple material families to preset baselines as follows: Matte to `matte.clay`, Plastic to `plastic.gloss-white`, Metal to `metal.brushed-aluminum`, Glass to `glass.clear`, Wax to `subsurface.wax-cream`, and Emission to `emission.warm-panel`. Forge applies the user-selected color and roughness on top. When the Forge paint UI changes a material family, it resets the roughness slider to the mapped RendererKit preset roughness so the initial material feel matches the renderer-native preset instead of a generic midpoint.
 

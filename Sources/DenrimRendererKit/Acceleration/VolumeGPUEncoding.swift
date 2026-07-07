@@ -8,18 +8,21 @@ extension LinearTriangleAccelerationBackend {
         descriptors: [GPUVolumeDescriptor],
         samples: [GPUVolumeSample],
         attributeDescriptors: [GPUVolumeAttributeDescriptor],
-        attributeSamples: [SIMD4<Float>]
+        attributeSamples: [SIMD4<Float>],
+        materialPrograms: [DistanceFieldMaterialProgram]
     ) {
         var descriptors: [GPUVolumeDescriptor] = []
         var samples: [GPUVolumeSample] = []
         var attributeDescriptors: [GPUVolumeAttributeDescriptor] = []
         var attributeSamples: [SIMD4<Float>] = []
+        var materialPrograms: [DistanceFieldMaterialProgram] = []
 
         for (index, instance) in scene.volumeInstances.enumerated() {
             try appendVolume(
                 instance.volume,
                 material: instance.material,
                 transform: instance.transform,
+                materialProgramIndex: gpuMaterialProgramIndex(for: instance.materialProgram, programs: &materialPrograms),
                 objectID: scene.meshInstances.count + index,
                 primitiveID: index,
                 descriptors: &descriptors,
@@ -37,6 +40,7 @@ extension LinearTriangleAccelerationBackend {
                 instance.volume,
                 material: instance.material,
                 transform: instance.transform,
+                materialProgramIndex: gpuMaterialProgramIndex(for: instance.materialProgram, programs: &materialPrograms),
                 objectID: sparseObjectIDBase + index,
                 primitiveID: sparsePrimitiveIDBase + index,
                 descriptors: &descriptors,
@@ -51,6 +55,7 @@ extension LinearTriangleAccelerationBackend {
                 instance.resource,
                 material: instance.material,
                 transform: instance.transform,
+                materialProgramIndex: gpuMaterialProgramIndex(for: instance.materialProgram, programs: &materialPrograms),
                 objectID: gpuSparseObjectIDBase + index,
                 primitiveID: gpuSparsePrimitiveIDBase + index,
                 descriptors: &descriptors,
@@ -58,13 +63,28 @@ extension LinearTriangleAccelerationBackend {
             )
         }
 
-        return (descriptors, samples, attributeDescriptors, attributeSamples)
+        return (descriptors, samples, attributeDescriptors, attributeSamples, materialPrograms)
+    }
+
+    private static func gpuMaterialProgramIndex(
+        for program: DistanceFieldMaterialProgram?,
+        programs: inout [DistanceFieldMaterialProgram]
+    ) -> UInt32 {
+        guard let program else {
+            return UInt32.max
+        }
+        if let existing = programs.firstIndex(of: program) {
+            return UInt32(existing)
+        }
+        programs.append(program)
+        return UInt32(programs.count - 1)
     }
 
     static func appendVolume(
         _ volume: DistanceVolume,
         material: MaterialID,
         transform: Transform,
+        materialProgramIndex: UInt32,
         objectID: Int,
         primitiveID: Int,
         descriptors: inout [GPUVolumeDescriptor],
@@ -149,6 +169,7 @@ extension LinearTriangleAccelerationBackend {
                 UInt32(primitiveID),
                 0
             ),
+            materialProgram: SIMD4<UInt32>(materialProgramIndex, 0, 0, 0),
             worldToLocal0: worldToLocal.columns.0,
             worldToLocal1: worldToLocal.columns.1,
             worldToLocal2: worldToLocal.columns.2,
@@ -164,6 +185,7 @@ extension LinearTriangleAccelerationBackend {
         _ volume: SparseDistanceVolume,
         material: MaterialID,
         transform: Transform,
+        materialProgramIndex: UInt32,
         objectID: Int,
         primitiveID: Int,
         descriptors: inout [GPUVolumeDescriptor],
@@ -208,6 +230,7 @@ extension LinearTriangleAccelerationBackend {
                 UInt32(primitiveID),
                 1
             ),
+            materialProgram: SIMD4<UInt32>(materialProgramIndex, 0, 0, 0),
             worldToLocal0: worldToLocal.columns.0,
             worldToLocal1: worldToLocal.columns.1,
             worldToLocal2: worldToLocal.columns.2,
@@ -223,6 +246,7 @@ extension LinearTriangleAccelerationBackend {
         _ resource: RenderGPUSparseFieldResource,
         material: MaterialID,
         transform: Transform,
+        materialProgramIndex: UInt32,
         objectID: Int,
         primitiveID: Int,
         descriptors: inout [GPUVolumeDescriptor],
@@ -267,6 +291,7 @@ extension LinearTriangleAccelerationBackend {
                 UInt32(primitiveID),
                 1
             ),
+            materialProgram: SIMD4<UInt32>(materialProgramIndex, 0, 0, 0),
             worldToLocal0: worldToLocal.columns.0,
             worldToLocal1: worldToLocal.columns.1,
             worldToLocal2: worldToLocal.columns.2,
@@ -284,10 +309,6 @@ extension LinearTriangleAccelerationBackend {
         sampleCount: Int,
         volumeOrBrickIndex: Int
     ) -> GPUVolumeAttributeDescriptor {
-        var semantics = [UInt32](repeating: 0, count: DistanceVolumeAttributeLayout.maximumChannelCount)
-        for (index, channel) in layout.channels.enumerated() where index < semantics.count {
-            semantics[index] = channel.semantic.rawValue
-        }
         return GPUVolumeAttributeDescriptor(
             metadata: SIMD4<UInt32>(
                 UInt32(sampleOffset),
@@ -295,8 +316,8 @@ extension LinearTriangleAccelerationBackend {
                 UInt32(sampleCount),
                 UInt32(volumeOrBrickIndex)
             ),
-            semantics0: SIMD4<UInt32>(semantics[0], semantics[1], semantics[2], semantics[3]),
-            semantics1: SIMD4<UInt32>(semantics[4], semantics[5], semantics[6], semantics[7])
+            reserved0: SIMD4<UInt32>(repeating: 0),
+            reserved1: SIMD4<UInt32>(repeating: 0)
         )
     }
 
@@ -332,8 +353,8 @@ extension LinearTriangleAccelerationBackend {
             surface: SIMD4<Float>(
                 material.fields.roughness ?? 0,
                 material.fields.metallic ?? 0,
-                0,
-                0
+                material.fields.specular ?? 0,
+                material.fields.emissionStrength ?? 0
             ),
             materialFieldFlags: SIMD4<UInt32>(
                 material.fields.flags,

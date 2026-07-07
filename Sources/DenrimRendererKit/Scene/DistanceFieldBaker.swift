@@ -55,7 +55,7 @@ public struct DistanceFieldBakeGraph: Sendable, Equatable {
 
     /// Creates a bake graph from a procedural distance-field program.
     public init(program: DistanceFieldProgram) {
-        self.model = SDFModel(attributeLayout: program.attributeLayout)
+        self.model = SDFModel(attributeLayout: program.resolvedAttributeLayout)
         self.program = program
     }
 
@@ -362,8 +362,11 @@ public final class DistanceFieldBaker: @unchecked Sendable {
 
         let operationBuffer = try Self.buffer(device: device, values: operations)
         let dirtyBuffer = try Self.buffer(device: device, values: dirtyBrickIndices)
-        guard program.attributeLayout.packedVectorCount == 0 || resource.attributeSampleBuffer != nil else {
+        guard program.resolvedAttributeLayout.packedVectorCount == 0 || resource.attributeSampleBuffer != nil else {
             throw DenrimRendererError.invalidScene("Dirty GPU-resident program attribute updates require an existing resident attribute sample buffer.")
+        }
+        guard !Self.programWritesMaterialFields(program) || resource.materialFieldSampleBuffer != nil else {
+            throw DenrimRendererError.invalidScene("Dirty GPU-resident program material-field updates require an existing resident material-field sample buffer.")
         }
         let attributeBuffer = try Self.gpuResidentProgramAttributeSampleBuffer(
             device: device,
@@ -374,6 +377,17 @@ public final class DistanceFieldBaker: @unchecked Sendable {
         let attributeArgumentBuffer = try attributeBuffer ?? Self.emptyBuffer(
             device: device,
             element: SIMD4<Float>.self,
+            count: 1
+        )
+        let materialFieldBuffer = try Self.gpuResidentProgramMaterialFieldSampleBuffer(
+            device: device,
+            requiredSampleCount: resource.sampleCount,
+            program: program,
+            reusing: resource.materialFieldSampleBuffer
+        )
+        let materialFieldArgumentBuffer = try materialFieldBuffer ?? Self.emptyBuffer(
+            device: device,
+            element: GPUVolumeMaterialFieldSample.self,
             count: 1
         )
         var attributeLayout = Self.gpuProgramAttributeLayout(for: program)
@@ -422,6 +436,7 @@ public final class DistanceFieldBaker: @unchecked Sendable {
         encoder.setBuffer(dirtyBuffer, offset: 0, index: 7)
         encoder.setBuffer(attributeArgumentBuffer, offset: 0, index: 8)
         encoder.setBytes(&attributeLayout, length: MemoryLayout<GPUDistanceFieldProgramAttributeLayout>.stride, index: 9)
+        encoder.setBuffer(materialFieldArgumentBuffer, offset: 0, index: 10)
         let width = min(selectedBakePipeline.maxTotalThreadsPerThreadgroup, 128)
         encoder.dispatchThreadgroups(
             MTLSize(width: dirtyBrickIndices.count, height: 1, depth: 1),
@@ -1452,6 +1467,17 @@ public final class DistanceFieldBaker: @unchecked Sendable {
             element: SIMD4<Float>.self,
             count: 1
         )
+        let materialFieldBuffer = try Self.gpuResidentProgramMaterialFieldSampleBuffer(
+            device: device,
+            requiredSampleCount: requiredSampleCount,
+            program: program,
+            reusing: reusableResource?.materialFieldSampleBuffer
+        )
+        let materialFieldArgumentBuffer = try materialFieldBuffer ?? Self.emptyBuffer(
+            device: device,
+            element: GPUVolumeMaterialFieldSample.self,
+            count: 1
+        )
         var attributeLayout = Self.gpuProgramAttributeLayout(for: program)
         let previousMetadata = reusableResource?.metadataBuffers
         let brickBuffer = try Self.gpuResidentBuffer(
@@ -1517,6 +1543,7 @@ public final class DistanceFieldBaker: @unchecked Sendable {
         encoder.setBytes(&constants, length: MemoryLayout<GPUSparseDistanceFieldBakeConstants>.stride, index: 6)
         encoder.setBuffer(attributeArgumentBuffer, offset: 0, index: 7)
         encoder.setBytes(&attributeLayout, length: MemoryLayout<GPUDistanceFieldProgramAttributeLayout>.stride, index: 8)
+        encoder.setBuffer(materialFieldArgumentBuffer, offset: 0, index: 9)
         let width = min(directGridBakePipeline.maxTotalThreadsPerThreadgroup, 128)
         encoder.dispatchThreadgroups(
             MTLSize(width: candidateCount, height: 1, depth: 1),
@@ -1558,8 +1585,10 @@ public final class DistanceFieldBaker: @unchecked Sendable {
             bricks: [],
             sampleBuffer: sampleBuffer,
             sampleCount: requiredSampleCount,
+            materialFieldSampleBuffer: materialFieldBuffer,
+            materialFieldSampleCount: materialFieldBuffer == nil ? 0 : requiredSampleCount,
             attributeSampleBuffer: attributeBuffer,
-            attributeSampleCount: requiredSampleCount * program.attributeLayout.packedVectorCount,
+            attributeSampleCount: requiredSampleCount * program.resolvedAttributeLayout.packedVectorCount,
             metadataBuffers: metadataBuffers
         )
     }
@@ -1791,6 +1820,31 @@ public final class DistanceFieldBaker: @unchecked Sendable {
                 metadata: SIMD4<UInt32>(121, 0, 0, 0),
                 indices: SIMD4<UInt32>(destination.rawValue, lhs.rawValue, rhs.rawValue, amount.rawValue)
             )
+        case .smoothstep(let destination, let edge0, let edge1, let x):
+            return GPUDistanceFieldProgramOperation(
+                metadata: SIMD4<UInt32>(122, 0, 0, 0),
+                indices: SIMD4<UInt32>(destination.rawValue, edge0.rawValue, edge1.rawValue, x.rawValue)
+            )
+        case .step(let destination, let edge, let x):
+            return GPUDistanceFieldProgramOperation(
+                metadata: SIMD4<UInt32>(123, destination.rawValue, edge.rawValue, x.rawValue)
+            )
+        case .saturate(let destination, let source):
+            return GPUDistanceFieldProgramOperation(
+                metadata: SIMD4<UInt32>(124, destination.rawValue, source.rawValue, 0)
+            )
+        case .fractFloat(let destination, let source):
+            return GPUDistanceFieldProgramOperation(
+                metadata: SIMD4<UInt32>(125, destination.rawValue, source.rawValue, 0)
+            )
+        case .floorFloat(let destination, let source):
+            return GPUDistanceFieldProgramOperation(
+                metadata: SIMD4<UInt32>(126, destination.rawValue, source.rawValue, 0)
+            )
+        case .modFloat(let destination, let lhs, let rhs):
+            return GPUDistanceFieldProgramOperation(
+                metadata: SIMD4<UInt32>(127, destination.rawValue, lhs.rawValue, rhs.rawValue)
+            )
         case .addVector(let destination, let lhs, let rhs):
             return GPUDistanceFieldProgramOperation(metadata: SIMD4<UInt32>(130, destination.rawValue, lhs.rawValue, rhs.rawValue))
         case .subtractVector(let destination, let lhs, let rhs):
@@ -1816,6 +1870,24 @@ public final class DistanceFieldBaker: @unchecked Sendable {
             return GPUDistanceFieldProgramOperation(metadata: SIMD4<UInt32>(139, destination.rawValue, source.rawValue, 0))
         case .length(let destination, let source):
             return GPUDistanceFieldProgramOperation(metadata: SIMD4<UInt32>(140, destination.rawValue, source.rawValue, 0))
+        case .dot(let destination, let lhs, let rhs):
+            return GPUDistanceFieldProgramOperation(metadata: SIMD4<UInt32>(145, destination.rawValue, lhs.rawValue, rhs.rawValue))
+        case .normalize(let destination, let source):
+            return GPUDistanceFieldProgramOperation(metadata: SIMD4<UInt32>(146, destination.rawValue, source.rawValue, 0))
+        case .distance(let destination, let lhs, let rhs):
+            return GPUDistanceFieldProgramOperation(metadata: SIMD4<UInt32>(147, destination.rawValue, lhs.rawValue, rhs.rawValue))
+        case .valueNoise3D(let destination, let position, let scale, let seed):
+            return GPUDistanceFieldProgramOperation(metadata: SIMD4<UInt32>(172, destination.rawValue, position.rawValue, scale.rawValue), indices: SIMD4<UInt32>(seed.rawValue, 0, 0, 0))
+        case .fbm3D(let destination, let position, let scale, let octaves, let lacunarity, let gain, let seed):
+            return GPUDistanceFieldProgramOperation(
+                metadata: SIMD4<UInt32>(173, destination.rawValue, position.rawValue, scale.rawValue),
+                indices: SIMD4<UInt32>(octaves.rawValue, lacunarity.rawValue, gain.rawValue, seed.rawValue)
+            )
+        case .cellular3D(let distance, let secondDistance, let cellID, let position, let scale, let seed):
+            return GPUDistanceFieldProgramOperation(
+                metadata: SIMD4<UInt32>(174, distance.rawValue, secondDistance.rawValue, cellID.rawValue),
+                indices: SIMD4<UInt32>(position.rawValue, scale.rawValue, seed.rawValue, 0)
+            )
         case .boxDistance(let destination, let position, let halfExtents, let cornerRadius):
             return GPUDistanceFieldProgramOperation(
                 metadata: SIMD4<UInt32>(141, 0, 0, 0),
@@ -1866,6 +1938,14 @@ public final class DistanceFieldBaker: @unchecked Sendable {
             return GPUDistanceFieldProgramOperation(
                 metadata: SIMD4<UInt32>(160, UInt32(max(channel, 0)), value.rawValue, 0)
             )
+        case .writeMaterialField(let field, let value):
+            return GPUDistanceFieldProgramOperation(
+                metadata: SIMD4<UInt32>(170, field.rawValue, value.rawValue, 0)
+            )
+        case .writeMaterialFieldVector(let field, let value):
+            return GPUDistanceFieldProgramOperation(
+                metadata: SIMD4<UInt32>(171, field.rawValue, value.rawValue, 0)
+            )
         }
     }
 
@@ -1911,7 +1991,8 @@ public final class DistanceFieldBaker: @unchecked Sendable {
         program: DistanceFieldProgram,
         reusing reusableBuffer: MTLBuffer?
     ) throws -> MTLBuffer? {
-        let packedVectorCount = program.attributeLayout.packedVectorCount
+        let layout = program.resolvedAttributeLayout
+        let packedVectorCount = layout.packedVectorCount
         guard packedVectorCount > 0 else {
             return nil
         }
@@ -1929,20 +2010,51 @@ public final class DistanceFieldBaker: @unchecked Sendable {
         )
     }
 
-    private static func gpuProgramAttributeLayout(for program: DistanceFieldProgram) -> GPUDistanceFieldProgramAttributeLayout {
-        var semantics = [UInt32](repeating: 0, count: DistanceVolumeAttributeLayout.maximumChannelCount)
-        for (index, channel) in program.attributeLayout.channels.enumerated() where index < semantics.count {
-            semantics[index] = channel.semantic.rawValue
+    private static func gpuResidentProgramMaterialFieldSampleBuffer(
+        device: MTLDevice,
+        requiredSampleCount: Int,
+        program: DistanceFieldProgram,
+        reusing reusableBuffer: MTLBuffer?
+    ) throws -> MTLBuffer? {
+        guard programWritesMaterialFields(program) else {
+            return nil
         }
+        let requiredCount = max(requiredSampleCount, 1)
+        let requiredLength = MemoryLayout<GPUVolumeMaterialFieldSample>.stride * requiredCount
+        if let reusableBuffer,
+           reusableBuffer.device === device,
+           reusableBuffer.length >= requiredLength {
+            return reusableBuffer
+        }
+        return try emptyBuffer(
+            device: device,
+            element: GPUVolumeMaterialFieldSample.self,
+            count: requiredCount
+        )
+    }
+
+    private static func programWritesMaterialFields(_ program: DistanceFieldProgram) -> Bool {
+        program.instructions.contains { instruction in
+            switch instruction {
+            case .writeMaterialField, .writeMaterialFieldVector:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private static func gpuProgramAttributeLayout(for program: DistanceFieldProgram) -> GPUDistanceFieldProgramAttributeLayout {
+        let layout = program.resolvedAttributeLayout
         return GPUDistanceFieldProgramAttributeLayout(
             metadata: SIMD4<UInt32>(
-                UInt32(program.attributeLayout.packedVectorCount),
-                UInt32(program.attributeLayout.channelCount),
-                0,
+                UInt32(layout.packedVectorCount),
+                UInt32(layout.channelCount),
+                programWritesMaterialFields(program) ? 1 : 0,
                 0
             ),
-            semantics0: SIMD4<UInt32>(semantics[0], semantics[1], semantics[2], semantics[3]),
-            semantics1: SIMD4<UInt32>(semantics[4], semantics[5], semantics[6], semantics[7])
+            reserved0: SIMD4<UInt32>(repeating: 0),
+            reserved1: SIMD4<UInt32>(repeating: 0)
         )
     }
 
@@ -2076,8 +2188,8 @@ private struct GPUDistanceFieldProgramOperation {
 
 private struct GPUDistanceFieldProgramAttributeLayout {
     var metadata: SIMD4<UInt32>
-    var semantics0: SIMD4<UInt32>
-    var semantics1: SIMD4<UInt32>
+    var reserved0: SIMD4<UInt32>
+    var reserved1: SIMD4<UInt32>
 }
 
 private struct GPUDistanceFieldBakeSample {

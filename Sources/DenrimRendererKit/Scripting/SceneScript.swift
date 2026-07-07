@@ -586,26 +586,13 @@ public enum SceneScript {
         _ tokens: [String],
         line: Int,
         textures: [String: Texture2D]
-    ) throws -> (name: String, material: SemanticMaterial) {
+    ) throws -> (name: String, material: Material) {
         guard tokens.count >= 3 else {
             throw SceneScriptError.invalidArgumentCount("material", line: line)
         }
 
         let name = tokens[1]
         let lowercasedSource = tokens[2].lowercased()
-        if lowercasedSource == "semantic" || lowercasedSource == "archetype" {
-            guard tokens.count >= 4 else {
-                throw SceneScriptError.invalidArgumentCount("material", line: line)
-            }
-            return (
-                name,
-                try parseSemanticMaterial(
-                    archetypeName: tokens[3],
-                    options: Array(tokens.dropFirst(4)),
-                    line: line
-                )
-            )
-        }
 
         let startingMaterial: Material
         let startingIndex: Int
@@ -628,11 +615,11 @@ public enum SceneScript {
                 let emission = try floats(tokens[5..<9], line: line)
                 return (
                     name,
-                    SemanticMaterial.physical(Material(
+                    Material(
                         baseColor: SIMD3<Float>(base[0], base[1], base[2]),
                         emission: SIMD3<Float>(emission[0], emission[1], emission[2]),
                         emissionStrength: emission[3]
-                    ))
+                    )
                 )
             }
             startingMaterial = Material(baseColor: SIMD3<Float>(base[0], base[1], base[2]))
@@ -891,146 +878,7 @@ public enum SceneScript {
 
         return (
             name,
-            SemanticMaterial.physical(material)
-        )
-    }
-
-    private static func parseSemanticMaterial(
-        archetypeName: String,
-        options: [String],
-        line: Int
-    ) throws -> SemanticMaterial {
-        let archetype = try materialArchetype(named: archetypeName, line: line)
-        var primaryColor = defaultPrimaryColor(for: archetype)
-        var secondaryColor: SIMD3<Float>?
-        var accentColor: SIMD3<Float>?
-        var roughness: Float = defaultRoughness(for: archetype)
-        var metallic: Float = archetype == .metal ? 1 : 0
-        var opacity: Float = 1
-        var transmission: Float = archetype == .crystal || archetype == .ice ? 0.85 : 0
-        var emissionStrength: Float = archetype == .emissive ? 1 : 0
-        var amount: Float = 1
-        var age: Float = 0
-        var wetness: Float = 0
-        var polish: Float = 0
-        var cavity: Float = 0
-        var emission: Float = archetype == .emissive ? 1 : 0
-        var index = 0
-
-        while index < options.count {
-            switch options[index].lowercased() {
-            case "color", "primary", "primarycolor", "youngcolor", "tint":
-                guard index + 3 < options.count else {
-                    throw SceneScriptError.invalidArgumentCount("material", line: line)
-                }
-                let values = try floats(options[(index + 1)...(index + 3)], line: line)
-                primaryColor = SIMD3<Float>(values[0], values[1], values[2])
-                index += 4
-            case "secondary", "secondarycolor", "maturecolor":
-                guard index + 3 < options.count else {
-                    throw SceneScriptError.invalidArgumentCount("material", line: line)
-                }
-                let values = try floats(options[(index + 1)...(index + 3)], line: line)
-                secondaryColor = SIMD3<Float>(values[0], values[1], values[2])
-                index += 4
-            case "accent", "accentcolor", "drycolor":
-                guard index + 3 < options.count else {
-                    throw SceneScriptError.invalidArgumentCount("material", line: line)
-                }
-                let values = try floats(options[(index + 1)...(index + 3)], line: line)
-                accentColor = SIMD3<Float>(values[0], values[1], values[2])
-                index += 4
-            case "roughness":
-                guard index + 1 < options.count else {
-                    throw SceneScriptError.invalidArgumentCount("material", line: line)
-                }
-                roughness = try floats(options[(index + 1)...(index + 1)], line: line)[0]
-                index += 2
-            case "metallic":
-                guard index + 1 < options.count else {
-                    throw SceneScriptError.invalidArgumentCount("material", line: line)
-                }
-                metallic = try floats(options[(index + 1)...(index + 1)], line: line)[0]
-                index += 2
-            case "opacity":
-                guard index + 1 < options.count else {
-                    throw SceneScriptError.invalidArgumentCount("material", line: line)
-                }
-                opacity = try floats(options[(index + 1)...(index + 1)], line: line)[0]
-                index += 2
-            case "transmission", "clarity":
-                guard index + 1 < options.count else {
-                    throw SceneScriptError.invalidArgumentCount("material", line: line)
-                }
-                transmission = try floats(options[(index + 1)...(index + 1)], line: line)[0]
-                index += 2
-            case "emissionstrength", "strength":
-                guard index + 1 < options.count else {
-                    throw SceneScriptError.invalidArgumentCount("material", line: line)
-                }
-                emissionStrength = try floats(options[(index + 1)...(index + 1)], line: line)[0]
-                index += 2
-            case "amount":
-                guard index + 1 < options.count else {
-                    throw SceneScriptError.invalidArgumentCount("material", line: line)
-                }
-                amount = try floats(options[(index + 1)...(index + 1)], line: line)[0]
-                index += 2
-            case "age":
-                guard index + 1 < options.count else {
-                    throw SceneScriptError.invalidArgumentCount("material", line: line)
-                }
-                age = try floats(options[(index + 1)...(index + 1)], line: line)[0]
-                index += 2
-            case "wetness":
-                guard index + 1 < options.count else {
-                    throw SceneScriptError.invalidArgumentCount("material", line: line)
-                }
-                wetness = try floats(options[(index + 1)...(index + 1)], line: line)[0]
-                index += 2
-            case "polish":
-                guard index + 1 < options.count else {
-                    throw SceneScriptError.invalidArgumentCount("material", line: line)
-                }
-                polish = try floats(options[(index + 1)...(index + 1)], line: line)[0]
-                index += 2
-            case "cavity":
-                guard index + 1 < options.count else {
-                    throw SceneScriptError.invalidArgumentCount("material", line: line)
-                }
-                cavity = try floats(options[(index + 1)...(index + 1)], line: line)[0]
-                index += 2
-            case "emission":
-                guard index + 1 < options.count else {
-                    throw SceneScriptError.invalidArgumentCount("material", line: line)
-                }
-                emission = try floats(options[(index + 1)...(index + 1)], line: line)[0]
-                index += 2
-            default:
-                throw SceneScriptError.invalidArgumentCount("material", line: line)
-            }
-        }
-
-        return SemanticMaterial(
-            archetype: archetype,
-            style: MaterialStyle(
-                primaryColor: primaryColor,
-                secondaryColor: secondaryColor,
-                accentColor: accentColor,
-                roughness: roughness,
-                metallic: metallic,
-                opacity: opacity,
-                transmission: transmission,
-                emissionStrength: emissionStrength
-            ),
-            attributes: MaterialSemanticAttributes(
-                amount: amount,
-                age: age,
-                wetness: wetness,
-                polish: polish,
-                cavity: cavity,
-                emission: emission
-            )
+            material
         )
     }
 
@@ -1417,7 +1265,6 @@ public enum SceneScript {
         let attributeLayout = DistanceVolumeAttributeLayout(channels: attributeNames.map { name in
             DistanceVolumeAttributeChannel(
                 name: name,
-                semantic: attributeSemantic(named: name),
                 defaultValue: 0
             )
         })
@@ -1628,14 +1475,7 @@ public enum SceneScript {
                 materialFields.transmission = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
                 index += 2
             default:
-                if attributeSemantic(named: tokens[index]) != .custom,
-                   index + 1 < tokens.count,
-                   Float(tokens[index + 1]) != nil {
-                    attributes[tokens[index]] = try floats(tokens[(index + 1)...(index + 1)], line: line)[0]
-                    index += 2
-                } else {
-                    throw SceneScriptError.invalidArgumentCount("sdf", line: line)
-                }
+                throw SceneScriptError.invalidArgumentCount("sdf", line: line)
             }
         }
 
@@ -2113,108 +1953,6 @@ public enum SceneScript {
         tokens.allSatisfy { Float($0) != nil }
     }
 
-    private static func materialArchetype(named name: String, line: Int) throws -> MaterialArchetype {
-        switch name.lowercased() {
-        case "plain", "matte":
-            return .plain
-        case "moss":
-            return .moss
-        case "bark":
-            return .bark
-        case "wetfilm", "wet-film", "wet":
-            return .wetFilm
-        case "crystal":
-            return .crystal
-        case "wax":
-            return .wax
-        case "ceramic":
-            return .ceramic
-        case "metal":
-            return .metal
-        case "rust":
-            return .rust
-        case "burn", "char":
-            return .burn
-        case "ice":
-            return .ice
-        case "lava":
-            return .lava
-        case "emissive", "emission":
-            return .emissive
-        default:
-            throw SceneScriptError.invalidArgumentCount("material", line: line)
-        }
-    }
-
-    private static func defaultPrimaryColor(for archetype: MaterialArchetype) -> SIMD3<Float> {
-        switch archetype {
-        case .plain:
-            return SIMD3<Float>(0.8, 0.8, 0.8)
-        case .moss:
-            return SIMD3<Float>(0.42, 0.68, 0.22)
-        case .bark:
-            return SIMD3<Float>(0.36, 0.22, 0.12)
-        case .wetFilm:
-            return SIMD3<Float>(0.55, 0.72, 0.82)
-        case .crystal, .ice:
-            return SIMD3<Float>(0.75, 0.9, 1)
-        case .wax:
-            return SIMD3<Float>(0.95, 0.78, 0.55)
-        case .ceramic:
-            return SIMD3<Float>(0.82, 0.78, 0.68)
-        case .metal:
-            return SIMD3<Float>(0.74, 0.72, 0.68)
-        case .rust:
-            return SIMD3<Float>(0.62, 0.24, 0.08)
-        case .burn:
-            return SIMD3<Float>(0.08, 0.07, 0.06)
-        case .lava:
-            return SIMD3<Float>(0.3, 0.05, 0.02)
-        case .emissive:
-            return SIMD3<Float>(1, 0.82, 0.55)
-        }
-    }
-
-    private static func defaultRoughness(for archetype: MaterialArchetype) -> Float {
-        switch archetype {
-        case .moss, .bark, .burn, .rust:
-            return 0.82
-        case .wetFilm, .crystal, .ice:
-            return 0.08
-        case .metal:
-            return 0.28
-        default:
-            return 0.55
-        }
-    }
-
-    private static func attributeSemantic(named name: String) -> DistanceVolumeAttributeSemantic {
-        switch name.lowercased() {
-        case "growthage", "age", "mossage":
-            return .growthAge
-        case "branchid", "branch":
-            return .branchID
-        case "curvature":
-            return .curvature
-        case "cavity":
-            return .cavity
-        case "noise":
-            return .noise
-        case "wetness", "wet":
-            return .wetness
-        case "mossamount", "moss":
-            return .mossAmount
-        case "polish":
-            return .polish
-        case "fracture":
-            return .fracture
-        case "burnamount", "burn":
-            return .burnAmount
-        default:
-            return .custom
-        }
-    }
-
     private static func isSDFShapeKeyword(_ token: String) -> Bool {
         switch token.lowercased() {
         case "sphere", "box", "cylinder":
@@ -2273,7 +2011,7 @@ public enum SceneScript {
              "worldtolocal", "worldtoprimitive", "world-to-local", "matrix":
             return true
         default:
-            return attributeSemantic(named: token) != .custom
+            return false
         }
     }
 

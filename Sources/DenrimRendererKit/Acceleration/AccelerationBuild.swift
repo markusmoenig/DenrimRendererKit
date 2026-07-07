@@ -7,6 +7,9 @@ struct AccelerationBuild {
     var volumeSamples: [GPUVolumeSample]
     var volumeAttributeDescriptors: [GPUVolumeAttributeDescriptor]
     var volumeAttributeSamples: [SIMD4<Float>]
+    var volumeMaterialPrograms: [DistanceFieldMaterialProgram]
+    var materialProgramDescriptors: [GPUMaterialProgramDescriptor]
+    var materialProgramOperations: [GPUMaterialProgramOperation]
     var volumeBricks: [GPUVolumeBrickDescriptor]
     var volumeBrickSamples: [GPUVolumeBrickSample]
     var volumeBrickMaterialFieldSamples: [GPUVolumeMaterialFieldSample]
@@ -19,6 +22,8 @@ struct AccelerationBuild {
     var gpuVolumeBrickCount: Int?
     var gpuVolumeBrickSampleBuffer: MTLBuffer?
     var gpuVolumeBrickSampleCount: Int?
+    var gpuVolumeBrickMaterialFieldSampleBuffer: MTLBuffer?
+    var gpuVolumeBrickMaterialFieldSampleCount: Int?
     var gpuVolumeBrickAttributeDescriptorBuffer: MTLBuffer?
     var gpuVolumeBrickAttributeDescriptorCount: Int?
     var gpuVolumeBrickAttributeSampleBuffer: MTLBuffer?
@@ -28,7 +33,6 @@ struct AccelerationBuild {
     var gpuVolumeBrickGridIndexBuffer: MTLBuffer?
     var gpuVolumeBrickGridIndexCount: Int?
     var materials: [GPUMaterial]
-    var materialSemantics: [GPUMaterialSemanticDescriptor]
     var textureDescriptors: [GPUTextureDescriptor]
     var texturePixels: [SIMD4<Float>]
     var environmentTextureIndexPlusOne: UInt32

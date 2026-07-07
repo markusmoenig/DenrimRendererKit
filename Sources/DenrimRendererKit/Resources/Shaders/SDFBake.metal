@@ -35,10 +35,18 @@ struct GPUDistanceFieldBakeSample {
     float blend;
 };
 
+struct GPUVolumeMaterialFieldSample {
+    float4 baseColorOpacity;
+    float4 emissionTransmission;
+    float4 surface;
+    uint4 materialFieldFlags;
+};
+
 struct GPUDistanceFieldProgramSample {
     GPUDistanceFieldBakeSample field;
     float4 attributes0;
     float4 attributes1;
+    GPUVolumeMaterialFieldSample materialFields;
 };
 
 struct GPUSparseDistanceFieldBakeConstants {
@@ -63,14 +71,32 @@ struct GPUSparseBrickBakeRecord {
 
 struct GPUDistanceFieldProgramAttributeLayout {
     uint4 metadata;
-    uint4 semantics0;
-    uint4 semantics1;
+    uint4 reserved0;
+    uint4 reserved1;
 };
+
+constant uint volumeMaterialFieldBaseColor = 1u << 0;
+constant uint volumeMaterialFieldOpacity = 1u << 1;
+constant uint volumeMaterialFieldEmission = 1u << 2;
+constant uint volumeMaterialFieldRoughness = 1u << 3;
+constant uint volumeMaterialFieldMetallic = 1u << 4;
+constant uint volumeMaterialFieldTransmission = 1u << 5;
+constant uint volumeMaterialFieldSpecular = 1u << 6;
+constant uint volumeMaterialFieldEmissionStrength = 1u << 7;
+
+static GPUVolumeMaterialFieldSample emptyMaterialFields() {
+    GPUVolumeMaterialFieldSample fields;
+    fields.baseColorOpacity = float4(0.0);
+    fields.emissionTransmission = float4(0.0);
+    fields.surface = float4(0.0);
+    fields.materialFieldFlags = uint4(0u);
+    return fields;
+}
 
 struct GPUVolumeAttributeDescriptor {
     uint4 metadata;
-    uint4 semantics0;
-    uint4 semantics1;
+    uint4 reserved0;
+    uint4 reserved1;
 };
 
 struct GPUVolumeBrickDescriptor {
@@ -302,12 +328,235 @@ static float programSplineTubeDistance(
     return bestDistance;
 }
 
+static float programSmoothstep(float edge0, float edge1, float x) {
+    float denominator = edge1 - edge0;
+    if (abs(denominator) <= 1.0e-8) {
+        return x < edge0 ? 0.0 : 1.0;
+    }
+    float t = clamp((x - edge0) / denominator, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+static float programHash3(float3 cell, float seed) {
+    return fract(sin(dot(cell, float3(127.1, 311.7, 74.7)) + seed * 101.3) * 43758.5453);
+}
+
+static float programValueNoise3D(float3 position, float scale, float seed) {
+    float3 p = position * max(scale, 1.0e-6);
+    float3 cell = floor(p);
+    float3 f = fract(p);
+    float3 u = f * f * (3.0 - 2.0 * f);
+
+    float c000 = programHash3(cell + float3(0.0, 0.0, 0.0), seed);
+    float c100 = programHash3(cell + float3(1.0, 0.0, 0.0), seed);
+    float c010 = programHash3(cell + float3(0.0, 1.0, 0.0), seed);
+    float c110 = programHash3(cell + float3(1.0, 1.0, 0.0), seed);
+    float c001 = programHash3(cell + float3(0.0, 0.0, 1.0), seed);
+    float c101 = programHash3(cell + float3(1.0, 0.0, 1.0), seed);
+    float c011 = programHash3(cell + float3(0.0, 1.0, 1.0), seed);
+    float c111 = programHash3(cell + float3(1.0, 1.0, 1.0), seed);
+
+    float x00 = mix(c000, c100, u.x);
+    float x10 = mix(c010, c110, u.x);
+    float x01 = mix(c001, c101, u.x);
+    float x11 = mix(c011, c111, u.x);
+    return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
+}
+
+static float programFBM3D(float3 position, float scale, float octaves, float lacunarity, float gain, float seed) {
+    uint octaveCount = clamp(uint(floor(octaves)), 1u, 8u);
+    float frequency = max(scale, 1.0e-6);
+    float amplitude = 0.5;
+    float sum = 0.0;
+    float normalization = 0.0;
+    for (uint octave = 0u; octave < octaveCount; ++octave) {
+        sum += programValueNoise3D(position, frequency, seed + float(octave) * 17.17) * amplitude;
+        normalization += amplitude;
+        frequency *= max(lacunarity, 1.0e-6);
+        amplitude *= max(gain, 0.0);
+    }
+    return normalization > 1.0e-8 ? sum / normalization : 0.0;
+}
+
+static float3 programCellular3D(float3 position, float scale, float seed) {
+    float3 p = position * max(scale, 1.0e-6);
+    float3 base = floor(p);
+    float nearest = INFINITY;
+    float secondNearest = INFINITY;
+    float nearestID = 0.0;
+
+    for (int z = -1; z <= 1; ++z) {
+        for (int y = -1; y <= 1; ++y) {
+            for (int x = -1; x <= 1; ++x) {
+                float3 cell = base + float3(float(x), float(y), float(z));
+                float3 feature = float3(
+                    programHash3(cell, seed + 11.1),
+                    programHash3(cell, seed + 37.7),
+                    programHash3(cell, seed + 71.3)
+                );
+                float candidateDistance = length(cell + feature - p);
+                if (candidateDistance < nearest) {
+                    secondNearest = nearest;
+                    nearest = candidateDistance;
+                    nearestID = programHash3(cell, seed + 149.9);
+                } else if (candidateDistance < secondNearest) {
+                    secondNearest = candidateDistance;
+                }
+            }
+        }
+    }
+
+    return float3(nearest, secondNearest, nearestID);
+}
+
+static float blendMaterialFieldValue(float current, float candidate, uint currentFlags, uint candidateFlags, uint flag, float t) {
+    bool hasCurrent = (currentFlags & flag) != 0u;
+    bool hasCandidate = (candidateFlags & flag) != 0u;
+    if (hasCurrent && hasCandidate) {
+        return mix(current, candidate, t);
+    }
+    return hasCandidate ? candidate : current;
+}
+
+static float3 blendMaterialFieldValue(float3 current, float3 candidate, uint currentFlags, uint candidateFlags, uint flag, float t) {
+    bool hasCurrent = (currentFlags & flag) != 0u;
+    bool hasCandidate = (candidateFlags & flag) != 0u;
+    if (hasCurrent && hasCandidate) {
+        return mix(current, candidate, t);
+    }
+    return hasCandidate ? candidate : current;
+}
+
+static GPUVolumeMaterialFieldSample blendMaterialFields(
+    GPUVolumeMaterialFieldSample current,
+    GPUVolumeMaterialFieldSample candidate,
+    float t
+) {
+    uint currentFlags = current.materialFieldFlags.x;
+    uint candidateFlags = candidate.materialFieldFlags.x;
+    GPUVolumeMaterialFieldSample fields;
+    fields.baseColorOpacity.xyz = blendMaterialFieldValue(
+        current.baseColorOpacity.xyz,
+        candidate.baseColorOpacity.xyz,
+        currentFlags,
+        candidateFlags,
+        volumeMaterialFieldBaseColor,
+        t
+    );
+    fields.baseColorOpacity.w = blendMaterialFieldValue(
+        current.baseColorOpacity.w,
+        candidate.baseColorOpacity.w,
+        currentFlags,
+        candidateFlags,
+        volumeMaterialFieldOpacity,
+        t
+    );
+    fields.emissionTransmission.xyz = blendMaterialFieldValue(
+        current.emissionTransmission.xyz,
+        candidate.emissionTransmission.xyz,
+        currentFlags,
+        candidateFlags,
+        volumeMaterialFieldEmission,
+        t
+    );
+    fields.emissionTransmission.w = blendMaterialFieldValue(
+        current.emissionTransmission.w,
+        candidate.emissionTransmission.w,
+        currentFlags,
+        candidateFlags,
+        volumeMaterialFieldTransmission,
+        t
+    );
+    fields.surface.x = blendMaterialFieldValue(
+        current.surface.x,
+        candidate.surface.x,
+        currentFlags,
+        candidateFlags,
+        volumeMaterialFieldRoughness,
+        t
+    );
+    fields.surface.y = blendMaterialFieldValue(
+        current.surface.y,
+        candidate.surface.y,
+        currentFlags,
+        candidateFlags,
+        volumeMaterialFieldMetallic,
+        t
+    );
+    fields.surface.z = blendMaterialFieldValue(
+        current.surface.z,
+        candidate.surface.z,
+        currentFlags,
+        candidateFlags,
+        volumeMaterialFieldSpecular,
+        t
+    );
+    fields.surface.w = blendMaterialFieldValue(
+        current.surface.w,
+        candidate.surface.w,
+        currentFlags,
+        candidateFlags,
+        volumeMaterialFieldEmissionStrength,
+        t
+    );
+    fields.materialFieldFlags = current.materialFieldFlags | candidate.materialFieldFlags;
+    return fields;
+}
+
+static void writeScalarMaterialField(thread GPUVolumeMaterialFieldSample &fields, uint field, float value) {
+    switch (field) {
+    case 2u:
+        fields.surface.x = value;
+        fields.materialFieldFlags.x |= volumeMaterialFieldRoughness;
+        break;
+    case 3u:
+        fields.surface.y = value;
+        fields.materialFieldFlags.x |= volumeMaterialFieldMetallic;
+        break;
+    case 4u:
+        fields.surface.z = value;
+        fields.materialFieldFlags.x |= volumeMaterialFieldSpecular;
+        break;
+    case 5u:
+        fields.emissionTransmission.w = value;
+        fields.materialFieldFlags.x |= volumeMaterialFieldTransmission;
+        break;
+    case 6u:
+        fields.baseColorOpacity.w = value;
+        fields.materialFieldFlags.x |= volumeMaterialFieldOpacity;
+        break;
+    case 8u:
+        fields.surface.w = value;
+        fields.materialFieldFlags.x |= volumeMaterialFieldEmissionStrength;
+        break;
+    default:
+        break;
+    }
+}
+
+static void writeVectorMaterialField(thread GPUVolumeMaterialFieldSample &fields, uint field, float3 value) {
+    switch (field) {
+    case 0u:
+    case 1u:
+        fields.baseColorOpacity.xyz = value;
+        fields.materialFieldFlags.x |= volumeMaterialFieldBaseColor;
+        break;
+    case 7u:
+        fields.emissionTransmission.xyz = value;
+        fields.materialFieldFlags.x |= volumeMaterialFieldEmission;
+        break;
+    default:
+        break;
+    }
+}
+
 static GPUDistanceFieldProgramSample combineProgramSample(
     GPUDistanceFieldProgramSample current,
     float candidateDistance,
     uint candidateMaterial,
     float4 candidateAttributes0,
     float4 candidateAttributes1,
+    GPUVolumeMaterialFieldSample candidateMaterialFields,
     float smoothRadius,
     uint operation
 ) {
@@ -325,6 +574,7 @@ static GPUDistanceFieldProgramSample combineProgramSample(
         current.field.blend = 0.0;
         current.attributes0 = candidateAttributes0;
         current.attributes1 = candidateAttributes1;
+        current.materialFields = candidateMaterialFields;
         return current;
     }
 
@@ -337,6 +587,7 @@ static GPUDistanceFieldProgramSample combineProgramSample(
             current.field.blend = 0.0;
             current.attributes0 = candidateAttributes0;
             current.attributes1 = candidateAttributes1;
+            current.materialFields = candidateMaterialFields;
         }
         return current;
     }
@@ -354,6 +605,7 @@ static GPUDistanceFieldProgramSample combineProgramSample(
         current.field.blend = 0.0;
         current.attributes0 = candidateAttributes0;
         current.attributes1 = candidateAttributes1;
+        current.materialFields = candidateMaterialFields;
         return current;
     }
 
@@ -361,6 +613,7 @@ static GPUDistanceFieldProgramSample combineProgramSample(
     current.field.blend = candidateWeight;
     current.attributes0 = mix(current.attributes0, candidateAttributes0, candidateWeight);
     current.attributes1 = mix(current.attributes1, candidateAttributes1, candidateWeight);
+    current.materialFields = blendMaterialFields(current.materialFields, candidateMaterialFields, candidateWeight);
     return current;
 }
 
@@ -377,8 +630,10 @@ static GPUDistanceFieldProgramSample sampleProgramField(
     result.field.blend = 0.0;
     result.attributes0 = float4(0.0);
     result.attributes1 = float4(0.0);
+    result.materialFields = emptyMaterialFields();
     float4 currentAttributes0 = float4(0.0);
     float4 currentAttributes1 = float4(0.0);
+    GPUVolumeMaterialFieldSample currentMaterialFields = emptyMaterialFields();
 
     float4x4 programToLocal = float4x4(
         float4(1.0, 0.0, 0.0, 0.0),
@@ -427,6 +682,7 @@ static GPUDistanceFieldProgramSample sampleProgramField(
                 operation.metadata.z,
                 float4(0.0),
                 float4(0.0),
+                emptyMaterialFields(),
                 operation.p0.y,
                 operation.metadata.y
             );
@@ -441,6 +697,7 @@ static GPUDistanceFieldProgramSample sampleProgramField(
                 operation.metadata.z,
                 float4(0.0),
                 float4(0.0),
+                emptyMaterialFields(),
                 operation.p1.x,
                 operation.metadata.y
             );
@@ -455,6 +712,7 @@ static GPUDistanceFieldProgramSample sampleProgramField(
                 operation.metadata.z,
                 float4(0.0),
                 float4(0.0),
+                emptyMaterialFields(),
                 operation.p0.z,
                 operation.metadata.y
             );
@@ -528,6 +786,35 @@ static GPUDistanceFieldProgramSample sampleProgramField(
             scalarRegisters[operation.indices.x & 31u] = mix(a, b, t);
             break;
         }
+        case 122: {
+            scalarRegisters[operation.indices.x & 31u] = programSmoothstep(
+                scalarRegisters[operation.indices.y & 31u],
+                scalarRegisters[operation.indices.z & 31u],
+                scalarRegisters[operation.indices.w & 31u]
+            );
+            break;
+        }
+        case 123: {
+            scalarRegisters[operation.metadata.y & 31u] = scalarRegisters[operation.metadata.w & 31u] < scalarRegisters[operation.metadata.z & 31u] ? 0.0 : 1.0;
+            break;
+        }
+        case 124: {
+            scalarRegisters[operation.metadata.y & 31u] = clamp(scalarRegisters[operation.metadata.z & 31u], 0.0, 1.0);
+            break;
+        }
+        case 125: {
+            scalarRegisters[operation.metadata.y & 31u] = fract(scalarRegisters[operation.metadata.z & 31u]);
+            break;
+        }
+        case 126: {
+            scalarRegisters[operation.metadata.y & 31u] = floor(scalarRegisters[operation.metadata.z & 31u]);
+            break;
+        }
+        case 127: {
+            float divisor = scalarRegisters[operation.metadata.w & 31u];
+            scalarRegisters[operation.metadata.y & 31u] = abs(divisor) > 1.0e-8 ? fmod(scalarRegisters[operation.metadata.z & 31u], divisor) : 0.0;
+            break;
+        }
         case 130: {
             vectorRegisters[operation.metadata.y & 31u] = vectorRegisters[operation.metadata.z & 31u] + vectorRegisters[operation.metadata.w & 31u];
             break;
@@ -576,6 +863,20 @@ static GPUDistanceFieldProgramSample sampleProgramField(
             scalarRegisters[operation.metadata.y & 31u] = length(vectorRegisters[operation.metadata.z & 31u]);
             break;
         }
+        case 145: {
+            scalarRegisters[operation.metadata.y & 31u] = dot(vectorRegisters[operation.metadata.z & 31u], vectorRegisters[operation.metadata.w & 31u]);
+            break;
+        }
+        case 146: {
+            float3 source = vectorRegisters[operation.metadata.z & 31u];
+            float sourceLength = length(source);
+            vectorRegisters[operation.metadata.y & 31u] = sourceLength > 1.0e-8 ? source / sourceLength : float3(0.0);
+            break;
+        }
+        case 147: {
+            scalarRegisters[operation.metadata.y & 31u] = distance(vectorRegisters[operation.metadata.z & 31u], vectorRegisters[operation.metadata.w & 31u]);
+            break;
+        }
         case 141: {
             scalarRegisters[operation.indices.x & 31u] = programBoxDistance(
                 vectorRegisters[operation.indices.y & 31u],
@@ -614,6 +915,36 @@ static GPUDistanceFieldProgramSample sampleProgramField(
             );
             break;
         }
+        case 172: {
+            scalarRegisters[operation.metadata.y & 31u] = programValueNoise3D(
+                vectorRegisters[operation.metadata.z & 31u],
+                scalarRegisters[operation.metadata.w & 31u],
+                scalarRegisters[operation.indices.x & 31u]
+            );
+            break;
+        }
+        case 173: {
+            scalarRegisters[operation.metadata.y & 31u] = programFBM3D(
+                vectorRegisters[operation.metadata.z & 31u],
+                scalarRegisters[operation.metadata.w & 31u],
+                scalarRegisters[operation.indices.x & 31u],
+                scalarRegisters[operation.indices.y & 31u],
+                scalarRegisters[operation.indices.z & 31u],
+                scalarRegisters[operation.indices.w & 31u]
+            );
+            break;
+        }
+        case 174: {
+            float3 cellular = programCellular3D(
+                vectorRegisters[operation.indices.x & 31u],
+                scalarRegisters[operation.indices.y & 31u],
+                scalarRegisters[operation.indices.z & 31u]
+            );
+            scalarRegisters[operation.metadata.y & 31u] = cellular.x;
+            scalarRegisters[operation.metadata.z & 31u] = cellular.y;
+            scalarRegisters[operation.metadata.w & 31u] = cellular.z;
+            break;
+        }
         case 150: {
             float4 candidateAttributes0 = currentAttributes0;
             float4 candidateAttributes1 = currentAttributes1;
@@ -638,6 +969,7 @@ static GPUDistanceFieldProgramSample sampleProgramField(
                 operation.metadata.z,
                 candidateAttributes0,
                 candidateAttributes1,
+                currentMaterialFields,
                 operation.p0.x,
                 operation.metadata.w
             );
@@ -651,6 +983,22 @@ static GPUDistanceFieldProgramSample sampleProgramField(
             } else if (channel < 8u) {
                 currentAttributes1[channel - 4u] = value;
             }
+            break;
+        }
+        case 170: {
+            writeScalarMaterialField(
+                currentMaterialFields,
+                operation.metadata.y,
+                scalarRegisters[operation.metadata.z & 31u]
+            );
+            break;
+        }
+        case 171: {
+            writeVectorMaterialField(
+                currentMaterialFields,
+                operation.metadata.y,
+                vectorRegisters[operation.metadata.z & 31u]
+            );
             break;
         }
         default:
@@ -938,8 +1286,8 @@ kernel void sdfSparseDirectGridBakeKernel(
     if (localThreadIndex == 0u) {
         gridIndices[brickIndex] = active ? brickIndex : 0xffffffffu;
         attributeDescriptors[brickIndex].metadata = uint4(0u, sampleOffset, storedSampleCount, brickIndex);
-        attributeDescriptors[brickIndex].semantics0 = uint4(0u);
-        attributeDescriptors[brickIndex].semantics1 = uint4(0u);
+        attributeDescriptors[brickIndex].reserved0 = uint4(0u);
+        attributeDescriptors[brickIndex].reserved1 = uint4(0u);
     }
 
     if (!active) {
@@ -987,6 +1335,7 @@ kernel void sdfProgramSparseDirectGridBakeKernel(
     constant GPUSparseDistanceFieldBakeConstants &constants [[buffer(6)]],
     device float4 *attributeSamples [[buffer(7)]],
     constant GPUDistanceFieldProgramAttributeLayout &attributeLayout [[buffer(8)]],
+    device GPUVolumeMaterialFieldSample *materialFieldSamples [[buffer(9)]],
     uint3 threadPositionInThreadgroup [[thread_position_in_threadgroup]],
     uint3 threadgroupPosition [[threadgroup_position_in_grid]],
     uint3 threadsPerThreadgroupVector [[threads_per_threadgroup]]
@@ -1064,12 +1413,13 @@ kernel void sdfProgramSparseDirectGridBakeKernel(
     bool active = threadMinDistances[0] <= band && threadMaxDistances[0] >= -band;
     uint sampleOffset = brickIndex * maxStoredSampleCount;
     uint packedVectorCount = min(attributeLayout.metadata.x, 2u);
+    bool writesMaterialFields = attributeLayout.metadata.z != 0u;
     uint attributeOffset = sampleOffset * packedVectorCount;
     if (localThreadIndex == 0u) {
         gridIndices[brickIndex] = active ? brickIndex : 0xffffffffu;
         attributeDescriptors[brickIndex].metadata = uint4(attributeOffset, packedVectorCount, storedSampleCount, brickIndex);
-        attributeDescriptors[brickIndex].semantics0 = attributeLayout.semantics0;
-        attributeDescriptors[brickIndex].semantics1 = attributeLayout.semantics1;
+        attributeDescriptors[brickIndex].reserved0 = attributeLayout.reserved0;
+        attributeDescriptors[brickIndex].reserved1 = attributeLayout.reserved1;
     }
 
     if (!active) {
@@ -1105,6 +1455,9 @@ kernel void sdfProgramSparseDirectGridBakeKernel(
             sparseSamplePosition(sampleCoordinate, constants)
         );
         samples[sampleOffset + localSampleIndex] = programSample.field;
+        if (writesMaterialFields) {
+            materialFieldSamples[sampleOffset + localSampleIndex] = programSample.materialFields;
+        }
         if (packedVectorCount > 0u) {
             uint attributeSampleIndex = attributeOffset + localSampleIndex * packedVectorCount;
             attributeSamples[attributeSampleIndex] = programSample.attributes0;
@@ -1126,6 +1479,7 @@ kernel void sdfProgramSparseDirectGridBakeSelectedKernel(
     constant uint *dirtyBrickIndices [[buffer(7)]],
     device float4 *attributeSamples [[buffer(8)]],
     constant GPUDistanceFieldProgramAttributeLayout &attributeLayout [[buffer(9)]],
+    device GPUVolumeMaterialFieldSample *materialFieldSamples [[buffer(10)]],
     uint3 threadPositionInThreadgroup [[thread_position_in_threadgroup]],
     uint3 threadgroupPosition [[threadgroup_position_in_grid]],
     uint3 threadsPerThreadgroupVector [[threads_per_threadgroup]]
@@ -1205,12 +1559,13 @@ kernel void sdfProgramSparseDirectGridBakeSelectedKernel(
     bool active = threadMinDistances[0] <= band && threadMaxDistances[0] >= -band;
     uint sampleOffset = brickIndex * maxStoredSampleCount;
     uint packedVectorCount = min(attributeLayout.metadata.x, 2u);
+    bool writesMaterialFields = attributeLayout.metadata.z != 0u;
     uint attributeOffset = sampleOffset * packedVectorCount;
     if (localThreadIndex == 0u) {
         gridIndices[brickIndex] = active ? brickIndex : 0xffffffffu;
         attributeDescriptors[brickIndex].metadata = uint4(attributeOffset, packedVectorCount, storedSampleCount, brickIndex);
-        attributeDescriptors[brickIndex].semantics0 = attributeLayout.semantics0;
-        attributeDescriptors[brickIndex].semantics1 = attributeLayout.semantics1;
+        attributeDescriptors[brickIndex].reserved0 = attributeLayout.reserved0;
+        attributeDescriptors[brickIndex].reserved1 = attributeLayout.reserved1;
     }
 
     if (!active) {
@@ -1246,6 +1601,9 @@ kernel void sdfProgramSparseDirectGridBakeSelectedKernel(
             sparseSamplePosition(sampleCoordinate, constants)
         );
         samples[sampleOffset + localSampleIndex] = programSample.field;
+        if (writesMaterialFields) {
+            materialFieldSamples[sampleOffset + localSampleIndex] = programSample.materialFields;
+        }
         if (packedVectorCount > 0u) {
             uint attributeSampleIndex = attributeOffset + localSampleIndex * packedVectorCount;
             attributeSamples[attributeSampleIndex] = programSample.attributes0;

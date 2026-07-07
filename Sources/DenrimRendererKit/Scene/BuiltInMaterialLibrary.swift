@@ -115,6 +115,39 @@ public enum BuiltInMaterialLibrary {
             Material(baseColor: SIMD3<Float>(0.055, 0.12, 0.26), roughness: 0.88, specular: 0.16, sheen: 0.3, sheenColor: SIMD3<Float>(0.35, 0.5, 0.78), sheenRoughness: 0.9)
         ),
         preset(
+            "organic.wood",
+            "Wood",
+            .diffuse,
+            "Warm rough wood baseline for procedural grain and bark-style fields.",
+            Material(
+                baseColor: SIMD3<Float>(0.48, 0.25, 0.105),
+                roughness: 0.78,
+                specular: 0.24,
+                sheen: 0.12,
+                sheenColor: SIMD3<Float>(0.82, 0.58, 0.32),
+                sheenRoughness: 0.86
+            )
+        ),
+        preset(
+            "organic.plant",
+            "Plant",
+            .subsurface,
+            "Soft green plant material with waxy leaf-like scattering.",
+            Material(
+                baseColor: SIMD3<Float>(0.14, 0.42, 0.105),
+                roughness: 0.66,
+                specular: 0.28,
+                sheen: 0.18,
+                sheenColor: SIMD3<Float>(0.48, 0.86, 0.28),
+                sheenRoughness: 0.72,
+                subsurface: 0.26,
+                subsurfaceColor: SIMD3<Float>(0.34, 0.82, 0.18),
+                subsurfaceRadius: SIMD3<Float>(0.32, 0.78, 0.22),
+                subsurfaceScale: 0.18,
+                subsurfaceAnisotropy: 0.08
+            )
+        ),
+        preset(
             "subsurface.skin-warm",
             "Warm Skin",
             .subsurface,

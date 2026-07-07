@@ -1,13 +1,13 @@
-# Semantic SDF volume validation scene.
-# Renders one multi-primitive SDF model with compact material attributes.
+# Custom-attribute SDF volume validation scene.
+# Renders one multi-primitive SDF model with compact neutral attributes.
 
-render output /tmp/denrim-semantic-sdf.png size 512 spp 32 quality interactive maxBounces 3 backend flat-bvh denoise none
+render output /tmp/denrim-custom-attribute-sdf.png size 512 spp 32 quality interactive maxBounces 3 backend flat-bvh denoise none
 camera origin(0, 0.65, 3.4) target(0, 0.1, 0) fov(34)
 environment sky
 
-material mossy semantic moss youngColor 0.9 0.95 0.12 matureColor 0.04 0.34 0.04 dryColor 0.52 0.36 0.12
-material wet semantic wetFilm tint 0.55 0.72 0.82 wetness 1
-material crystal semantic crystal color 0.72 0.9 1 clarity 0.82 polish 0.92
+material mossy 0.12 0.38 0.12 roughness 0.86 specular 0.22 sheen 0.28 subsurface 0.18
+material wet 0.55 0.72 0.82 roughness 0.025 specular 0.85 opacity 0.55 transmission 0.65 thinWalled 1
+material crystal 0.72 0.9 1 roughness 0.02 specular 1 opacity 0.8 transmission 0.82 transmissionIOR 1.5
 material floor 0.45 0.45 0.42 roughness 0.75
 
 quad floor a(-1.8, -0.72, 1.2) b(1.8, -0.72, 1.2) c(1.8, -0.72, -1.4) d(-1.8, -0.72, -1.4)

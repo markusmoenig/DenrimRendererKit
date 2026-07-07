@@ -47,15 +47,6 @@ struct GPUMaterial {
     var volumeParameters: SIMD4<Float>
 }
 
-struct GPUMaterialSemanticDescriptor {
-    var metadata: SIMD4<UInt32>
-    var style0: SIMD4<Float>
-    var style1: SIMD4<Float>
-    var style2: SIMD4<Float>
-    var controls0: SIMD4<Float>
-    var controls1: SIMD4<Float>
-}
-
 struct GPUTextureDescriptor {
     var metadata: SIMD4<UInt32>
 }
@@ -79,6 +70,7 @@ struct GPUVolumeDescriptor {
     var localBoundsMax: SIMD4<Float>
     var dimensions: SIMD4<UInt32>
     var metadata: SIMD4<UInt32>
+    var materialProgram: SIMD4<UInt32>
     var worldToLocal0: SIMD4<Float>
     var worldToLocal1: SIMD4<Float>
     var worldToLocal2: SIMD4<Float>
@@ -111,8 +103,17 @@ struct GPUVolumeMaterialFieldSample {
 
 struct GPUVolumeAttributeDescriptor {
     var metadata: SIMD4<UInt32>
-    var semantics0: SIMD4<UInt32>
-    var semantics1: SIMD4<UInt32>
+    var reserved0: SIMD4<UInt32>
+    var reserved1: SIMD4<UInt32>
+}
+
+struct GPUMaterialProgramDescriptor {
+    var metadata: SIMD4<UInt32>
+}
+
+struct GPUMaterialProgramOperation {
+    var metadata: SIMD4<UInt32>
+    var data0: SIMD4<Float>
 }
 
 struct GPUVolumeBrickDescriptor {
@@ -170,6 +171,8 @@ struct GPURenderConstants {
     var volumeBrickBVHIndexCount: UInt32
     var volumeBrickGridCount: UInt32
     var volumeBrickGridIndexCount: UInt32
+    var materialProgramCount: UInt32
+    var materialProgramOperationCount: UInt32
     var denoiserEnabled: UInt32
     var sdfTraversalStatsEnabled: UInt32
     var tileX: UInt32

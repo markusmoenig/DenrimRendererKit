@@ -41,7 +41,7 @@ public struct DistanceFieldProgram: Sendable, Equatable {
         self.attributeLayout = attributeLayout
     }
 
-    /// Returns a semantically equivalent program with conservative instruction folding applied.
+    /// Returns a behaviorally equivalent program with conservative instruction folding applied.
     public func optimized() -> DistanceFieldProgram {
         guard !instructions.isEmpty else {
             return self
@@ -50,6 +50,10 @@ public struct DistanceFieldProgram: Sendable, Equatable {
             instructions: DistanceFieldProgramOptimizer.optimizedInstructions(instructions),
             attributeLayout: attributeLayout
         )
+    }
+
+    var resolvedAttributeLayout: DistanceVolumeAttributeLayout {
+        attributeLayout
     }
 }
 
@@ -90,6 +94,25 @@ public struct DistanceFieldProgramAttributeBinding: Sendable, Equatable {
     }
 }
 
+/// Generic material field writable by a `DistanceFieldProgram`.
+public enum DistanceFieldMaterialField: UInt32, Sendable, Equatable {
+    case baseColor = 0
+    case albedo = 1
+    case roughness = 2
+    case metallic = 3
+    case specular = 4
+    case transmission = 5
+    case opacity = 6
+    case emission = 7
+    case emissionStrength = 8
+}
+
+/// Material field value attached to one emitted SDF candidate.
+public enum DistanceFieldProgramMaterialFieldBinding: Sendable, Equatable {
+    case scalar(DistanceFieldMaterialField, DistanceFieldScalarRegister)
+    case vector(DistanceFieldMaterialField, DistanceFieldVectorRegister)
+}
+
 /// Generic instruction for `DistanceFieldProgram`.
 ///
 /// This is a small renderer-owned VM, not raw Metal source. It is intended to be
@@ -112,6 +135,12 @@ public enum DistanceFieldProgramInstruction: Sendable, Equatable {
     case cosFloat(DistanceFieldScalarRegister, DistanceFieldScalarRegister)
     case clampFloat(DistanceFieldScalarRegister, DistanceFieldScalarRegister, DistanceFieldScalarRegister, DistanceFieldScalarRegister)
     case mixFloat(DistanceFieldScalarRegister, DistanceFieldScalarRegister, DistanceFieldScalarRegister, DistanceFieldScalarRegister)
+    case smoothstep(DistanceFieldScalarRegister, edge0: DistanceFieldScalarRegister, edge1: DistanceFieldScalarRegister, x: DistanceFieldScalarRegister)
+    case step(DistanceFieldScalarRegister, edge: DistanceFieldScalarRegister, x: DistanceFieldScalarRegister)
+    case saturate(DistanceFieldScalarRegister, DistanceFieldScalarRegister)
+    case fractFloat(DistanceFieldScalarRegister, DistanceFieldScalarRegister)
+    case floorFloat(DistanceFieldScalarRegister, DistanceFieldScalarRegister)
+    case modFloat(DistanceFieldScalarRegister, DistanceFieldScalarRegister, DistanceFieldScalarRegister)
 
     case addVector(DistanceFieldVectorRegister, DistanceFieldVectorRegister, DistanceFieldVectorRegister)
     case subtractVector(DistanceFieldVectorRegister, DistanceFieldVectorRegister, DistanceFieldVectorRegister)
@@ -124,6 +153,20 @@ public enum DistanceFieldProgramInstruction: Sendable, Equatable {
     case extractY(DistanceFieldScalarRegister, DistanceFieldVectorRegister)
     case extractZ(DistanceFieldScalarRegister, DistanceFieldVectorRegister)
     case length(DistanceFieldScalarRegister, DistanceFieldVectorRegister)
+    case dot(DistanceFieldScalarRegister, DistanceFieldVectorRegister, DistanceFieldVectorRegister)
+    case normalize(DistanceFieldVectorRegister, DistanceFieldVectorRegister)
+    case distance(DistanceFieldScalarRegister, DistanceFieldVectorRegister, DistanceFieldVectorRegister)
+
+    case valueNoise3D(DistanceFieldScalarRegister, position: DistanceFieldVectorRegister, scale: DistanceFieldScalarRegister, seed: DistanceFieldScalarRegister)
+    case fbm3D(DistanceFieldScalarRegister, position: DistanceFieldVectorRegister, scale: DistanceFieldScalarRegister, octaves: DistanceFieldScalarRegister, lacunarity: DistanceFieldScalarRegister, gain: DistanceFieldScalarRegister, seed: DistanceFieldScalarRegister)
+    case cellular3D(
+        distance: DistanceFieldScalarRegister,
+        secondDistance: DistanceFieldScalarRegister,
+        cellID: DistanceFieldScalarRegister,
+        position: DistanceFieldVectorRegister,
+        scale: DistanceFieldScalarRegister,
+        seed: DistanceFieldScalarRegister
+    )
 
     case boxDistance(DistanceFieldScalarRegister, position: DistanceFieldVectorRegister, halfExtents: DistanceFieldVectorRegister, cornerRadius: DistanceFieldScalarRegister)
     case cylinderDistance(DistanceFieldScalarRegister, position: DistanceFieldVectorRegister, radius: DistanceFieldScalarRegister, halfHeight: DistanceFieldScalarRegister)
@@ -154,6 +197,8 @@ public enum DistanceFieldProgramInstruction: Sendable, Equatable {
         attributes: [DistanceFieldProgramAttributeBinding] = []
     )
     case writeAttribute(channel: Int, value: DistanceFieldScalarRegister)
+    case writeMaterialField(DistanceFieldMaterialField, scalar: DistanceFieldScalarRegister)
+    case writeMaterialFieldVector(DistanceFieldMaterialField, vector: DistanceFieldVectorRegister)
 }
 
 private func taperedCapsuleDistance(
@@ -219,6 +264,106 @@ private func splineTubeDistance(
         previousRadius = radius
     }
     return bestDistance
+}
+
+private func programFract(_ value: Float) -> Float {
+    value - floor(value)
+}
+
+private func programFract(_ value: SIMD3<Float>) -> SIMD3<Float> {
+    SIMD3<Float>(
+        programFract(value.x),
+        programFract(value.y),
+        programFract(value.z)
+    )
+}
+
+private func programFloor(_ value: SIMD3<Float>) -> SIMD3<Float> {
+    SIMD3<Float>(floor(value.x), floor(value.y), floor(value.z))
+}
+
+private func programSmoothstep(edge0: Float, edge1: Float, x: Float) -> Float {
+    let denominator = edge1 - edge0
+    if abs(denominator) <= 1e-8 {
+        return x < edge0 ? 0 : 1
+    }
+    let t = simd_clamp((x - edge0) / denominator, 0, 1)
+    return t * t * (3 - 2 * t)
+}
+
+private func programHash3(_ cell: SIMD3<Float>, seed: Float) -> Float {
+    programFract(sin(simd_dot(cell, SIMD3<Float>(127.1, 311.7, 74.7)) + seed * 101.3) * 43758.5453)
+}
+
+private func programValueNoise3D(position: SIMD3<Float>, scale: Float, seed: Float) -> Float {
+    let p = position * max(scale, 1e-6)
+    let cell = programFloor(p)
+    let f = programFract(p)
+    let u = f * f * (SIMD3<Float>(repeating: 3) - 2 * f)
+
+    let c000 = programHash3(cell + SIMD3<Float>(0, 0, 0), seed: seed)
+    let c100 = programHash3(cell + SIMD3<Float>(1, 0, 0), seed: seed)
+    let c010 = programHash3(cell + SIMD3<Float>(0, 1, 0), seed: seed)
+    let c110 = programHash3(cell + SIMD3<Float>(1, 1, 0), seed: seed)
+    let c001 = programHash3(cell + SIMD3<Float>(0, 0, 1), seed: seed)
+    let c101 = programHash3(cell + SIMD3<Float>(1, 0, 1), seed: seed)
+    let c011 = programHash3(cell + SIMD3<Float>(0, 1, 1), seed: seed)
+    let c111 = programHash3(cell + SIMD3<Float>(1, 1, 1), seed: seed)
+
+    let x00 = c000 + (c100 - c000) * u.x
+    let x10 = c010 + (c110 - c010) * u.x
+    let x01 = c001 + (c101 - c001) * u.x
+    let x11 = c011 + (c111 - c011) * u.x
+    let y0 = x00 + (x10 - x00) * u.y
+    let y1 = x01 + (x11 - x01) * u.y
+    return y0 + (y1 - y0) * u.z
+}
+
+private func programFBM3D(position: SIMD3<Float>, scale: Float, octaves: Float, lacunarity: Float, gain: Float, seed: Float) -> Float {
+    let octaveCount = max(1, min(8, Int(octaves.rounded(.down))))
+    var frequency = max(scale, 1e-6)
+    var amplitude: Float = 0.5
+    var sum: Float = 0
+    var normalization: Float = 0
+    for octave in 0..<octaveCount {
+        sum += programValueNoise3D(position: position, scale: frequency, seed: seed + Float(octave) * 17.17) * amplitude
+        normalization += amplitude
+        frequency *= max(lacunarity, 1e-6)
+        amplitude *= max(gain, 0)
+    }
+    return normalization > 1e-8 ? sum / normalization : 0
+}
+
+private func programCellular3D(position: SIMD3<Float>, scale: Float, seed: Float) -> (Float, Float, Float) {
+    let p = position * max(scale, 1e-6)
+    let base = programFloor(p)
+    var nearest = Float.greatestFiniteMagnitude
+    var secondNearest = Float.greatestFiniteMagnitude
+    var nearestID: Float = 0
+
+    for z in -1...1 {
+        for y in -1...1 {
+            for x in -1...1 {
+                let cell = base + SIMD3<Float>(Float(x), Float(y), Float(z))
+                let feature = SIMD3<Float>(
+                    programHash3(cell, seed: seed + 11.1),
+                    programHash3(cell, seed: seed + 37.7),
+                    programHash3(cell, seed: seed + 71.3)
+                )
+                let delta = cell + feature - p
+                let distance = simd_length(delta)
+                if distance < nearest {
+                    secondNearest = nearest
+                    nearest = distance
+                    nearestID = programHash3(cell, seed: seed + 149.9)
+                } else if distance < secondNearest {
+                    secondNearest = distance
+                }
+            }
+        }
+    }
+
+    return (nearest, secondNearest, nearestID)
 }
 
 enum DistanceFieldProgramOptimizer {
@@ -355,6 +500,48 @@ enum DistanceFieldProgramOptimizer {
                     remember(destination, nil)
                     result.append(instruction)
                 }
+            case .smoothstep(let destination, let edge0, let edge1, let x):
+                if let edge0 = scalar(edge0), let edge1 = scalar(edge1), let x = scalar(x) {
+                    appendSet(destination, programSmoothstep(edge0: edge0, edge1: edge1, x: x))
+                } else {
+                    remember(destination, nil)
+                    result.append(instruction)
+                }
+            case .step(let destination, let edge, let x):
+                if let edge = scalar(edge), let x = scalar(x) {
+                    appendSet(destination, x < edge ? 0 : 1)
+                } else {
+                    remember(destination, nil)
+                    result.append(instruction)
+                }
+            case .saturate(let destination, let source):
+                if let source = scalar(source) {
+                    appendSet(destination, simd_clamp(source, 0, 1))
+                } else {
+                    remember(destination, nil)
+                    result.append(instruction)
+                }
+            case .fractFloat(let destination, let source):
+                if let source = scalar(source) {
+                    appendSet(destination, programFract(source))
+                } else {
+                    remember(destination, nil)
+                    result.append(instruction)
+                }
+            case .floorFloat(let destination, let source):
+                if let source = scalar(source) {
+                    appendSet(destination, floor(source))
+                } else {
+                    remember(destination, nil)
+                    result.append(instruction)
+                }
+            case .modFloat(let destination, let lhs, let rhs):
+                if let lhs = scalar(lhs), let rhs = scalar(rhs) {
+                    appendSet(destination, abs(rhs) > 1e-8 ? lhs.truncatingRemainder(dividingBy: rhs) : 0)
+                } else {
+                    remember(destination, nil)
+                    result.append(instruction)
+                }
             case .addVector(let destination, let lhs, let rhs):
                 if let lhs = vector(lhs), let rhs = vector(rhs) {
                     appendSet(destination, lhs + rhs)
@@ -432,6 +619,59 @@ enum DistanceFieldProgramOptimizer {
                     remember(destination, nil)
                     result.append(instruction)
                 }
+            case .dot(let destination, let lhs, let rhs):
+                if let lhs = vector(lhs), let rhs = vector(rhs) {
+                    appendSet(destination, simd_dot(lhs, rhs))
+                } else {
+                    remember(destination, nil)
+                    result.append(instruction)
+                }
+            case .normalize(let destination, let source):
+                if let source = vector(source) {
+                    let length = simd_length(source)
+                    appendSet(destination, length > 1e-8 ? source / length : .zero)
+                } else {
+                    remember(destination, nil)
+                    result.append(instruction)
+                }
+            case .distance(let destination, let lhs, let rhs):
+                if let lhs = vector(lhs), let rhs = vector(rhs) {
+                    appendSet(destination, simd_distance(lhs, rhs))
+                } else {
+                    remember(destination, nil)
+                    result.append(instruction)
+                }
+            case .valueNoise3D(let destination, let position, let scale, let seed):
+                if let position = vector(position), let scale = scalar(scale), let seed = scalar(seed) {
+                    appendSet(destination, programValueNoise3D(position: position, scale: scale, seed: seed))
+                } else {
+                    remember(destination, nil)
+                    result.append(instruction)
+                }
+            case .fbm3D(let destination, let position, let scale, let octaves, let lacunarity, let gain, let seed):
+                if let position = vector(position),
+                   let scale = scalar(scale),
+                   let octaves = scalar(octaves),
+                   let lacunarity = scalar(lacunarity),
+                   let gain = scalar(gain),
+                   let seed = scalar(seed) {
+                    appendSet(destination, programFBM3D(position: position, scale: scale, octaves: octaves, lacunarity: lacunarity, gain: gain, seed: seed))
+                } else {
+                    remember(destination, nil)
+                    result.append(instruction)
+                }
+            case .cellular3D(let distance, let secondDistance, let cellID, let position, let scale, let seed):
+                if let position = vector(position), let scale = scalar(scale), let seed = scalar(seed) {
+                    let cellular = programCellular3D(position: position, scale: scale, seed: seed)
+                    appendSet(distance, cellular.0)
+                    appendSet(secondDistance, cellular.1)
+                    appendSet(cellID, cellular.2)
+                } else {
+                    remember(distance, nil)
+                    remember(secondDistance, nil)
+                    remember(cellID, nil)
+                    result.append(instruction)
+                }
             case .boxDistance(let destination, let source, let halfExtents, let cornerRadius):
                 if let source = vector(source), let halfExtents = vector(halfExtents), let cornerRadius = scalar(cornerRadius) {
                     let q = simd_abs(source) - halfExtents
@@ -502,7 +742,9 @@ enum DistanceFieldProgramOptimizer {
                 }
             case .emit:
                 result.append(instruction)
-            case .writeAttribute:
+            case .writeAttribute,
+                 .writeMaterialField,
+                 .writeMaterialFieldVector:
                 result.append(instruction)
             }
         }
@@ -593,7 +835,8 @@ enum DistanceFieldProgramEvaluator {
             material: fallbackMaterial,
             secondaryMaterial: fallbackMaterial,
             blend: 0,
-            attributes: [:]
+            attributes: [:],
+            materialFields: DistanceVolumeMaterialFields()
         )
 
         for operation in program.operations {
@@ -609,7 +852,7 @@ enum DistanceFieldProgramEvaluator {
             case .sphere(let radius, let material, let smoothUnionRadius, let combineOperation):
                 let local = state.localPosition(for: position)
                 let distance = (simd_length(local) - radius) * state.distanceScale
-                field = combine(field, distance: distance, material: material, attributes: [:], smoothUnionRadius: smoothUnionRadius, operation: combineOperation)
+                field = combine(field, distance: distance, material: material, attributes: [:], materialFields: DistanceVolumeMaterialFields(), smoothUnionRadius: smoothUnionRadius, operation: combineOperation)
             case .box(let halfExtents, let cornerRadius, let material, let smoothUnionRadius, let combineOperation):
                 let local = state.localPosition(for: position)
                 let q = simd_abs(local) - halfExtents
@@ -618,7 +861,7 @@ enum DistanceFieldProgramEvaluator {
                         + min(max(q.x, max(q.y, q.z)), 0)
                         - max(cornerRadius, 0)
                 ) * state.distanceScale
-                field = combine(field, distance: distance, material: material, attributes: [:], smoothUnionRadius: smoothUnionRadius, operation: combineOperation)
+                field = combine(field, distance: distance, material: material, attributes: [:], materialFields: DistanceVolumeMaterialFields(), smoothUnionRadius: smoothUnionRadius, operation: combineOperation)
             case .cylinder(let radius, let halfHeight, let material, let smoothUnionRadius, let combineOperation):
                 let local = state.localPosition(for: position)
                 let d = SIMD2<Float>(
@@ -629,7 +872,7 @@ enum DistanceFieldProgramEvaluator {
                     min(max(d.x, d.y), 0)
                         + simd_length(simd_max(d, SIMD2<Float>(repeating: 0)))
                 ) * state.distanceScale
-                field = combine(field, distance: distance, material: material, attributes: [:], smoothUnionRadius: smoothUnionRadius, operation: combineOperation)
+                field = combine(field, distance: distance, material: material, attributes: [:], materialFields: DistanceVolumeMaterialFields(), smoothUnionRadius: smoothUnionRadius, operation: combineOperation)
             }
         }
 
@@ -648,9 +891,11 @@ enum DistanceFieldProgramEvaluator {
             material: fallbackMaterial,
             secondaryMaterial: fallbackMaterial,
             blend: 0,
-            attributes: [:]
+            attributes: [:],
+            materialFields: DistanceVolumeMaterialFields()
         )
         var currentAttributes: [Int: Float] = [:]
+        var currentMaterialFields = DistanceVolumeMaterialFields()
 
         func s(_ register: DistanceFieldScalarRegister) -> Int {
             Int(register.rawValue % UInt32(registerCount))
@@ -698,6 +943,19 @@ enum DistanceFieldProgramEvaluator {
             case .mixFloat(let destination, let lhs, let rhs, let amount):
                 let t = scalars[s(amount)]
                 scalars[s(destination)] = scalars[s(lhs)] + (scalars[s(rhs)] - scalars[s(lhs)]) * t
+            case .smoothstep(let destination, let edge0, let edge1, let x):
+                scalars[s(destination)] = programSmoothstep(edge0: scalars[s(edge0)], edge1: scalars[s(edge1)], x: scalars[s(x)])
+            case .step(let destination, let edge, let x):
+                scalars[s(destination)] = scalars[s(x)] < scalars[s(edge)] ? 0 : 1
+            case .saturate(let destination, let source):
+                scalars[s(destination)] = simd_clamp(scalars[s(source)], 0, 1)
+            case .fractFloat(let destination, let source):
+                scalars[s(destination)] = programFract(scalars[s(source)])
+            case .floorFloat(let destination, let source):
+                scalars[s(destination)] = floor(scalars[s(source)])
+            case .modFloat(let destination, let lhs, let rhs):
+                let divisor = scalars[s(rhs)]
+                scalars[s(destination)] = abs(divisor) > 1e-8 ? scalars[s(lhs)].truncatingRemainder(dividingBy: divisor) : 0
             case .addVector(let destination, let lhs, let rhs):
                 vectors[v(destination)] = vectors[v(lhs)] + vectors[v(rhs)]
             case .subtractVector(let destination, let lhs, let rhs):
@@ -720,6 +978,29 @@ enum DistanceFieldProgramEvaluator {
                 scalars[s(destination)] = vectors[v(source)].z
             case .length(let destination, let source):
                 scalars[s(destination)] = simd_length(vectors[v(source)])
+            case .dot(let destination, let lhs, let rhs):
+                scalars[s(destination)] = simd_dot(vectors[v(lhs)], vectors[v(rhs)])
+            case .normalize(let destination, let source):
+                let length = simd_length(vectors[v(source)])
+                vectors[v(destination)] = length > 1e-8 ? vectors[v(source)] / length : .zero
+            case .distance(let destination, let lhs, let rhs):
+                scalars[s(destination)] = simd_distance(vectors[v(lhs)], vectors[v(rhs)])
+            case .valueNoise3D(let destination, let position, let scale, let seed):
+                scalars[s(destination)] = programValueNoise3D(position: vectors[v(position)], scale: scalars[s(scale)], seed: scalars[s(seed)])
+            case .fbm3D(let destination, let position, let scale, let octaves, let lacunarity, let gain, let seed):
+                scalars[s(destination)] = programFBM3D(
+                    position: vectors[v(position)],
+                    scale: scalars[s(scale)],
+                    octaves: scalars[s(octaves)],
+                    lacunarity: scalars[s(lacunarity)],
+                    gain: scalars[s(gain)],
+                    seed: scalars[s(seed)]
+                )
+            case .cellular3D(let distance, let secondDistance, let cellID, let position, let scale, let seed):
+                let cellular = programCellular3D(position: vectors[v(position)], scale: scalars[s(scale)], seed: scalars[s(seed)])
+                scalars[s(distance)] = cellular.0
+                scalars[s(secondDistance)] = cellular.1
+                scalars[s(cellID)] = cellular.2
             case .boxDistance(let destination, let source, let halfExtents, let cornerRadius):
                 let q = simd_abs(vectors[v(source)]) - vectors[v(halfExtents)]
                 scalars[s(destination)] = simd_length(simd_max(q, SIMD3<Float>(repeating: 0)))
@@ -761,6 +1042,7 @@ enum DistanceFieldProgramEvaluator {
                     distance: scalars[s(distance)],
                     material: material,
                     attributes: candidateAttributes,
+                    materialFields: currentMaterialFields,
                     smoothUnionRadius: smoothUnionRadius,
                     operation: operation
                 )
@@ -768,6 +1050,10 @@ enum DistanceFieldProgramEvaluator {
                 if channel >= 0 && channel < DistanceVolumeAttributeLayout.maximumChannelCount {
                     currentAttributes[channel] = scalars[s(value)]
                 }
+            case .writeMaterialField(let field, let value):
+                applyMaterialField(field, scalar: scalars[s(value)], to: &currentMaterialFields)
+            case .writeMaterialFieldVector(let field, let value):
+                applyMaterialField(field, vector: vectors[v(value)], to: &currentMaterialFields)
             }
         }
 
@@ -779,6 +1065,7 @@ enum DistanceFieldProgramEvaluator {
         distance candidateDistance: Float,
         material candidateMaterial: MaterialID,
         attributes candidateAttributes: [Int: Float],
+        materialFields candidateMaterialFields: DistanceVolumeMaterialFields,
         smoothUnionRadius: Float,
         operation: SDFPrimitiveOperation
     ) -> DistanceFieldProgramSample {
@@ -796,6 +1083,7 @@ enum DistanceFieldProgramEvaluator {
                 distance: candidateDistance,
                 material: candidateMaterial,
                 attributes: candidateAttributes,
+                materialFields: candidateMaterialFields,
                 smoothUnionRadius: smoothUnionRadius
             )
         }
@@ -806,6 +1094,7 @@ enum DistanceFieldProgramEvaluator {
         distance candidateDistance: Float,
         material candidateMaterial: MaterialID,
         attributes candidateAttributes: [Int: Float],
+        materialFields candidateMaterialFields: DistanceVolumeMaterialFields,
         smoothUnionRadius: Float
     ) -> DistanceFieldProgramSample {
         guard current.distance.isFinite else {
@@ -814,7 +1103,8 @@ enum DistanceFieldProgramEvaluator {
                 material: candidateMaterial,
                 secondaryMaterial: candidateMaterial,
                 blend: 0,
-                attributes: candidateAttributes
+                attributes: candidateAttributes,
+                materialFields: candidateMaterialFields
             )
         }
 
@@ -826,7 +1116,8 @@ enum DistanceFieldProgramEvaluator {
                     material: candidateMaterial,
                     secondaryMaterial: candidateMaterial,
                     blend: 0,
-                    attributes: candidateAttributes
+                    attributes: candidateAttributes,
+                    materialFields: candidateMaterialFields
                 )
             }
             return current
@@ -846,7 +1137,8 @@ enum DistanceFieldProgramEvaluator {
                 material: candidateMaterial,
                 secondaryMaterial: candidateMaterial,
                 blend: 0,
-                attributes: candidateAttributes
+                attributes: candidateAttributes,
+                materialFields: candidateMaterialFields
             )
         }
         var blendedAttributes = current.attributes
@@ -857,13 +1149,82 @@ enum DistanceFieldProgramEvaluator {
                 blendedAttributes[channel] = candidateValue
             }
         }
+        let blendedFields = blend(current.materialFields, candidateMaterialFields, t: candidateWeight)
         return DistanceFieldProgramSample(
             distance: distance,
             material: current.material,
             secondaryMaterial: candidateMaterial,
             blend: candidateWeight,
-            attributes: blendedAttributes
+            attributes: blendedAttributes,
+            materialFields: blendedFields
         )
+    }
+
+    private static func applyMaterialField(
+        _ field: DistanceFieldMaterialField,
+        scalar value: Float,
+        to materialFields: inout DistanceVolumeMaterialFields
+    ) {
+        switch field {
+        case .roughness:
+            materialFields.roughness = value
+        case .metallic:
+            materialFields.metallic = value
+        case .specular:
+            materialFields.specular = value
+        case .transmission:
+            materialFields.transmission = value
+        case .opacity:
+            materialFields.opacity = value
+        case .emissionStrength:
+            materialFields.emissionStrength = value
+        case .baseColor, .albedo, .emission:
+            break
+        }
+    }
+
+    private static func applyMaterialField(
+        _ field: DistanceFieldMaterialField,
+        vector value: SIMD3<Float>,
+        to materialFields: inout DistanceVolumeMaterialFields
+    ) {
+        switch field {
+        case .baseColor, .albedo:
+            materialFields.baseColor = value
+        case .emission:
+            materialFields.emission = value
+        case .roughness, .metallic, .specular, .transmission, .opacity, .emissionStrength:
+            break
+        }
+    }
+
+    private static func blend(
+        _ current: DistanceVolumeMaterialFields,
+        _ candidate: DistanceVolumeMaterialFields,
+        t: Float
+    ) -> DistanceVolumeMaterialFields {
+        DistanceVolumeMaterialFields(
+            baseColor: blend(current.baseColor, candidate.baseColor, t: t),
+            opacity: blend(current.opacity, candidate.opacity, t: t),
+            emission: blend(current.emission, candidate.emission, t: t),
+            roughness: blend(current.roughness, candidate.roughness, t: t),
+            metallic: blend(current.metallic, candidate.metallic, t: t),
+            specular: blend(current.specular, candidate.specular, t: t),
+            transmission: blend(current.transmission, candidate.transmission, t: t),
+            emissionStrength: blend(current.emissionStrength, candidate.emissionStrength, t: t)
+        )
+    }
+
+    private static func blend(_ current: Float?, _ candidate: Float?, t: Float) -> Float? {
+        guard let candidate else { return current }
+        guard let current else { return candidate }
+        return current + (candidate - current) * t
+    }
+
+    private static func blend(_ current: SIMD3<Float>?, _ candidate: SIMD3<Float>?, t: Float) -> SIMD3<Float>? {
+        guard let candidate else { return current }
+        guard let current else { return candidate }
+        return current + (candidate - current) * t
     }
 
     private static func distanceScale(for matrix: simd_float4x4) -> Float {
@@ -903,6 +1264,7 @@ struct DistanceFieldProgramSample {
     var secondaryMaterial: MaterialID
     var blend: Float
     var attributes: [Int: Float]
+    var materialFields: DistanceVolumeMaterialFields
 }
 
 enum DistanceFieldProgramBuilder {
@@ -915,10 +1277,11 @@ enum DistanceFieldProgramBuilder {
             repeating: DistanceVolumeMaterialSample(materialA: fallbackMaterial),
             count: sampleCount
         )
-        let packedVectorCount = program.attributeLayout.packedVectorCount
+        let attributeLayout = program.resolvedAttributeLayout
+        let packedVectorCount = attributeLayout.packedVectorCount
         var attributeSamples = [SIMD4<Float>]()
         if packedVectorCount > 0 {
-            let defaultPacked = program.attributeLayout.defaultPackedSample()
+            let defaultPacked = attributeLayout.defaultPackedSample()
             attributeSamples.reserveCapacity(sampleCount * packedVectorCount)
             for _ in 0..<sampleCount {
                 attributeSamples.append(contentsOf: defaultPacked)
@@ -943,11 +1306,12 @@ enum DistanceFieldProgramBuilder {
                     materialSamples[index] = DistanceVolumeMaterialSample(
                         materialA: sample.material,
                         materialB: sample.secondaryMaterial,
-                        blend: sample.blend
+                        blend: sample.blend,
+                        fields: sample.materialFields
                     )
                     if packedVectorCount > 0 {
                         let attributeIndex = index * packedVectorCount
-                        for (channelIndex, value) in sample.attributes where channelIndex < program.attributeLayout.channelCount {
+                        for (channelIndex, value) in sample.attributes where channelIndex < attributeLayout.channelCount {
                             let vectorIndex = channelIndex / 4
                             let laneIndex = channelIndex % 4
                             attributeSamples[attributeIndex + vectorIndex][laneIndex] = value
@@ -963,7 +1327,7 @@ enum DistanceFieldProgramBuilder {
             depth: dimensions.z,
             distances: distances,
             materialSamples: materialSamples,
-            attributeLayout: program.attributeLayout,
+            attributeLayout: attributeLayout,
             attributeSamples: attributeSamples,
             boundsMin: settings.boundsMin,
             boundsMax: settings.boundsMax
@@ -987,8 +1351,9 @@ enum DistanceFieldProgramBuilder {
         let defaultMaterial = DistanceVolumeMaterialSample(materialA: fallbackMaterial)
         let defaultDistance = max(settings.narrowBand, 1)
         let band = settings.narrowBand
-        let packedVectorCount = program.attributeLayout.packedVectorCount
-        let defaultAttributeSample = program.attributeLayout.defaultPackedSample()
+        let attributeLayout = program.resolvedAttributeLayout
+        let packedVectorCount = attributeLayout.packedVectorCount
+        let defaultAttributeSample = attributeLayout.defaultPackedSample()
 
         var bricks: [SparseDistanceVolumeBrick] = []
         bricks.reserveCapacity(
@@ -1064,7 +1429,7 @@ enum DistanceFieldProgramBuilder {
             boundsMax: settings.denseSettings.boundsMax,
             defaultDistance: defaultDistance,
             defaultMaterial: defaultMaterial,
-            attributeLayout: program.attributeLayout,
+            attributeLayout: attributeLayout,
             defaultAttributeSample: defaultAttributeSample,
             bricks: bricks
         )
@@ -1143,11 +1508,12 @@ enum DistanceFieldProgramBuilder {
                     materialSamples.append(DistanceVolumeMaterialSample(
                         materialA: sample.material,
                         materialB: sample.secondaryMaterial,
-                        blend: sample.blend
+                        blend: sample.blend,
+                        fields: sample.materialFields
                     ))
                     if packedVectorCount > 0 {
                         var packed = defaultAttributeSample
-                        for (channelIndex, value) in sample.attributes where channelIndex < program.attributeLayout.channelCount {
+                        for (channelIndex, value) in sample.attributes where channelIndex < program.resolvedAttributeLayout.channelCount {
                             let vectorIndex = channelIndex / 4
                             let laneIndex = channelIndex % 4
                             packed[vectorIndex][laneIndex] = value

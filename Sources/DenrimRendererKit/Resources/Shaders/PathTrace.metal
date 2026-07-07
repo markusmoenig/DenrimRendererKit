@@ -49,15 +49,6 @@ struct GPUMaterial {
     float4 volumeParameters;
 };
 
-struct GPUMaterialSemanticDescriptor {
-    uint4 metadata;
-    float4 style0;
-    float4 style1;
-    float4 style2;
-    float4 controls0;
-    float4 controls1;
-};
-
 struct GPUAccelerationNode {
     float4 boundsMin;
     float4 boundsMax;
@@ -87,6 +78,7 @@ struct GPUVolumeDescriptor {
     float4 localBoundsMax;
     uint4 dimensions;
     uint4 metadata;
+    uint4 materialProgram;
     float4 worldToLocal0;
     float4 worldToLocal1;
     float4 worldToLocal2;
@@ -124,8 +116,17 @@ struct GPUVolumeMaterialFieldSample {
 
 struct GPUVolumeAttributeDescriptor {
     uint4 metadata;
-    uint4 semantics0;
-    uint4 semantics1;
+    uint4 reserved0;
+    uint4 reserved1;
+};
+
+struct GPUMaterialProgramDescriptor {
+    uint4 metadata;
+};
+
+struct GPUMaterialProgramOperation {
+    uint4 metadata;
+    float4 data0;
 };
 
 struct GPUVolumeBrickDescriptor {
@@ -177,6 +178,8 @@ struct GPURenderConstants {
     uint volumeBrickBVHIndexCount;
     uint volumeBrickGridCount;
     uint volumeBrickGridIndexCount;
+    uint materialProgramCount;
+    uint materialProgramOperationCount;
     uint denoiserEnabled;
     uint sdfTraversalStatsEnabled;
     uint tileX;
@@ -227,6 +230,7 @@ struct Hit {
     bool hit;
     float t;
     float3 position;
+    float3 localPosition;
     float3 normal;
     float2 uv;
     float3 tangent;
@@ -238,6 +242,7 @@ struct Hit {
     float4 volumeEmissionTransmission;
     float4 volumeSurface;
     uint volumeMaterialFieldFlags;
+    uint materialProgramIndex;
     float4 volumeAttributes0;
     float4 volumeAttributes1;
     uint4 volumeAttributeSemantics0;
@@ -253,31 +258,8 @@ constant uint volumeMaterialFieldEmission = 1u << 2;
 constant uint volumeMaterialFieldRoughness = 1u << 3;
 constant uint volumeMaterialFieldMetallic = 1u << 4;
 constant uint volumeMaterialFieldTransmission = 1u << 5;
-
-constant uint materialArchetypePlain = 0u;
-constant uint materialArchetypeMoss = 1u;
-constant uint materialArchetypeBark = 2u;
-constant uint materialArchetypeWetFilm = 3u;
-constant uint materialArchetypeCrystal = 4u;
-constant uint materialArchetypeWax = 5u;
-constant uint materialArchetypeCeramic = 6u;
-constant uint materialArchetypeMetal = 7u;
-constant uint materialArchetypeRust = 8u;
-constant uint materialArchetypeBurn = 9u;
-constant uint materialArchetypeIce = 10u;
-constant uint materialArchetypeLava = 11u;
-constant uint materialArchetypeEmissive = 12u;
-
-constant uint volumeAttributeGrowthAge = 1u;
-constant uint volumeAttributeBranchID = 2u;
-constant uint volumeAttributeCurvature = 3u;
-constant uint volumeAttributeCavity = 4u;
-constant uint volumeAttributeNoise = 5u;
-constant uint volumeAttributeWetness = 6u;
-constant uint volumeAttributeMossAmount = 7u;
-constant uint volumeAttributePolish = 8u;
-constant uint volumeAttributeFracture = 9u;
-constant uint volumeAttributeBurnAmount = 10u;
+constant uint volumeMaterialFieldSpecular = 1u << 6;
+constant uint volumeMaterialFieldEmissionStrength = 1u << 7;
 
 static uint hash(uint value) {
     value ^= value >> 16;
@@ -597,6 +579,12 @@ static GPUMaterial applyVolumeMaterialFields(GPUMaterial material, Hit hit) {
     if ((flags & volumeMaterialFieldEmission) != 0u) {
         material.emission.xyz = max(hit.volumeEmissionTransmission.xyz, float3(0.0f));
     }
+    if (((flags & volumeMaterialFieldEmission) != 0u) && ((flags & volumeMaterialFieldEmissionStrength) != 0u)) {
+        material.emission.xyz = max(hit.volumeEmissionTransmission.xyz, float3(0.0f))
+            * max(hit.volumeSurface.w, 0.0f);
+    } else if ((flags & volumeMaterialFieldEmissionStrength) != 0u) {
+        material.emission.xyz = max(material.emission.xyz, float3(0.0f)) * max(hit.volumeSurface.w, 0.0f);
+    }
     if ((flags & volumeMaterialFieldTransmission) != 0u) {
         material.emission.w = clamp(hit.volumeEmissionTransmission.w, 0.0f, 1.0f);
     }
@@ -606,130 +594,513 @@ static GPUMaterial applyVolumeMaterialFields(GPUMaterial material, Hit hit) {
     if ((flags & volumeMaterialFieldMetallic) != 0u) {
         material.parameters.y = clamp(hit.volumeSurface.y, 0.0f, 1.0f);
     }
+    if ((flags & volumeMaterialFieldSpecular) != 0u) {
+        material.parameters2.x = clamp(hit.volumeSurface.z, 0.0f, 1.0f);
+    }
     return material;
 }
 
-static bool volumeAttributeValue(Hit hit, uint semantic, thread float &value) {
-    for (uint index = 0u; index < 4u; ++index) {
-        if (hit.volumeAttributeSemantics0[index] == semantic) {
-            value = hit.volumeAttributes0[index];
-            return true;
-        }
-        if (hit.volumeAttributeSemantics1[index] == semantic) {
-            value = hit.volumeAttributes1[index];
-            return true;
+static float materialProgramBoxDistance(float3 local, float3 halfExtents, float cornerRadius) {
+    float3 q = abs(local) - halfExtents;
+    return length(max(q, float3(0.0)))
+        + min(max(q.x, max(q.y, q.z)), 0.0)
+        - max(cornerRadius, 0.0);
+}
+
+static float materialProgramCylinderDistance(float3 local, float radius, float halfHeight) {
+    float2 d = float2(length(local.xz), abs(local.y)) - float2(radius, halfHeight);
+    return min(max(d.x, d.y), 0.0) + length(max(d, float2(0.0)));
+}
+
+static float materialProgramTaperedCapsuleDistance(
+    float3 position,
+    float3 start,
+    float3 end,
+    float startRadius,
+    float endRadius
+) {
+    float3 segment = end - start;
+    float lengthSquared = dot(segment, segment);
+    float t = lengthSquared > 1.0e-8
+        ? clamp(dot(position - start, segment) / lengthSquared, 0.0, 1.0)
+        : 0.0;
+    float radius = max(mix(startRadius, endRadius, t), 0.0);
+    return length(position - (start + segment * t)) - radius;
+}
+
+static float3 materialProgramCubicBezierPoint(
+    float3 control0,
+    float3 control1,
+    float3 control2,
+    float3 control3,
+    float t
+) {
+    float oneMinusT = 1.0 - t;
+    float oneMinusT2 = oneMinusT * oneMinusT;
+    float t2 = t * t;
+    return control0 * (oneMinusT2 * oneMinusT)
+        + control1 * (3.0 * oneMinusT2 * t)
+        + control2 * (3.0 * oneMinusT * t2)
+        + control3 * (t2 * t);
+}
+
+static float materialProgramSplineTubeDistance(
+    float3 position,
+    float3 control0,
+    float3 control1,
+    float3 control2,
+    float3 control3,
+    float startRadius,
+    float endRadius
+) {
+    constexpr uint segmentCount = 16u;
+    float bestDistance = INFINITY;
+    float3 previousPoint = control0;
+    float previousRadius = max(startRadius, 0.0);
+    for (uint segmentIndex = 1u; segmentIndex <= segmentCount; ++segmentIndex) {
+        float t = float(segmentIndex) / float(segmentCount);
+        float3 point = materialProgramCubicBezierPoint(control0, control1, control2, control3, t);
+        float radius = max(mix(startRadius, endRadius, t), 0.0);
+        bestDistance = min(
+            bestDistance,
+            materialProgramTaperedCapsuleDistance(
+                position,
+                previousPoint,
+                point,
+                previousRadius,
+                radius
+            )
+        );
+        previousPoint = point;
+        previousRadius = radius;
+    }
+    return bestDistance;
+}
+
+static float materialProgramSmoothstep(float edge0, float edge1, float x) {
+    float denominator = edge1 - edge0;
+    if (abs(denominator) <= 1.0e-8) {
+        return x < edge0 ? 0.0 : 1.0;
+    }
+    float t = clamp((x - edge0) / denominator, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+static float materialProgramHash3(float3 cell, float seed) {
+    return fract(sin(dot(cell, float3(127.1, 311.7, 74.7)) + seed * 101.3) * 43758.5453);
+}
+
+static float materialProgramValueNoise3D(float3 position, float scale, float seed) {
+    float3 p = position * max(scale, 1.0e-6);
+    float3 cell = floor(p);
+    float3 f = fract(p);
+    float3 u = f * f * (3.0 - 2.0 * f);
+
+    float c000 = materialProgramHash3(cell + float3(0.0, 0.0, 0.0), seed);
+    float c100 = materialProgramHash3(cell + float3(1.0, 0.0, 0.0), seed);
+    float c010 = materialProgramHash3(cell + float3(0.0, 1.0, 0.0), seed);
+    float c110 = materialProgramHash3(cell + float3(1.0, 1.0, 0.0), seed);
+    float c001 = materialProgramHash3(cell + float3(0.0, 0.0, 1.0), seed);
+    float c101 = materialProgramHash3(cell + float3(1.0, 0.0, 1.0), seed);
+    float c011 = materialProgramHash3(cell + float3(0.0, 1.0, 1.0), seed);
+    float c111 = materialProgramHash3(cell + float3(1.0, 1.0, 1.0), seed);
+
+    float x00 = mix(c000, c100, u.x);
+    float x10 = mix(c010, c110, u.x);
+    float x01 = mix(c001, c101, u.x);
+    float x11 = mix(c011, c111, u.x);
+    return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
+}
+
+static float materialProgramFBM3D(float3 position, float scale, float octaves, float lacunarity, float gain, float seed) {
+    uint octaveCount = clamp(uint(floor(octaves)), 1u, 8u);
+    float frequency = max(scale, 1.0e-6);
+    float amplitude = 0.5;
+    float sum = 0.0;
+    float normalization = 0.0;
+    for (uint octave = 0u; octave < octaveCount; ++octave) {
+        sum += materialProgramValueNoise3D(position, frequency, seed + float(octave) * 17.17) * amplitude;
+        normalization += amplitude;
+        frequency *= max(lacunarity, 1.0e-6);
+        amplitude *= max(gain, 0.0);
+    }
+    return normalization > 1.0e-8 ? sum / normalization : 0.0;
+}
+
+static float3 materialProgramCellular3D(float3 position, float scale, float seed) {
+    float3 p = position * max(scale, 1.0e-6);
+    float3 base = floor(p);
+    float nearest = INFINITY;
+    float secondNearest = INFINITY;
+    float nearestID = 0.0;
+
+    for (int z = -1; z <= 1; ++z) {
+        for (int y = -1; y <= 1; ++y) {
+            for (int x = -1; x <= 1; ++x) {
+                float3 cell = base + float3(float(x), float(y), float(z));
+                float3 feature = float3(
+                    materialProgramHash3(cell, seed + 11.1),
+                    materialProgramHash3(cell, seed + 37.7),
+                    materialProgramHash3(cell, seed + 71.3)
+                );
+                float candidateDistance = length(cell + feature - p);
+                if (candidateDistance < nearest) {
+                    secondNearest = nearest;
+                    nearest = candidateDistance;
+                    nearestID = materialProgramHash3(cell, seed + 149.9);
+                } else if (candidateDistance < secondNearest) {
+                    secondNearest = candidateDistance;
+                }
+            }
         }
     }
-    return false;
+
+    return float3(nearest, secondNearest, nearestID);
 }
 
-static float volumeAttributeOr(Hit hit, uint semantic, float fallback) {
-    float value = fallback;
-    if (volumeAttributeValue(hit, semantic, value)) {
-        return value;
+static float materialScalarInput(GPUMaterial material, uint input, Hit hit) {
+    switch (input) {
+        case 0u: return material.parameters.x;
+        case 1u: return material.parameters.y;
+        case 2u: return material.parameters2.x;
+        case 3u: return material.emission.w;
+        case 4u: return material.baseColor.w;
+        case 5u: return length(material.emission.xyz);
+        case 6u: return hit.materialBlend;
+        default: return 0.0f;
     }
-    return fallback;
 }
 
-static bool hitHasVolumeAttributes(Hit hit) {
-    return any(hit.volumeAttributeSemantics0 != uint4(0))
-        || any(hit.volumeAttributeSemantics1 != uint4(0));
+static float3 materialVectorInput(GPUMaterial material, uint input, Hit hit) {
+    switch (input) {
+        case 0u: return hit.position;
+        case 1u: return hit.localPosition;
+        case 2u: return hit.normal;
+        case 3u: return float3(0.0f);
+        case 4u: return material.baseColor.xyz;
+        case 5u: return material.emission.xyz;
+        default: return float3(0.0f);
+    }
 }
 
-static GPUMaterial applySemanticVolumeAttributes(
+static float materialAttribute(Hit hit, uint channel) {
+    if (channel < 4u) {
+        return hit.volumeAttributes0[channel];
+    }
+    if (channel < 8u) {
+        return hit.volumeAttributes1[channel - 4u];
+    }
+    return 0.0f;
+}
+
+static void writeScalarMaterialProgramField(thread GPUMaterial &material, uint field, float value) {
+    switch (field) {
+        case 2u:
+            material.parameters.x = clamp(value, 0.02f, 1.0f);
+            break;
+        case 3u:
+            material.parameters.y = clamp(value, 0.0f, 1.0f);
+            break;
+        case 4u:
+            material.parameters2.x = clamp(value, 0.0f, 1.0f);
+            break;
+        case 5u:
+            material.emission.w = clamp(value, 0.0f, 1.0f);
+            break;
+        case 6u:
+            material.baseColor.w = clamp(value, 0.0f, 1.0f);
+            break;
+        case 8u:
+            material.emission.xyz = max(material.emission.xyz, float3(0.0f)) * max(value, 0.0f);
+            break;
+        default:
+            break;
+    }
+}
+
+static void writeVectorMaterialProgramField(thread GPUMaterial &material, uint field, float3 value) {
+    switch (field) {
+        case 0u:
+        case 1u:
+            material.baseColor.xyz = max(value, float3(0.0f));
+            break;
+        case 7u:
+            material.emission.xyz = max(value, float3(0.0f));
+            break;
+        default:
+            break;
+    }
+}
+
+static GPUMaterial applyDistanceFieldMaterialProgram(
     GPUMaterial material,
     Hit hit,
-    GPUMaterialSemanticDescriptor semantic
+    constant GPUMaterialProgramDescriptor *programDescriptors,
+    constant GPUMaterialProgramOperation *programOperations,
+    uint materialProgramCount,
+    uint materialProgramOperationCount
 ) {
-    if (!hitHasVolumeAttributes(hit) || semantic.metadata.y == 0u) {
+    if (hit.materialProgramIndex == 0xffffffffu
+        || hit.materialProgramIndex >= materialProgramCount
+        || programDescriptors == nullptr
+        || programOperations == nullptr) {
         return material;
     }
 
-    uint archetype = semantic.metadata.x;
-    float amount = clamp(volumeAttributeOr(hit, volumeAttributeMossAmount, semantic.controls0.x), 0.0f, 1.0f);
-    float age = clamp(volumeAttributeOr(hit, volumeAttributeGrowthAge, semantic.controls0.y), 0.0f, 1.0f);
-    float wetness = clamp(volumeAttributeOr(hit, volumeAttributeWetness, semantic.controls0.z), 0.0f, 1.0f);
-    float polish = clamp(volumeAttributeOr(hit, volumeAttributePolish, semantic.controls0.w), 0.0f, 1.0f);
-    float cavity = clamp(volumeAttributeOr(hit, volumeAttributeCavity, semantic.controls1.x), 0.0f, 1.0f);
-    float burn = clamp(volumeAttributeOr(hit, volumeAttributeBurnAmount, 0.0f), 0.0f, 1.0f);
-    float emissionAmount = clamp(volumeAttributeOr(hit, volumeAttributeBurnAmount, semantic.controls1.y), 0.0f, 1.0f);
-
-    float3 primary = max(semantic.style0.xyz, float3(0.0f));
-    float3 secondary = max(semantic.style1.xyz, float3(0.0f));
-    float3 accent = max(semantic.style2.xyz, float3(0.0f));
-
-    if (archetype == materialArchetypeMoss) {
-        float3 aged = mix(primary, secondary, age);
-        float dryBlend = clamp((age - 0.65f) / 0.35f, 0.0f, 1.0f);
-        aged = mix(aged, accent, dryBlend);
-        float3 wetTint = aged * float3(0.45f, 0.62f, 0.48f);
-        float3 colored = mix(aged, wetTint, wetness);
-        colored = mix(colored, colored * 0.68f, cavity * 0.5f);
-        material.baseColor.xyz = mix(material.baseColor.xyz, colored, amount);
-        material.parameters.x = clamp(mix(material.parameters.x, 0.34f, wetness * amount), 0.02f, 1.0f);
-        material.parameters2.x = clamp(mix(material.parameters2.x, 0.45f, wetness * amount), 0.0f, 1.0f);
-        material.sheenColor.w = max(material.sheenColor.w, 0.28f * amount);
-        material.subsurfaceColor.w = max(material.subsurfaceColor.w, 0.16f * amount);
+    constant GPUMaterialProgramDescriptor &descriptor = programDescriptors[hit.materialProgramIndex];
+    uint offset = descriptor.metadata.x;
+    uint count = descriptor.metadata.y;
+    if (offset >= materialProgramOperationCount) {
         return material;
     }
+    count = min(count, materialProgramOperationCount - offset);
 
-    if (archetype == materialArchetypeWetFilm) {
-        float activeWetness = max(wetness, amount);
-        material.baseColor.xyz = mix(material.baseColor.xyz, primary, activeWetness * 0.35f);
-        material.baseColor.w = clamp(mix(material.baseColor.w, semantic.style2.w, activeWetness), 0.0f, 1.0f);
-        material.emission.w = clamp(mix(material.emission.w, max(semantic.controls1.z, 0.0f), activeWetness), 0.0f, 1.0f);
-        material.parameters.x = clamp(mix(material.parameters.x, 0.025f, activeWetness), 0.02f, 1.0f);
-        material.parameters2.x = max(material.parameters2.x, 0.85f * activeWetness);
-        return material;
+    float scalarRegisters[32];
+    float3 vectorRegisters[32];
+    float masks[4];
+    for (uint index = 0u; index < 32u; ++index) {
+        scalarRegisters[index] = 0.0f;
+    }
+    for (uint index = 0u; index < 32u; ++index) {
+        vectorRegisters[index] = float3(0.0f);
+    }
+    for (uint index = 0u; index < 4u; ++index) {
+        masks[index] = 0.0f;
     }
 
-    if (archetype == materialArchetypeCrystal || archetype == materialArchetypeIce) {
-        float clarity = clamp(max(semantic.controls1.z, material.emission.w), 0.0f, 1.0f);
-        material.baseColor.xyz = mix(material.baseColor.xyz, primary, clarity * 0.35f);
-        material.parameters.x = clamp(mix(material.parameters.x, 0.012f, polish), 0.02f, 1.0f);
-        material.parameters3.y = clamp(mix(material.parameters3.y, 0.012f, polish), 0.001f, 1.0f);
-        material.emission.w = max(material.emission.w, clarity);
-        return material;
+    for (uint operationIndex = 0u; operationIndex < count; ++operationIndex) {
+        constant GPUMaterialProgramOperation &operation = programOperations[offset + operationIndex];
+        switch (operation.metadata.x) {
+            case 1u:
+                vectorRegisters[operation.metadata.y & 31u] = materialVectorInput(material, operation.metadata.z, hit);
+                break;
+            case 2u:
+                scalarRegisters[operation.metadata.y & 31u] = materialScalarInput(material, operation.metadata.z, hit);
+                break;
+            case 3u:
+                scalarRegisters[operation.metadata.y & 31u] = materialAttribute(hit, operation.metadata.z);
+                break;
+            case 10u:
+                scalarRegisters[operation.metadata.y & 31u] = operation.data0.x;
+                break;
+            case 11u:
+                vectorRegisters[operation.metadata.y & 31u] = operation.data0.xyz;
+                break;
+            case 20u:
+                scalarRegisters[operation.metadata.y & 31u] = scalarRegisters[operation.metadata.z & 31u] + scalarRegisters[operation.metadata.w & 31u];
+                break;
+            case 21u:
+                scalarRegisters[operation.metadata.y & 31u] = scalarRegisters[operation.metadata.z & 31u] - scalarRegisters[operation.metadata.w & 31u];
+                break;
+            case 22u:
+                scalarRegisters[operation.metadata.y & 31u] = scalarRegisters[operation.metadata.z & 31u] * scalarRegisters[operation.metadata.w & 31u];
+                break;
+            case 23u:
+                scalarRegisters[operation.metadata.y & 31u] = scalarRegisters[operation.metadata.z & 31u] / max(abs(scalarRegisters[operation.metadata.w & 31u]), 1e-6f);
+                break;
+            case 26u:
+                scalarRegisters[operation.metadata.y & 31u] = -scalarRegisters[operation.metadata.z & 31u];
+                break;
+            case 27u:
+                scalarRegisters[operation.metadata.y & 31u] = min(scalarRegisters[operation.metadata.z & 31u], scalarRegisters[operation.metadata.w & 31u]);
+                break;
+            case 28u:
+                scalarRegisters[operation.metadata.y & 31u] = max(scalarRegisters[operation.metadata.z & 31u], scalarRegisters[operation.metadata.w & 31u]);
+                break;
+            case 29u:
+                scalarRegisters[operation.metadata.y & 31u] = abs(scalarRegisters[operation.metadata.z & 31u]);
+                break;
+            case 34u:
+                scalarRegisters[operation.metadata.y & 31u] = sin(scalarRegisters[operation.metadata.z & 31u]);
+                break;
+            case 35u:
+                scalarRegisters[operation.metadata.y & 31u] = cos(scalarRegisters[operation.metadata.z & 31u]);
+                break;
+            case 36u:
+                scalarRegisters[operation.metadata.y & 31u] = clamp(
+                    scalarRegisters[operation.metadata.z & 31u],
+                    scalarRegisters[operation.metadata.w & 31u],
+                    scalarRegisters[uint(operation.data0.x) & 31u]
+                );
+                break;
+            case 24u:
+                scalarRegisters[operation.metadata.y & 31u] = clamp(scalarRegisters[operation.metadata.z & 31u], operation.data0.x, operation.data0.y);
+                break;
+            case 25u:
+                scalarRegisters[operation.metadata.y & 31u] = mix(
+                    scalarRegisters[operation.metadata.z & 31u],
+                    scalarRegisters[operation.metadata.w & 31u],
+                    scalarRegisters[uint(operation.data0.x) & 31u]
+                );
+                break;
+            case 74u:
+                scalarRegisters[operation.metadata.y & 31u] = materialProgramSmoothstep(
+                    scalarRegisters[operation.metadata.z & 31u],
+                    scalarRegisters[operation.metadata.w & 31u],
+                    scalarRegisters[uint(operation.data0.x) & 31u]
+                );
+                break;
+            case 75u:
+                scalarRegisters[operation.metadata.y & 31u] = scalarRegisters[operation.metadata.w & 31u] < scalarRegisters[operation.metadata.z & 31u] ? 0.0 : 1.0;
+                break;
+            case 76u:
+                scalarRegisters[operation.metadata.y & 31u] = clamp(scalarRegisters[operation.metadata.z & 31u], 0.0, 1.0);
+                break;
+            case 77u:
+                scalarRegisters[operation.metadata.y & 31u] = fract(scalarRegisters[operation.metadata.z & 31u]);
+                break;
+            case 78u:
+                scalarRegisters[operation.metadata.y & 31u] = floor(scalarRegisters[operation.metadata.z & 31u]);
+                break;
+            case 79u: {
+                float divisor = scalarRegisters[operation.metadata.w & 31u];
+                scalarRegisters[operation.metadata.y & 31u] = abs(divisor) > 1.0e-8 ? fmod(scalarRegisters[operation.metadata.z & 31u], divisor) : 0.0;
+                break;
+            }
+            case 30u:
+                vectorRegisters[operation.metadata.y & 31u] = float3(
+                    scalarRegisters[operation.metadata.z & 31u],
+                    scalarRegisters[operation.metadata.w & 31u],
+                    scalarRegisters[uint(operation.data0.x) & 31u]
+                );
+                break;
+            case 31u:
+                scalarRegisters[operation.metadata.y & 31u] = vectorRegisters[operation.metadata.z & 31u].x;
+                break;
+            case 32u:
+                scalarRegisters[operation.metadata.y & 31u] = vectorRegisters[operation.metadata.z & 31u].y;
+                break;
+            case 33u:
+                scalarRegisters[operation.metadata.y & 31u] = vectorRegisters[operation.metadata.z & 31u].z;
+                break;
+            case 60u:
+                vectorRegisters[operation.metadata.y & 31u] = vectorRegisters[operation.metadata.z & 31u] + vectorRegisters[operation.metadata.w & 31u];
+                break;
+            case 61u:
+                vectorRegisters[operation.metadata.y & 31u] = vectorRegisters[operation.metadata.z & 31u] - vectorRegisters[operation.metadata.w & 31u];
+                break;
+            case 62u:
+                vectorRegisters[operation.metadata.y & 31u] = vectorRegisters[operation.metadata.z & 31u] * scalarRegisters[operation.metadata.w & 31u];
+                break;
+            case 63u:
+                vectorRegisters[operation.metadata.y & 31u] = abs(vectorRegisters[operation.metadata.z & 31u]);
+                break;
+            case 64u:
+                vectorRegisters[operation.metadata.y & 31u] = max(vectorRegisters[operation.metadata.z & 31u], float3(scalarRegisters[operation.metadata.w & 31u]));
+                break;
+            case 65u:
+                vectorRegisters[operation.metadata.y & 31u] = min(vectorRegisters[operation.metadata.z & 31u], float3(scalarRegisters[operation.metadata.w & 31u]));
+                break;
+            case 66u:
+                scalarRegisters[operation.metadata.y & 31u] = length(vectorRegisters[operation.metadata.z & 31u]);
+                break;
+            case 80u:
+                scalarRegisters[operation.metadata.y & 31u] = dot(vectorRegisters[operation.metadata.z & 31u], vectorRegisters[operation.metadata.w & 31u]);
+                break;
+            case 81u: {
+                float3 source = vectorRegisters[operation.metadata.z & 31u];
+                float sourceLength = length(source);
+                vectorRegisters[operation.metadata.y & 31u] = sourceLength > 1.0e-8 ? source / sourceLength : float3(0.0);
+                break;
+            }
+            case 82u:
+                scalarRegisters[operation.metadata.y & 31u] = distance(vectorRegisters[operation.metadata.z & 31u], vectorRegisters[operation.metadata.w & 31u]);
+                break;
+            case 83u:
+                scalarRegisters[operation.metadata.y & 31u] = materialProgramValueNoise3D(
+                    vectorRegisters[operation.metadata.z & 31u],
+                    scalarRegisters[operation.metadata.w & 31u],
+                    scalarRegisters[uint(operation.data0.x) & 31u]
+                );
+                break;
+            case 84u:
+                scalarRegisters[operation.metadata.y & 31u] = materialProgramFBM3D(
+                    vectorRegisters[operation.metadata.z & 31u],
+                    scalarRegisters[operation.metadata.w & 31u],
+                    scalarRegisters[uint(operation.data0.x) & 31u],
+                    scalarRegisters[uint(operation.data0.y) & 31u],
+                    scalarRegisters[uint(operation.data0.z) & 31u],
+                    scalarRegisters[uint(operation.data0.w) & 31u]
+                );
+                break;
+            case 85u: {
+                float3 cellular = materialProgramCellular3D(
+                    vectorRegisters[uint(operation.data0.x) & 31u],
+                    scalarRegisters[uint(operation.data0.y) & 31u],
+                    scalarRegisters[uint(operation.data0.z) & 31u]
+                );
+                scalarRegisters[operation.metadata.y & 31u] = cellular.x;
+                scalarRegisters[operation.metadata.z & 31u] = cellular.y;
+                scalarRegisters[operation.metadata.w & 31u] = cellular.z;
+                break;
+            }
+            case 70u:
+                scalarRegisters[operation.metadata.y & 31u] = materialProgramBoxDistance(
+                    vectorRegisters[operation.metadata.z & 31u],
+                    vectorRegisters[operation.metadata.w & 31u],
+                    scalarRegisters[uint(operation.data0.x) & 31u]
+                );
+                break;
+            case 71u:
+                scalarRegisters[operation.metadata.y & 31u] = materialProgramCylinderDistance(
+                    vectorRegisters[operation.metadata.z & 31u],
+                    scalarRegisters[operation.metadata.w & 31u],
+                    scalarRegisters[uint(operation.data0.x) & 31u]
+                );
+                break;
+            case 72u:
+                scalarRegisters[operation.metadata.y & 31u] = materialProgramTaperedCapsuleDistance(
+                    vectorRegisters[operation.metadata.z & 31u],
+                    vectorRegisters[operation.metadata.w & 31u],
+                    vectorRegisters[uint(operation.data0.x) & 31u],
+                    scalarRegisters[uint(operation.data0.y) & 31u],
+                    scalarRegisters[uint(operation.data0.z) & 31u]
+                );
+                break;
+            case 73u: {
+                uint packedRadii = uint(operation.data0.w);
+                scalarRegisters[operation.metadata.y & 31u] = materialProgramSplineTubeDistance(
+                    vectorRegisters[operation.metadata.z & 31u],
+                    vectorRegisters[operation.metadata.w & 31u],
+                    vectorRegisters[uint(operation.data0.x) & 31u],
+                    vectorRegisters[uint(operation.data0.y) & 31u],
+                    vectorRegisters[uint(operation.data0.z) & 31u],
+                    scalarRegisters[packedRadii & 255u],
+                    scalarRegisters[(packedRadii >> 8u) & 255u]
+                );
+                break;
+            }
+            case 40u:
+                if (operation.metadata.y < 4u) {
+                    masks[operation.metadata.y] = clamp(scalarRegisters[operation.metadata.z & 31u], 0.0f, 1.0f);
+                }
+                break;
+            case 41u:
+                if (operation.metadata.y < 4u) {
+                    scalarRegisters[operation.metadata.z & 31u] = masks[operation.metadata.y];
+                }
+                break;
+            case 50u:
+                writeScalarMaterialProgramField(material, operation.metadata.y, scalarRegisters[operation.metadata.z & 31u]);
+                break;
+            case 51u:
+                writeVectorMaterialProgramField(material, operation.metadata.y, vectorRegisters[operation.metadata.z & 31u]);
+                break;
+            default:
+                break;
+        }
     }
-
-    if (archetype == materialArchetypeBurn || archetype == materialArchetypeLava) {
-        float heat = max(burn, emissionAmount);
-        material.baseColor.xyz = mix(material.baseColor.xyz, mix(primary, secondary, age), amount);
-        material.emission.xyz = max(material.emission.xyz, accent * semantic.controls1.w * heat);
-        material.parameters.x = clamp(mix(material.parameters.x, 0.64f, heat), 0.02f, 1.0f);
-        return material;
-    }
-
-    if (wetness > 0.0f) {
-        material.baseColor.xyz = mix(material.baseColor.xyz, material.baseColor.xyz * 0.72f, wetness * 0.35f);
-        material.parameters.x = clamp(mix(material.parameters.x, 0.08f, wetness), 0.02f, 1.0f);
-        material.parameters2.x = max(material.parameters2.x, wetness * 0.55f);
-    }
-
     return material;
 }
 
 static GPUMaterial materialForHit(
     Hit hit,
     constant GPUMaterial *materials,
-    constant GPUMaterialSemanticDescriptor *materialSemantics,
-    uint materialCount
-) {
-    uint materialA = min(hit.materialID, materialCount - 1u);
-    GPUMaterial material = applySemanticVolumeAttributes(materials[materialA], hit, materialSemantics[materialA]);
-    if (hit.materialBlend > 0.0f) {
-        uint materialB = min(hit.materialID2, materialCount - 1u);
-        GPUMaterial blended = applySemanticVolumeAttributes(materials[materialB], hit, materialSemantics[materialB]);
-        material = blendMaterials(material, blended, hit.materialBlend);
-    }
-
-    return applyVolumeMaterialFields(material, hit);
-}
-
-static GPUMaterial materialForHit(
-    Hit hit,
-    constant GPUMaterial *materials,
-    uint materialCount
+    uint materialCount,
+    constant GPUMaterialProgramDescriptor *materialProgramDescriptors,
+    constant GPUMaterialProgramOperation *materialProgramOperations,
+    uint materialProgramCount,
+    uint materialProgramOperationCount
 ) {
     uint materialA = min(hit.materialID, materialCount - 1u);
     GPUMaterial material = materials[materialA];
@@ -738,7 +1109,31 @@ static GPUMaterial materialForHit(
         material = blendMaterials(material, materials[materialB], hit.materialBlend);
     }
 
-    return applyVolumeMaterialFields(material, hit);
+    material = applyVolumeMaterialFields(material, hit);
+    return applyDistanceFieldMaterialProgram(
+        material,
+        hit,
+        materialProgramDescriptors,
+        materialProgramOperations,
+        materialProgramCount,
+        materialProgramOperationCount
+    );
+}
+
+static GPUMaterial materialForHit(
+    Hit hit,
+    constant GPUMaterial *materials,
+    uint materialCount
+) {
+    return materialForHit(
+        hit,
+        materials,
+        materialCount,
+        nullptr,
+        nullptr,
+        0u,
+        0u
+    );
 }
 
 static float3 materialVolumeSigmaS(GPUMaterial material) {
@@ -1490,6 +1885,7 @@ static Hit emptyHit() {
     closest.hit = false;
     closest.t = INFINITY;
     closest.position = float3(0);
+    closest.localPosition = float3(0);
     closest.normal = float3(0, 1, 0);
     closest.uv = float2(0);
     closest.tangent = float3(1, 0, 0);
@@ -1501,6 +1897,7 @@ static Hit emptyHit() {
     closest.volumeEmissionTransmission = float4(0);
     closest.volumeSurface = float4(0);
     closest.volumeMaterialFieldFlags = 0u;
+    closest.materialProgramIndex = 0xffffffffu;
     closest.volumeAttributes0 = float4(0);
     closest.volumeAttributes1 = float4(0);
     closest.volumeAttributeSemantics0 = uint4(0);
@@ -1595,13 +1992,13 @@ static void sampleVolumeAttributes(
     float3 localPosition,
     thread float4 &attributes0,
     thread float4 &attributes1,
-    thread uint4 &semantics0,
-    thread uint4 &semantics1
+    thread uint4 &reserved0,
+    thread uint4 &reserved1
 ) {
     attributes0 = float4(0);
     attributes1 = float4(0);
-    semantics0 = uint4(0);
-    semantics1 = uint4(0);
+    reserved0 = uint4(0);
+    reserved1 = uint4(0);
     constant GPUVolumeAttributeDescriptor &descriptor = attributeDescriptors[volumeIndex];
     uint packedVectorCount = descriptor.metadata.y;
     if (packedVectorCount == 0u) {
@@ -1625,8 +2022,8 @@ static void sampleVolumeAttributes(
     if (packedVectorCount > 1u) {
         attributes1 = attributeSamples[attributeIndex + 1u];
     }
-    semantics0 = descriptor.semantics0;
-    semantics1 = descriptor.semantics1;
+    reserved0 = descriptor.reserved0;
+    reserved1 = descriptor.reserved1;
 }
 
 static float3 volumeNormal(
@@ -1984,13 +2381,13 @@ static void sampleVolumeBrickAttributes(
     float3 localPosition,
     thread float4 &attributes0,
     thread float4 &attributes1,
-    thread uint4 &semantics0,
-    thread uint4 &semantics1
+    thread uint4 &reserved0,
+    thread uint4 &reserved1
 ) {
     attributes0 = float4(0);
     attributes1 = float4(0);
-    semantics0 = uint4(0);
-    semantics1 = uint4(0);
+    reserved0 = uint4(0);
+    reserved1 = uint4(0);
     constant GPUVolumeAttributeDescriptor &descriptor = attributeDescriptors[brickIndex];
     uint packedVectorCount = descriptor.metadata.y;
     if (packedVectorCount == 0u) {
@@ -2016,8 +2413,8 @@ static void sampleVolumeBrickAttributes(
     if (packedVectorCount > 1u) {
         attributes1 = attributeSamples[attributeIndex + 1u];
     }
-    semantics0 = descriptor.semantics0;
-    semantics1 = descriptor.semantics1;
+    reserved0 = descriptor.reserved0;
+    reserved1 = descriptor.reserved1;
 }
 
 static float3 volumeBrickNormal(
@@ -2163,6 +2560,7 @@ static bool intersectVolume(
             hit.hit = true;
             hit.t = refinedT;
             hit.position = refinedWorldPosition;
+            hit.localPosition = refinedLocalPosition;
             hit.normal = normal;
             hit.uv = float2(0.0f);
             hit.tangent = normalize(cross(fabs(normal.y) < 0.999f ? float3(0, 1, 0) : float3(1, 0, 0), normal));
@@ -2180,6 +2578,7 @@ static bool intersectVolume(
             hit.volumeEmissionTransmission = materialSample.emissionTransmission;
             hit.volumeSurface = materialSample.surface;
             hit.volumeMaterialFieldFlags = materialSample.materialFieldFlags.x;
+            hit.materialProgramIndex = volume.materialProgram.x;
             sampleVolumeAttributes(
                 volumeIndex,
                 volume,
@@ -2356,6 +2755,7 @@ static bool intersectVolumeBrickPrepared(
             hit.hit = true;
             hit.t = refinedT;
             hit.position = refinedWorldPosition;
+            hit.localPosition = refinedLocalPosition;
             hit.normal = normal;
             hit.uv = float2(0.0f);
             hit.tangent = normalize(cross(fabs(normal.y) < 0.999f ? float3(0, 1, 0) : float3(1, 0, 0), normal));
@@ -2376,6 +2776,7 @@ static bool intersectVolumeBrickPrepared(
             hit.volumeEmissionTransmission = materialSample.emissionTransmission;
             hit.volumeSurface = materialSample.surface;
             hit.volumeMaterialFieldFlags = materialSample.materialFieldFlags.x;
+            hit.materialProgramIndex = volume.materialProgram.x;
             sampleVolumeBrickAttributes(
                 brickIndex,
                 volume,
@@ -3401,6 +3802,83 @@ static float3 sampleEnvironment(
     return color;
 }
 
+static float3 sampleInteractiveDiffuseEnvironment(
+    float3 normal,
+    constant GPURenderConstants &constants,
+    constant GPUTextureDescriptor *textureDescriptors,
+    constant float4 *texturePixels
+) {
+    float3 up = sampleEnvironment(float3(0.0f, 1.0f, 0.0f), constants, textureDescriptors, texturePixels);
+    float3 down = sampleEnvironment(float3(0.0f, -1.0f, 0.0f), constants, textureDescriptors, texturePixels);
+    float3 side = (
+        sampleEnvironment(float3(1.0f, 0.0f, 0.0f), constants, textureDescriptors, texturePixels)
+        + sampleEnvironment(float3(-1.0f, 0.0f, 0.0f), constants, textureDescriptors, texturePixels)
+        + sampleEnvironment(float3(0.0f, 0.0f, 1.0f), constants, textureDescriptors, texturePixels)
+        + sampleEnvironment(float3(0.0f, 0.0f, -1.0f), constants, textureDescriptors, texturePixels)
+    ) * 0.25f;
+    float upWeight = smoothstep(-0.15f, 0.85f, normal.y);
+    float downWeight = smoothstep(0.15f, -0.85f, normal.y);
+    float sideWeight = max(0.0f, 1.0f - upWeight - downWeight);
+    return up * upWeight + down * downWeight + side * sideWeight;
+}
+
+static float3 interactiveHemisphereDirection(float3 direction, float3 normal) {
+    float nDotD = dot(normal, direction);
+    if (nDotD < 0.0f) {
+        direction = direction - normal * (2.0f * nDotD);
+    }
+    return normalize(direction);
+}
+
+static float3 sampleInteractiveSpecularEnvironment(
+    float3 reflectionDirection,
+    float3 normal,
+    float roughness,
+    constant GPURenderConstants &constants,
+    constant GPUTextureDescriptor *textureDescriptors,
+    constant float4 *texturePixels
+) {
+    reflectionDirection = interactiveHemisphereDirection(normalize(reflectionDirection), normal);
+    roughness = clamp(roughness, 0.0f, 1.0f);
+    float spread = roughness * roughness;
+    float3 helper = fabs(reflectionDirection.y) < 0.999f
+        ? float3(0.0f, 1.0f, 0.0f)
+        : float3(1.0f, 0.0f, 0.0f);
+    float3 tangent = normalize(cross(helper, reflectionDirection));
+    float3 bitangent = cross(reflectionDirection, tangent);
+
+    float3 center = sampleEnvironment(reflectionDirection, constants, textureDescriptors, texturePixels);
+    float3 cone = center * 0.42f;
+    cone += sampleEnvironment(
+        interactiveHemisphereDirection(reflectionDirection + tangent * spread * 0.95f + normal * spread * 0.18f, normal),
+        constants,
+        textureDescriptors,
+        texturePixels
+    ) * 0.145f;
+    cone += sampleEnvironment(
+        interactiveHemisphereDirection(reflectionDirection - tangent * spread * 0.95f + normal * spread * 0.18f, normal),
+        constants,
+        textureDescriptors,
+        texturePixels
+    ) * 0.145f;
+    cone += sampleEnvironment(
+        interactiveHemisphereDirection(reflectionDirection + bitangent * spread * 0.95f + normal * spread * 0.18f, normal),
+        constants,
+        textureDescriptors,
+        texturePixels
+    ) * 0.145f;
+    cone += sampleEnvironment(
+        interactiveHemisphereDirection(reflectionDirection - bitangent * spread * 0.95f + normal * spread * 0.18f, normal),
+        constants,
+        textureDescriptors,
+        texturePixels
+    ) * 0.145f;
+
+    float3 diffuseFallback = sampleInteractiveDiffuseEnvironment(normal, constants, textureDescriptors, texturePixels);
+    float roughDiffuseMix = smoothstep(0.62f, 0.95f, roughness);
+    return mix(cone, diffuseFallback, roughDiffuseMix);
+}
+
 static uint environmentPixelIndexForDirection(
     float3 direction,
     constant GPURenderConstants &constants,
@@ -3633,7 +4111,6 @@ static bool tracePrimaryAOV(
     constant uint *volumeBrickGridIndices,
     device atomic_uint *sdfCounters,
     constant GPUMaterial *materials,
-    constant GPUMaterialSemanticDescriptor *materialSemantics,
     constant GPUTextureDescriptor *textureDescriptors,
     constant float4 *texturePixels,
     thread Hit &primaryHit,
@@ -3666,7 +4143,7 @@ static bool tracePrimaryAOV(
             return false;
         }
 
-        GPUMaterial material = materialForHit(hit, materials, materialSemantics, constants.materialCount);
+        GPUMaterial material = materialForHit(hit, materials, constants.materialCount);
         hit = applyNormalMap(hit, material, textureDescriptors, texturePixels, ray.direction);
         material = applyBaseColorTexture(material, hit, textureDescriptors, texturePixels);
         if (material.baseColor.w <= 0.001f) {
@@ -3722,7 +4199,6 @@ static bool shadowOccluded(
     constant GPURenderConstants &constants,
     constant GPUTriangle *triangles,
     constant GPUMaterial *materials,
-    constant GPUMaterialSemanticDescriptor *materialSemantics,
     constant GPUAccelerationNode *nodes,
     constant uint *primitiveIndices,
     constant GPUVolumeDescriptor *volumes,
@@ -3769,7 +4245,7 @@ static bool shadowOccluded(
             return false;
         }
 
-        GPUMaterial shadowMaterial = materialForHit(shadowHit, materials, materialSemantics, constants.materialCount);
+        GPUMaterial shadowMaterial = materialForHit(shadowHit, materials, constants.materialCount);
         if (shadowMaterial.baseColor.w <= 0.001f) {
             traveled += shadowHit.t;
             shadowRay.origin = shadowHit.position + shadowRay.direction * 0.001f;
@@ -3795,6 +4271,92 @@ static bool shadowOccluded(
     }
 
     return true;
+}
+
+static float interactiveContactAmbientOcclusion(
+    Hit surfaceHit,
+    GPUMaterial surfaceMaterial,
+    float3 normal,
+    constant GPURenderConstants &constants,
+    constant GPUTriangle *triangles,
+    constant GPUMaterial *materials,
+    constant GPUAccelerationNode *nodes,
+    constant uint *primitiveIndices,
+    constant GPUVolumeDescriptor *volumes,
+    constant GPUVolumeSample *volumeSamples,
+    constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors,
+    constant float4 *volumeAttributeSamples,
+    constant GPUVolumeBrickDescriptor *volumeBricks,
+    constant GPUVolumeBrickSample *volumeBrickSamples,
+    constant GPUVolumeMaterialFieldSample *volumeBrickMaterialFieldSamples,
+    constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors,
+    constant float4 *volumeBrickAttributeSamples,
+    constant GPUAccelerationNode *volumeBrickBVHNodes,
+    constant uint *volumeBrickBVHIndices,
+    constant GPUVolumeBrickGrid *volumeBrickGrids,
+    constant uint *volumeBrickGridIndices,
+    device atomic_uint *sdfCounters
+) {
+    TangentFrame frame = makeTangentFrame(normal, surfaceHit.tangent, surfaceHit.bitangent);
+    constexpr uint sampleCount = 4u;
+    constexpr float radius = 0.34f;
+    constexpr float3 localDirections[sampleCount] = {
+        float3(0.000f, 0.000f, 1.000f),
+        float3(0.780f, 0.180f, 0.600f),
+        float3(-0.420f, 0.720f, 0.552f),
+        float3(-0.620f, -0.520f, 0.587f)
+    };
+
+    float occlusion = 0.0f;
+    for (uint sampleIndex = 0u; sampleIndex < sampleCount; ++sampleIndex) {
+        float3 localDirection = normalize(localDirections[sampleIndex]);
+        float3 direction = normalize(
+            localDirection.x * frame.tangent
+                + localDirection.y * frame.bitangent
+                + localDirection.z * normal
+        );
+
+        Ray ray;
+        ray.origin = surfaceHit.position + normal * 0.003f;
+        ray.direction = direction;
+
+        addSDFTraversalCounter(sdfCounters, constants, sdfCounterShadowSceneQueries);
+        Hit occluder = intersectScene(
+            ray,
+            constants,
+            triangles,
+            nodes,
+            primitiveIndices,
+            volumes,
+            volumeSamples,
+            volumeAttributeDescriptors,
+            volumeAttributeSamples,
+            volumeBricks,
+            volumeBrickSamples,
+            volumeBrickMaterialFieldSamples,
+            volumeBrickAttributeDescriptors,
+            volumeBrickAttributeSamples,
+            volumeBrickBVHNodes,
+            volumeBrickBVHIndices,
+            volumeBrickGrids,
+            volumeBrickGridIndices,
+            sdfCounters
+        );
+        if (!occluder.hit || occluder.t >= radius) {
+            continue;
+        }
+
+        GPUMaterial occluderMaterial = materialForHit(occluder, materials, constants.materialCount);
+        float occluderOpacity = clamp(occluderMaterial.baseColor.w, 0.0f, 1.0f);
+        float occluderTransmission = materialTransmission(occluderMaterial);
+        float blocker = occluderOpacity * (1.0f - occluderTransmission * 0.72f);
+        float proximity = 1.0f - smoothstep(0.0f, radius, occluder.t);
+        occlusion += blocker * proximity;
+    }
+
+    float transmission = materialTransmission(surfaceMaterial);
+    float strength = mix(0.72f, 0.36f, transmission);
+    return 1.0f - clamp((occlusion / (float)sampleCount) * strength, 0.0f, 0.72f);
 }
 
 static bool shadowOccludedHardware(
@@ -3849,7 +4411,6 @@ static float3 sampleDirectLighting(
     constant GPURenderConstants &constants,
     constant GPUTriangle *triangles,
     constant GPUMaterial *materials,
-    constant GPUMaterialSemanticDescriptor *materialSemantics,
     constant GPUAccelerationNode *nodes,
     constant uint *primitiveIndices,
     constant GPUVolumeDescriptor *volumes,
@@ -3917,9 +4478,7 @@ static float3 sampleDirectLighting(
                         distanceToLight - 0.002f,
                         constants,
                         triangles,
-                        materials,
-                        materialSemantics,
-                        nodes,
+                        materials,                        nodes,
                         primitiveIndices,
                         volumes,
                         volumeSamples,
@@ -3984,9 +4543,7 @@ static float3 sampleDirectLighting(
                 1.0e20f,
                 constants,
                 triangles,
-                materials,
-                materialSemantics,
-                nodes,
+                materials,                nodes,
                 primitiveIndices,
                 volumes,
                 volumeSamples,
@@ -4191,17 +4748,18 @@ kernel void flatPreviewKernel(
     constant GPUVolumeSample *volumeSamples [[buffer(15)]],
     constant GPUVolumeBrickDescriptor *volumeBricks [[buffer(16)]],
     constant GPUVolumeBrickSample *volumeBrickSamples [[buffer(17)]],
-    constant GPUMaterialSemanticDescriptor *materialSemantics [[buffer(18)]],
-    constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors [[buffer(19)]],
-    constant float4 *volumeAttributeSamples [[buffer(20)]],
-    constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors [[buffer(21)]],
-    constant float4 *volumeBrickAttributeSamples [[buffer(22)]],
-    constant GPUAccelerationNode *volumeBrickBVHNodes [[buffer(23)]],
-    constant uint *volumeBrickBVHIndices [[buffer(24)]],
-    constant GPUVolumeBrickGrid *volumeBrickGrids [[buffer(25)]],
-    constant uint *volumeBrickGridIndices [[buffer(26)]],
-    constant GPUVolumeMaterialFieldSample *volumeBrickMaterialFieldSamples [[buffer(27)]],
-    device atomic_uint *sdfCounters [[buffer(28)]],
+    constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors [[buffer(18)]],
+    constant float4 *volumeAttributeSamples [[buffer(19)]],
+    constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors [[buffer(20)]],
+    constant float4 *volumeBrickAttributeSamples [[buffer(21)]],
+    constant GPUAccelerationNode *volumeBrickBVHNodes [[buffer(22)]],
+    constant uint *volumeBrickBVHIndices [[buffer(23)]],
+    constant GPUVolumeBrickGrid *volumeBrickGrids [[buffer(24)]],
+    constant uint *volumeBrickGridIndices [[buffer(25)]],
+    constant GPUVolumeMaterialFieldSample *volumeBrickMaterialFieldSamples [[buffer(26)]],
+    device atomic_uint *sdfCounters [[buffer(27)]],
+    constant GPUMaterialProgramDescriptor *materialProgramDescriptors [[buffer(28)]],
+    constant GPUMaterialProgramOperation *materialProgramOperations [[buffer(29)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     (void)lights;
@@ -4265,7 +4823,15 @@ kernel void flatPreviewKernel(
         return;
     }
 
-    GPUMaterial material = materialForHit(hit, materials, materialSemantics, constants.materialCount);
+    GPUMaterial material = materialForHit(
+        hit,
+        materials,
+        constants.materialCount,
+        materialProgramDescriptors,
+        materialProgramOperations,
+        constants.materialProgramCount,
+        constants.materialProgramOperationCount
+    );
     hit = applyNormalMap(hit, material, textureDescriptors, texturePixels, ray.direction);
     material = applyBaseColorTexture(material, hit, textureDescriptors, texturePixels);
 
@@ -4324,17 +4890,18 @@ kernel void interactiveMaterialKernel(
     constant GPUVolumeSample *volumeSamples [[buffer(15)]],
     constant GPUVolumeBrickDescriptor *volumeBricks [[buffer(16)]],
     constant GPUVolumeBrickSample *volumeBrickSamples [[buffer(17)]],
-    constant GPUMaterialSemanticDescriptor *materialSemantics [[buffer(18)]],
-    constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors [[buffer(19)]],
-    constant float4 *volumeAttributeSamples [[buffer(20)]],
-    constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors [[buffer(21)]],
-    constant float4 *volumeBrickAttributeSamples [[buffer(22)]],
-    constant GPUAccelerationNode *volumeBrickBVHNodes [[buffer(23)]],
-    constant uint *volumeBrickBVHIndices [[buffer(24)]],
-    constant GPUVolumeBrickGrid *volumeBrickGrids [[buffer(25)]],
-    constant uint *volumeBrickGridIndices [[buffer(26)]],
-    constant GPUVolumeMaterialFieldSample *volumeBrickMaterialFieldSamples [[buffer(27)]],
-    device atomic_uint *sdfCounters [[buffer(28)]],
+    constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors [[buffer(18)]],
+    constant float4 *volumeAttributeSamples [[buffer(19)]],
+    constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors [[buffer(20)]],
+    constant float4 *volumeBrickAttributeSamples [[buffer(21)]],
+    constant GPUAccelerationNode *volumeBrickBVHNodes [[buffer(22)]],
+    constant uint *volumeBrickBVHIndices [[buffer(23)]],
+    constant GPUVolumeBrickGrid *volumeBrickGrids [[buffer(24)]],
+    constant uint *volumeBrickGridIndices [[buffer(25)]],
+    constant GPUVolumeMaterialFieldSample *volumeBrickMaterialFieldSamples [[buffer(26)]],
+    device atomic_uint *sdfCounters [[buffer(27)]],
+    constant GPUMaterialProgramDescriptor *materialProgramDescriptors [[buffer(28)]],
+    constant GPUMaterialProgramOperation *materialProgramOperations [[buffer(29)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     (void)environmentSamples;
@@ -4397,7 +4964,15 @@ kernel void interactiveMaterialKernel(
         return;
     }
 
-    GPUMaterial material = materialForHit(hit, materials, materialSemantics, constants.materialCount);
+    GPUMaterial material = materialForHit(
+        hit,
+        materials,
+        constants.materialCount,
+        materialProgramDescriptors,
+        materialProgramOperations,
+        constants.materialProgramCount,
+        constants.materialProgramOperationCount
+    );
     hit = applyNormalMap(hit, material, textureDescriptors, texturePixels, ray.direction);
     material = applyBaseColorTexture(material, hit, textureDescriptors, texturePixels);
 
@@ -4443,9 +5018,7 @@ kernel void interactiveMaterialKernel(
             distanceToLight - 0.002f,
             constants,
             triangles,
-            materials,
-            materialSemantics,
-            nodes,
+            materials,            nodes,
             primitiveIndices,
             volumes,
             volumeSamples,
@@ -4474,36 +5047,97 @@ kernel void interactiveMaterialKernel(
             viewDirection,
             lightDirection
         );
+        float clearcoatGloss = materialClearcoat(material) * pow(1.0f - materialClearcoatRoughness(material), 2.0f);
+        float directGlossWeight = clamp(
+            metallic
+                + clearcoatGloss
+                + (1.0f - metallic) * pow(1.0f - roughness, 4.0f) * clamp(material.parameters2.x, 0.0f, 1.0f),
+            0.0f,
+            1.0f
+        );
+        float3 directF0 = materialF0(material);
+        float3 diffuseOnly = (1.0f - metallic)
+            * baseColor
+            * max(float3(0.0f), float3(1.0f) - directF0)
+            * 0.31830988618f;
+        brdf = mix(diffuseOnly, brdf, directGlossWeight);
         float geometryTerm = cosSurface * cosLight * light.area / distanceSquared;
         color += brdf * emission * geometryTerm * shadowTransmittance;
     }
 
-    float3 environmentDiffuse = sampleEnvironment(normal, constants, textureDescriptors, texturePixels);
+    float3 environmentDiffuse = sampleInteractiveDiffuseEnvironment(normal, constants, textureDescriptors, texturePixels);
     float3 reflectionDirection = normalize(reflect(-viewDirection, normal));
-    float3 environmentReflection = sampleEnvironment(reflectionDirection, constants, textureDescriptors, texturePixels);
+    float3 baseEnvironmentReflection = sampleInteractiveSpecularEnvironment(
+        reflectionDirection,
+        normal,
+        roughness,
+        constants,
+        textureDescriptors,
+        texturePixels
+    );
+    float clearcoatRoughness = materialClearcoatRoughness(material);
+    float3 clearcoatEnvironmentReflection = sampleInteractiveSpecularEnvironment(
+        reflectionDirection,
+        normal,
+        clearcoatRoughness,
+        constants,
+        textureDescriptors,
+        texturePixels
+    );
     float nDotV = max(dot(normal, viewDirection), 0.0f);
     float3 fresnel = fresnelSchlickThinFilm(nDotV, materialF0(material), material);
-    float ambientOcclusion = 0.58f + 0.42f * clamp(normal.y * 0.5f + 0.5f, 0.0f, 1.0f);
+    float glossyWeight = pow(1.0f - roughness, 4.0f);
+    float metalReflectionWeight = metallic * pow(1.0f - roughness, 2.0f);
+    float clearcoatReflectionWeight = materialClearcoat(material) * pow(1.0f - clearcoatRoughness, 3.0f);
+    float dielectricReflectionWeight = (1.0f - metallic) * glossyWeight * clamp(material.parameters2.x, 0.0f, 1.0f);
+    float3 roughFresnel = mix(fresnel, materialF0(material), smoothstep(0.45f, 0.95f, roughness));
+    float3 clearcoatFresnel = fresnelSchlickThinFilm(nDotV, materialClearcoatF0Color(material), material);
+    float horizonOcclusion = 0.58f + 0.42f * clamp(normal.y * 0.5f + 0.5f, 0.0f, 1.0f);
+    float contactOcclusion = interactiveContactAmbientOcclusion(
+        hit,
+        material,
+        normal,
+        constants,
+        triangles,
+        materials,        nodes,
+        primitiveIndices,
+        volumes,
+        volumeSamples,
+        volumeAttributeDescriptors,
+        volumeAttributeSamples,
+        volumeBricks,
+        volumeBrickSamples,
+        volumeBrickMaterialFieldSamples,
+        volumeBrickAttributeDescriptors,
+        volumeBrickAttributeSamples,
+        volumeBrickBVHNodes,
+        volumeBrickBVHIndices,
+        volumeBrickGrids,
+        volumeBrickGridIndices,
+        sdfCounters
+    );
+    float ambientOcclusion = horizonOcclusion * contactOcclusion;
     float diffuseStrength = 0.58f * (1.0f - metallic) * ambientOcclusion;
-    float reflectionStrength = mix(0.24f, 1.08f, metallic) * (1.0f - roughness * 0.68f);
+    float baseReflectionStrength = metalReflectionWeight * 1.05f + dielectricReflectionWeight * 0.32f;
     color += baseColor * environmentDiffuse * diffuseStrength;
-    color += environmentReflection * fresnel * reflectionStrength;
+    color += baseEnvironmentReflection * roughFresnel * baseReflectionStrength;
+    color += clearcoatEnvironmentReflection * clearcoatFresnel * clearcoatReflectionWeight * 0.42f;
 
     float3 keyDirection = normalize(float3(-0.32f, 0.78f, 0.52f));
     float keyAmount = max(dot(normal, keyDirection), 0.0f);
-    color += baseColor * (1.0f - metallic) * keyAmount * 0.16f;
+    color += baseColor * (1.0f - metallic) * keyAmount * 0.16f * contactOcclusion;
 
     float subsurface = materialSubsurface(material);
     if (subsurface > 0.0f) {
         float wrap = pow(1.0f - nDotV, 2.0f);
-        color += materialSubsurfaceColor(material) * baseColor * environmentDiffuse * subsurface * (0.12f + 0.22f * wrap);
+        color += materialSubsurfaceColor(material) * baseColor * environmentDiffuse * subsurface * (0.12f + 0.22f * wrap) * contactOcclusion;
     }
 
     float transmission = materialTransmission(material);
     if (transmission > 0.0f) {
         float3 transmitted = sampleEnvironment(ray.direction, constants, textureDescriptors, texturePixels);
         color = mix(color, transmitted * materialTransmissionTint(material, 0.65f), transmission * 0.55f);
-        color += environmentReflection * fresnel * transmission * 0.35f;
+        color += baseEnvironmentReflection * fresnel * transmission * 0.35f;
     }
 
     color = clamp(color, float3(0.0f), float3(max(constants.sampleRadianceClamp, 1.0f)));
@@ -4553,17 +5187,18 @@ kernel void pathTraceKernel(
     constant GPUVolumeSample *volumeSamples [[buffer(15)]],
     constant GPUVolumeBrickDescriptor *volumeBricks [[buffer(16)]],
     constant GPUVolumeBrickSample *volumeBrickSamples [[buffer(17)]],
-    constant GPUMaterialSemanticDescriptor *materialSemantics [[buffer(18)]],
-    constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors [[buffer(19)]],
-    constant float4 *volumeAttributeSamples [[buffer(20)]],
-    constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors [[buffer(21)]],
-    constant float4 *volumeBrickAttributeSamples [[buffer(22)]],
-    constant GPUAccelerationNode *volumeBrickBVHNodes [[buffer(23)]],
-    constant uint *volumeBrickBVHIndices [[buffer(24)]],
-    constant GPUVolumeBrickGrid *volumeBrickGrids [[buffer(25)]],
-    constant uint *volumeBrickGridIndices [[buffer(26)]],
-    constant GPUVolumeMaterialFieldSample *volumeBrickMaterialFieldSamples [[buffer(27)]],
-    device atomic_uint *sdfCounters [[buffer(28)]],
+    constant GPUVolumeAttributeDescriptor *volumeAttributeDescriptors [[buffer(18)]],
+    constant float4 *volumeAttributeSamples [[buffer(19)]],
+    constant GPUVolumeAttributeDescriptor *volumeBrickAttributeDescriptors [[buffer(20)]],
+    constant float4 *volumeBrickAttributeSamples [[buffer(21)]],
+    constant GPUAccelerationNode *volumeBrickBVHNodes [[buffer(22)]],
+    constant uint *volumeBrickBVHIndices [[buffer(23)]],
+    constant GPUVolumeBrickGrid *volumeBrickGrids [[buffer(24)]],
+    constant uint *volumeBrickGridIndices [[buffer(25)]],
+    constant GPUVolumeMaterialFieldSample *volumeBrickMaterialFieldSamples [[buffer(26)]],
+    device atomic_uint *sdfCounters [[buffer(27)]],
+    constant GPUMaterialProgramDescriptor *materialProgramDescriptors [[buffer(28)]],
+    constant GPUMaterialProgramOperation *materialProgramOperations [[buffer(29)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     if (gid.x >= constants.tileWidth || gid.y >= constants.tileHeight) {
@@ -4669,7 +5304,15 @@ kernel void pathTraceKernel(
             break;
         }
 
-        GPUMaterial material = materialForHit(hit, materials, materialSemantics, constants.materialCount);
+        GPUMaterial material = materialForHit(
+            hit,
+            materials,
+            constants.materialCount,
+            materialProgramDescriptors,
+            materialProgramOperations,
+            constants.materialProgramCount,
+            constants.materialProgramOperationCount
+        );
         hit = applyNormalMap(hit, material, textureDescriptors, texturePixels, ray.direction);
         material = applyBaseColorTexture(material, hit, textureDescriptors, texturePixels);
         if (material.baseColor.w <= 0.001f) {
@@ -4754,9 +5397,7 @@ kernel void pathTraceKernel(
             -ray.direction,
             constants,
             triangles,
-            materials,
-            materialSemantics,
-            nodes,
+            materials,            nodes,
             primitiveIndices,
             volumes,
             volumeSamples,
@@ -4908,9 +5549,7 @@ kernel void pathTraceKernel(
             volumeBrickGrids,
             volumeBrickGridIndices,
             sdfCounters,
-            materials,
-            materialSemantics,
-            textureDescriptors,
+            materials,            textureDescriptors,
             texturePixels,
             aovHit,
             aovMaterial

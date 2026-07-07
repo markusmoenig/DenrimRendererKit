@@ -236,28 +236,26 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(scene.materials[3].emissionStrength, 8, accuracy: 0.0001)
     }
 
-    func testSceneScriptParsesSemanticMaterials() throws {
+    func testSceneScriptParsesPlainMaterials() throws {
         let source = """
-        material mossy semantic moss youngColor 0.9 0.95 0.12 matureColor 0.04 0.34 0.04 dryColor 0.52 0.36 0.12 age 0.1 wetness 0.2
-        material clear semantic crystal color 0.7 0.9 1 clarity 0.85 polish 0.9
+        material mossy 0.12 0.38 0.12 roughness 0.86 specular 0.22 sheen 0.28 subsurface 0.18
+        material clear 0.7 0.9 1 roughness 0.05 specular 1 transmission 0.85 opacity 0.78
         """
 
         let scene = try SceneScript.parse(source)
 
-        XCTAssertEqual(scene.materialSources.count, 2)
-        XCTAssertEqual(scene.materialSources[0].archetype.rawValue, "moss")
-        XCTAssertEqual(scene.materialSources[0].style.primaryColor.x, 0.9, accuracy: 0.0001)
-        XCTAssertEqual(scene.materialSources[0].style.secondaryColor.y, 0.34, accuracy: 0.0001)
-        XCTAssertEqual(scene.materialSources[0].attributes.age, 0.1, accuracy: 0.0001)
-        XCTAssertEqual(scene.materialSources[1].archetype.rawValue, "crystal")
-        XCTAssertEqual(scene.materialSources[1].style.transmission, 0.85, accuracy: 0.0001)
-        XCTAssertEqual(scene.materialSources[1].attributes.polish, 0.9, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials.count, 2)
+        XCTAssertEqual(scene.materials[0].baseColor.x, 0.12, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[0].roughness, 0.86, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[0].subsurface, 0.18, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[1].transmission, 0.85, accuracy: 0.0001)
+        XCTAssertEqual(scene.materials[1].opacity, 0.78, accuracy: 0.0001)
     }
 
-    func testSceneScriptBuildsDenseSDFVolumeWithSemanticAttributes() throws {
+    func testSceneScriptBuildsDenseSDFVolumeWithCustomAttributes() throws {
         let source = """
-        material mossy semantic moss youngColor 0.9 0.95 0.12 matureColor 0.04 0.34 0.04 dryColor 0.52 0.36 0.12
-        material clear semantic crystal color 0.7 0.9 1 clarity 0.75 polish 0.8
+        material mossy 0.12 0.38 0.12 roughness 0.86
+        material clear 0.7 0.9 1 roughness 0.05 transmission 0.75 opacity 0.8
         sdf dense material mossy resolution 18 attributes growthAge wetness mossAmount cavity boundsMin -1 -1 -1 boundsMax 1 1 1 sphere material mossy radius 0.55 attr growthAge 0.9 attr wetness 0.8 attr mossAmount 1 attr cavity 0.35 box material clear size 0.45 0.45 0.45 position 0.35 0 0 smooth 0.12 opacity 0.55 transmission 0.8
         """
 
@@ -268,14 +266,13 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(scene.sparseVolumeInstances.count, 0)
         XCTAssertEqual(compiled.volumes.count, 1)
         XCTAssertEqual(compiled.volumeAttributeDescriptors.count, 1)
-        XCTAssertEqual(compiled.volumeAttributeDescriptors[0].semantics0.x, DistanceVolumeAttributeSemantic.growthAge.rawValue)
-        XCTAssertEqual(compiled.volumeAttributeDescriptors[0].semantics0.y, DistanceVolumeAttributeSemantic.wetness.rawValue)
+        XCTAssertEqual(compiled.volumeAttributeDescriptors[0].reserved0, SIMD4<UInt32>(repeating: 0))
         XCTAssertEqual(compiled.volumeAttributeSamples.count, 18 * 18 * 18)
     }
 
-    func testSceneScriptBuildsSparseSDFVolumeWithSemanticAttributes() throws {
+    func testSceneScriptBuildsSparseSDFVolumeWithCustomAttributes() throws {
         let source = """
-        material mossy semantic moss youngColor 0.9 0.95 0.12 matureColor 0.04 0.34 0.04 dryColor 0.52 0.36 0.12
+        material mossy 0.12 0.38 0.12 roughness 0.86
         sdf sparse material mossy resolution 20 brickSize 5 narrowBand 0.3 attributes growthAge wetness mossAmount sphere material mossy radius 0.55 attr growthAge 0.9 attr wetness 0.8 attr mossAmount 1
         """
 
@@ -286,7 +283,7 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertEqual(scene.sparseVolumeInstances.count, 1)
         XCTAssertEqual(compiled.volumeBricks.count, scene.sparseVolumeInstances[0].volume.bricks.count)
         XCTAssertGreaterThan(compiled.volumeBrickAttributeSamples.count, 0)
-        XCTAssertEqual(compiled.volumeBrickAttributeDescriptors.first?.semantics0.x, DistanceVolumeAttributeSemantic.growthAge.rawValue)
+        XCTAssertEqual(compiled.volumeBrickAttributeDescriptors.first?.reserved0, SIMD4<UInt32>(repeating: 0))
     }
 
     func testSceneScriptSparseSDFSupportsSampleScale() throws {
@@ -305,15 +302,15 @@ final class SceneScriptTests: XCTestCase {
         XCTAssertGreaterThan(sparse.bricks.reduce(0) { $0 + $1.distances.count }, 0)
     }
 
-    func testSceneScriptSDFSemanticAttributesRenderAlbedoAOV() throws {
+    func testSceneScriptSDFMaterialFieldsRenderAlbedoAOV() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw XCTSkip("No Metal device available.")
         }
 
         let source = """
         camera origin(0, 0, 3) target(0, 0, 0) fov(35)
-        material mossy semantic moss youngColor 0.9 0.95 0.12 matureColor 0.04 0.34 0.04 dryColor 0.52 0.36 0.12
-        sdf dense material mossy resolution 20 attributes growthAge wetness mossAmount cavity sphere material mossy radius 0.55 attr growthAge 0.92 attr wetness 0.8 attr mossAmount 1 attr cavity 0.35
+        material base 0.75 0.75 0.75 roughness 0.8
+        sdf dense material base resolution 20 sphere material base radius 0.55 baseColor 0.12 0.42 0.08 roughness 0.86
         """
         let scene = try SceneScript.parse(source)
         let renderer = try DenrimRenderer(device: device)
@@ -334,9 +331,9 @@ final class SceneScriptTests: XCTestCase {
         })
     }
 
-    func testSceneScriptSemanticSDFExampleCompiles() throws {
+    func testSceneScriptCustomAttributeSDFExampleCompiles() throws {
         let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent("Examples/SceneScripts/SDF/semantic-sdf.denrim")
+            .appendingPathComponent("Examples/SceneScripts/SDF/custom-attribute-sdf.denrim")
 
         let scene = try SceneScript.parse(contentsOf: url)
         let compiled = try scene.compileForGPU()

@@ -22,6 +22,8 @@ extension LinearTriangleAccelerationBackend {
         gpuBrickCount: Int?,
         gpuSampleBuffer: MTLBuffer?,
         gpuSampleCount: Int?,
+        gpuMaterialFieldSampleBuffer: MTLBuffer?,
+        gpuMaterialFieldSampleCount: Int?,
         gpuAttributeDescriptorBuffer: MTLBuffer?,
         gpuAttributeDescriptorCount: Int?,
         gpuAttributeSampleBuffer: MTLBuffer?,
@@ -197,6 +199,8 @@ extension LinearTriangleAccelerationBackend {
         var gpuBrickCount: Int?
         var gpuSampleBuffer: MTLBuffer?
         var gpuSampleCount: Int?
+        var gpuMaterialFieldSampleBuffer: MTLBuffer?
+        var gpuMaterialFieldSampleCount: Int?
         var gpuAttributeDescriptorBuffer: MTLBuffer?
         var gpuAttributeDescriptorCount: Int?
         var gpuAttributeSampleBuffer: MTLBuffer?
@@ -215,6 +219,13 @@ extension LinearTriangleAccelerationBackend {
             }
             gpuSampleBuffer = resource.sampleBuffer
             gpuSampleCount = resource.sampleCount
+            if let materialFieldSampleBuffer = resource.materialFieldSampleBuffer {
+                guard materialFieldSampleBuffer.device === resource.device else {
+                    throw DenrimRendererError.invalidScene("GPU sparse distance field material-field sample buffer belongs to a different Metal device.")
+                }
+                gpuMaterialFieldSampleBuffer = materialFieldSampleBuffer
+                gpuMaterialFieldSampleCount = resource.materialFieldSampleCount
+            }
             if let attributeSampleBuffer = resource.attributeSampleBuffer {
                 guard attributeSampleBuffer.device === resource.device else {
                     throw DenrimRendererError.invalidScene("GPU sparse distance field attribute sample buffer belongs to a different Metal device.")
@@ -274,6 +285,8 @@ extension LinearTriangleAccelerationBackend {
             gpuBrickCount,
             gpuSampleBuffer,
             gpuSampleCount,
+            gpuMaterialFieldSampleBuffer,
+            gpuMaterialFieldSampleCount,
             gpuAttributeDescriptorBuffer,
             gpuAttributeDescriptorCount,
             gpuAttributeSampleBuffer,

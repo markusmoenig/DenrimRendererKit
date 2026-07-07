@@ -216,7 +216,7 @@ final class RenderSessionTests: XCTestCase {
                 projection: .orthographic(verticalScale: 2.4)
             )
         )
-        let material = scene.addMaterial(SemanticMaterial.moss())
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.12, 0.38, 0.12), roughness: 0.86, specular: 0.2))
         let initialBundle = RenderFieldBundle(
             dense: DistanceVolume.sphere(resolution: 12, radius: 0.5),
             fallbackMaterial: material
@@ -259,7 +259,7 @@ final class RenderSessionTests: XCTestCase {
                 projection: .orthographic(verticalScale: 2.4)
             )
         )
-        let material = scene.addMaterial(SemanticMaterial.moss())
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.12, 0.38, 0.12), roughness: 0.86, specular: 0.2))
         scene.add(fieldBundle: RenderFieldBundle(
             dense: DistanceVolume.sphere(resolution: 12, radius: 0.5),
             fallbackMaterial: material
@@ -304,7 +304,7 @@ final class RenderSessionTests: XCTestCase {
                 projection: .orthographic(verticalScale: 2.4)
             )
         )
-        let material = scene.addMaterial(SemanticMaterial.moss())
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.12, 0.38, 0.12), roughness: 0.86, specular: 0.2))
         let fieldID = scene.add(fieldBundle: RenderFieldBundle(
             dense: DistanceVolume.sphere(resolution: 12, radius: 0.5),
             fallbackMaterial: material
@@ -375,7 +375,7 @@ final class RenderSessionTests: XCTestCase {
         })
     }
 
-    func testSemanticVolumeAttributesDriveAlbedoAOV() throws {
+    func testVolumeMaterialFieldsDriveAlbedoAOV() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw XCTSkip("No Metal device available.")
         }
@@ -387,33 +387,16 @@ final class RenderSessionTests: XCTestCase {
                 projection: .orthographic(verticalScale: 2.4)
             )
         )
-        let moss = scene.addMaterial(SemanticMaterial.moss(
-            youngColor: SIMD3<Float>(0.9, 0.95, 0.12),
-            matureColor: SIMD3<Float>(0.04, 0.34, 0.04),
-            dryColor: SIMD3<Float>(0.52, 0.36, 0.12),
-            age: 0,
-            wetness: 0
-        ))
-        let layout = DistanceVolumeAttributeLayout(channels: [
-            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
-            DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness),
-            DistanceVolumeAttributeChannel(name: "mossAmount", semantic: .mossAmount),
-            DistanceVolumeAttributeChannel(name: "cavity", semantic: .cavity)
-        ])
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.75, 0.75, 0.75)))
+        let fields = DistanceVolumeMaterialFields(baseColor: SIMD3<Float>(0.12, 0.42, 0.08), roughness: 0.86)
         let model = SDFModel(
             primitives: [
                 SDFPrimitive(
                     shape: .sphere(radius: 0.55),
-                    material: moss,
-                    attributes: DistanceVolumeAttributeValues([
-                        "growthAge": 0.92,
-                        "wetness": 0.8,
-                        "mossAmount": 1,
-                        "cavity": 0.35
-                    ])
+                    material: material,
+                    materialFields: fields
                 )
-            ],
-            attributeLayout: layout
+            ]
         )
         let volume = try DistanceVolumeBuilder.build(
             model: model,
@@ -423,7 +406,7 @@ final class RenderSessionTests: XCTestCase {
                 boundsMax: SIMD3<Float>(1, 1, 1)
             )
         )
-        scene.add(volume: volume, material: moss)
+        scene.add(volume: volume, material: material)
 
         let renderer = try DenrimRenderer(device: device)
         let session = try renderer.makeSession(
@@ -443,7 +426,7 @@ final class RenderSessionTests: XCTestCase {
         })
     }
 
-    func testSemanticSparseVolumeAttributesDriveAlbedoAOV() throws {
+    func testSparseVolumeMaterialFieldsDriveAlbedoAOV() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw XCTSkip("No Metal device available.")
         }
@@ -455,39 +438,22 @@ final class RenderSessionTests: XCTestCase {
                 projection: .orthographic(verticalScale: 2.4)
             )
         )
-        let moss = scene.addMaterial(SemanticMaterial.moss(
-            youngColor: SIMD3<Float>(0.9, 0.95, 0.12),
-            matureColor: SIMD3<Float>(0.04, 0.34, 0.04),
-            dryColor: SIMD3<Float>(0.52, 0.36, 0.12),
-            age: 0,
-            wetness: 0
-        ))
-        let layout = DistanceVolumeAttributeLayout(channels: [
-            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
-            DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness),
-            DistanceVolumeAttributeChannel(name: "mossAmount", semantic: .mossAmount),
-            DistanceVolumeAttributeChannel(name: "cavity", semantic: .cavity)
-        ])
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.75, 0.75, 0.75)))
+        let fields = DistanceVolumeMaterialFields(baseColor: SIMD3<Float>(0.12, 0.42, 0.08), roughness: 0.86)
         let model = SDFModel(
             primitives: [
                 SDFPrimitive(
                     shape: .sphere(radius: 0.55),
-                    material: moss,
-                    attributes: DistanceVolumeAttributeValues([
-                        "growthAge": 0.92,
-                        "wetness": 0.8,
-                        "mossAmount": 1,
-                        "cavity": 0.35
-                    ])
+                    material: material,
+                    materialFields: fields
                 )
-            ],
-            attributeLayout: layout
+            ]
         )
         let sparse = try DistanceVolumeBuilder.buildSparse(
             model: model,
             settings: SparseDistanceVolumeBuildSettings(resolution: 20, brickSize: 5, narrowBand: 0.3)
         )
-        scene.add(sparseVolume: sparse, material: moss)
+        scene.add(sparseVolume: sparse, material: material)
 
         let renderer = try DenrimRenderer(device: device)
         let session = try renderer.makeSession(
@@ -507,30 +473,15 @@ final class RenderSessionTests: XCTestCase {
         })
     }
 
-    func testGPUResidentProgramAttributesDriveAlbedoAOV() throws {
+    func testGPUResidentProgramCustomAttributesReachAttributeBuffer() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw XCTSkip("No Metal device available.")
         }
 
-        var scene = RenderScene(
-            camera: Camera(
-                origin: SIMD3<Float>(0, 0, 3),
-                target: SIMD3<Float>(0, 0, 0),
-                projection: .orthographic(verticalScale: 2.4)
-            )
-        )
-        let moss = scene.addMaterial(SemanticMaterial.moss(
-            youngColor: SIMD3<Float>(0.9, 0.95, 0.12),
-            matureColor: SIMD3<Float>(0.04, 0.34, 0.04),
-            dryColor: SIMD3<Float>(0.52, 0.36, 0.12),
-            age: 0,
-            wetness: 0
-        ))
+        let material = MaterialID(rawValue: 0)
         let layout = DistanceVolumeAttributeLayout(channels: [
-            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
-            DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness),
-            DistanceVolumeAttributeChannel(name: "mossAmount", semantic: .mossAmount),
-            DistanceVolumeAttributeChannel(name: "cavity", semantic: .cavity)
+            DistanceVolumeAttributeChannel(name: "growthAge"),
+            DistanceVolumeAttributeChannel(name: "wetness")
         ])
         let program = DistanceFieldProgram(
             instructions: [
@@ -538,15 +489,11 @@ final class RenderSessionTests: XCTestCase {
                 .length(.init(0), .init(0)),
                 .setFloat(.init(1), 0.55),
                 .subtractFloat(.init(2), .init(0), .init(1)),
-                .setFloat(.init(3), 0.92),
+                .setFloat(.init(3), 0.7),
                 .writeAttribute(channel: 0, value: .init(3)),
-                .setFloat(.init(4), 0.8),
+                .setFloat(.init(4), 0.25),
                 .writeAttribute(channel: 1, value: .init(4)),
-                .setFloat(.init(5), 1),
-                .writeAttribute(channel: 2, value: .init(5)),
-                .setFloat(.init(6), 0.35),
-                .writeAttribute(channel: 3, value: .init(6)),
-                .emit(distance: .init(2), material: moss)
+                .emit(distance: .init(2), material: material)
             ],
             attributeLayout: layout
         )
@@ -558,27 +505,302 @@ final class RenderSessionTests: XCTestCase {
                 graph: DistanceFieldBakeGraph(program: program),
                 resolution: 20,
                 storage: .sparseBricks(brickSize: 5, narrowBand: 0.3),
-                fallbackMaterial: moss
+                fallbackMaterial: material
             ),
             metadataMode: .directGridGPU
         )
-        scene.add(fieldBundle: result.bundle)
 
+        guard case .gpuSparse(let resource) = result.bundle.storage else {
+            return XCTFail("Expected GPU-resident sparse storage.")
+        }
+        let metadata = try XCTUnwrap(resource.metadataBuffers)
+        let attributeSampleBuffer = try XCTUnwrap(resource.attributeSampleBuffer)
+        let descriptors = metadata.attributeDescriptorBuffer.contents().bindMemory(
+            to: GPUVolumeAttributeDescriptor.self,
+            capacity: metadata.attributeDescriptorCount
+        )
+        let samples = attributeSampleBuffer.contents().bindMemory(
+            to: SIMD4<Float>.self,
+            capacity: max(resource.attributeSampleCount, 1)
+        )
+
+        var foundAttributeSample = false
+        for descriptorIndex in 0..<metadata.attributeDescriptorCount {
+            let descriptor = descriptors[descriptorIndex]
+            let offset = Int(descriptor.metadata.x)
+            let packedVectorCount = Int(descriptor.metadata.y)
+            let sampleCount = Int(descriptor.metadata.z)
+            guard packedVectorCount > 0,
+                  sampleCount > 0,
+                  offset < resource.attributeSampleCount else {
+                continue
+            }
+            XCTAssertEqual(descriptor.reserved0, SIMD4<UInt32>(repeating: 0))
+            XCTAssertEqual(samples[offset].x, 0.7, accuracy: 0.0001)
+            XCTAssertEqual(samples[offset].y, 0.25, accuracy: 0.0001)
+            foundAttributeSample = true
+            break
+        }
+        XCTAssertTrue(foundAttributeSample)
+    }
+
+    func testGPUResidentProgramMaterialFieldsReachResidentBuffer() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        let material = MaterialID(rawValue: 0)
+        let program = DistanceFieldProgram(instructions: [
+            .loadPosition(.init(0)),
+            .length(.init(0), .init(0)),
+            .setFloat(.init(1), 0.55),
+            .subtractFloat(.init(2), .init(0), .init(1)),
+            .setVector(.init(1), SIMD3<Float>(0.18, 0.42, 0.11)),
+            .writeMaterialFieldVector(.baseColor, vector: .init(1)),
+            .setFloat(.init(3), 0.73),
+            .writeMaterialField(.roughness, scalar: .init(3)),
+            .setFloat(.init(4), 0.36),
+            .writeMaterialField(.specular, scalar: .init(4)),
+            .emit(distance: .init(2), material: material)
+        ])
+
+        let renderer = try DenrimRenderer(device: device)
+        let baker = renderer.makeDistanceFieldBaker(preferredBackend: .metalCompute)
+        let result = try baker.bakeGPUResident(
+            DistanceFieldBakeRequest(
+                graph: DistanceFieldBakeGraph(program: program),
+                resolution: 20,
+                storage: .sparseBricks(brickSize: 5, narrowBand: 0.3),
+                fallbackMaterial: material
+            ),
+            metadataMode: .directGridGPU
+        )
+
+        guard case .gpuSparse(let resource) = result.bundle.storage else {
+            return XCTFail("Expected GPU-resident sparse storage.")
+        }
+        let materialFieldSampleBuffer = try XCTUnwrap(resource.materialFieldSampleBuffer)
+        XCTAssertEqual(resource.materialFieldSampleCount, resource.sampleCount)
+
+        let samples = materialFieldSampleBuffer.contents().bindMemory(
+            to: GPUVolumeMaterialFieldSample.self,
+            capacity: max(resource.materialFieldSampleCount, 1)
+        )
+
+        let expectedFlags = DistanceVolumeMaterialFields.baseColorFlag
+            | DistanceVolumeMaterialFields.roughnessFlag
+            | DistanceVolumeMaterialFields.specularFlag
+        var foundFieldSample = false
+        for sampleIndex in 0..<resource.materialFieldSampleCount {
+            let sample = samples[sampleIndex]
+            guard sample.materialFieldFlags.x == expectedFlags else {
+                continue
+            }
+            XCTAssertEqual(sample.baseColorOpacity.x, 0.18, accuracy: 0.0001)
+            XCTAssertEqual(sample.baseColorOpacity.y, 0.42, accuracy: 0.0001)
+            XCTAssertEqual(sample.baseColorOpacity.z, 0.11, accuracy: 0.0001)
+            XCTAssertEqual(sample.surface.x, 0.73, accuracy: 0.0001)
+            XCTAssertEqual(sample.surface.z, 0.36, accuracy: 0.0001)
+            foundFieldSample = true
+            break
+        }
+        XCTAssertTrue(foundFieldSample)
+    }
+
+    func testFieldBundleMaterialProgramReachesVolumeDescriptor() throws {
+        var scene = RenderScene()
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.75, 0.75, 0.75)))
+        let volume = DistanceVolume.sphere(resolution: 8, radius: 0.5)
+        let materialProgram = DistanceFieldMaterialProgram(instructions: [
+            .loadVectorInput(.init(0), .localPosition),
+            .extractY(.init(0), .init(0)),
+            .writeMask(.a, .init(0)),
+            .readMask(.a, .init(1)),
+            .writeMaterialField(.roughness, scalar: .init(1))
+        ])
+
+        scene.add(fieldBundle: RenderFieldBundle(
+            dense: volume,
+            fallbackMaterial: material,
+            materialProgram: materialProgram
+        ))
+
+        let compilation = try scene.compileForGPU()
+
+        XCTAssertEqual(compilation.volumeMaterialPrograms, [materialProgram])
+        XCTAssertEqual(compilation.volumes.first?.materialProgram.x, 0)
+    }
+
+    func testFieldBundleMaterialProgramOverridesSDFAlbedoAtHitTime() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        var scene = RenderScene(
+            camera: Camera(
+                origin: SIMD3<Float>(0, 0, 3),
+                target: SIMD3<Float>(0, 0, 0),
+                projection: .orthographic(verticalScale: 2.4)
+            )
+        )
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.75, 0.75, 0.75)))
+        let materialProgram = DistanceFieldMaterialProgram(instructions: [
+            .setVector(.init(0), SIMD3<Float>(0.12, 0.42, 0.08)),
+            .writeMaterialFieldVector(.baseColor, vector: .init(0)),
+            .setFloat(.init(0), 0.91),
+            .writeMaterialField(.roughness, scalar: .init(0))
+        ])
+        scene.add(fieldBundle: RenderFieldBundle(
+            dense: DistanceVolume.sphere(resolution: 16, radius: 0.55),
+            fallbackMaterial: material,
+            materialProgram: materialProgram
+        ))
+
+        let renderer = try DenrimRenderer(device: device)
         let session = try renderer.makeSession(
             scene: scene,
-            settings: RenderSettings(width: 20, height: 20, maxBounces: 1),
+            settings: RenderSettings(width: 20, height: 20, maxBounces: 1, quality: .preview),
             accelerationMode: .automatic
         )
 
         try session.renderNextSample()
         let albedo = try session.pixels(for: RenderOutput.albedo)
 
-        XCTAssertTrue(albedo.contains { pixel in
-            pixel.r > 0.08 && pixel.r < 0.45
-                && pixel.g > 0.18 && pixel.g < 0.55
-                && pixel.b < 0.12
-                && pixel.a > 0.9
-        })
+        let foundOverride = albedo.contains { pixel in
+            let redMatches = pixel.r > 0.08 && pixel.r < 0.2
+            let greenMatches = pixel.g > 0.34 && pixel.g < 0.5
+            let blueMatches = pixel.b > 0.04 && pixel.b < 0.14
+            return redMatches && greenMatches && blueMatches && pixel.a > 0.9
+        }
+        XCTAssertTrue(foundOverride)
+    }
+
+    func testFieldBundleMaterialProgramRunsSharedMathSetAtHitTime() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        var scene = RenderScene(
+            camera: Camera(
+                origin: SIMD3<Float>(0, 0, 3),
+                target: SIMD3<Float>(0, 0, 0),
+                projection: .orthographic(verticalScale: 2.4)
+            )
+        )
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.75, 0.75, 0.75)))
+        let materialProgram = DistanceFieldMaterialProgram(instructions: [
+            .setFloat(.init(0), -0.5),
+            .negateFloat(.init(1), .init(0)),
+            .absFloat(.init(2), .init(0)),
+            .setFloat(.init(3), 0),
+            .sinFloat(.init(4), .init(3)),
+            .cosFloat(.init(5), .init(3)),
+            .setFloat(.init(6), 0.6),
+            .minFloat(.init(7), .init(5), .init(6)),
+            .maxFloat(.init(8), .init(4), .init(3)),
+            .setFloat(.init(9), 0.42),
+            .addFloat(.init(10), .init(8), .init(9)),
+            .setFloat(.init(11), 0),
+            .setFloat(.init(12), 1),
+            .clampFloat(.init(13), .init(10), .init(11), .init(12)),
+            .mixFloat(.init(14), .init(2), .init(7), .init(3)),
+            .composeVector(.init(0), x: .init(1), y: .init(14), z: .init(13)),
+            .setVector(.init(1), SIMD3<Float>(0.1, 0.2, 0.3)),
+            .setVector(.init(2), SIMD3<Float>(0.4, 0.4, 0.12)),
+            .addVector(.init(3), .init(1), .init(2)),
+            .subtractVector(.init(4), .init(3), .init(1)),
+            .absVector(.init(5), .init(4)),
+            .setFloat(.init(15), 0.5),
+            .multiplyVectorFloat(.init(6), .init(5), .init(15)),
+            .maxVectorFloat(.init(7), .init(6), .init(9)),
+            .minVectorFloat(.init(8), .init(7), .init(12)),
+            .length(.init(16), .init(8)),
+            .boxDistance(.init(17), position: .init(8), halfExtents: .init(2), cornerRadius: .init(3)),
+            .cylinderDistance(.init(18), position: .init(8), radius: .init(15), halfHeight: .init(12)),
+            .taperedCapsuleDistance(.init(19), position: .init(8), start: .init(1), end: .init(2), startRadius: .init(15), endRadius: .init(12)),
+            .splineTubeDistance(.init(20), position: .init(8), control0: .init(1), control1: .init(2), control2: .init(3), control3: .init(4), startRadius: .init(15), endRadius: .init(12)),
+            .writeMaterialFieldVector(.baseColor, vector: .init(3))
+        ])
+        scene.add(fieldBundle: RenderFieldBundle(
+            dense: DistanceVolume.sphere(resolution: 16, radius: 0.55),
+            fallbackMaterial: material,
+            materialProgram: materialProgram
+        ))
+
+        let renderer = try DenrimRenderer(device: device)
+        let session = try renderer.makeSession(
+            scene: scene,
+            settings: RenderSettings(width: 20, height: 20, maxBounces: 1, quality: .preview),
+            accelerationMode: .automatic
+        )
+
+        try session.renderNextSample()
+        let albedo = try session.pixels(for: RenderOutput.albedo)
+
+        let foundSharedMathColor = albedo.contains { pixel in
+            let redMatches = pixel.r > 0.46 && pixel.r < 0.54
+            let greenMatches = pixel.g > 0.56 && pixel.g < 0.64
+            let blueMatches = pixel.b > 0.38 && pixel.b < 0.46
+            return redMatches && greenMatches && blueMatches && pixel.a > 0.9
+        }
+        XCTAssertTrue(foundSharedMathColor)
+    }
+
+    func testFieldBundleMaterialProgramRunsProceduralNoiseAtHitTime() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("No Metal device available.")
+        }
+
+        var scene = RenderScene(
+            camera: Camera(
+                origin: SIMD3<Float>(0, 0, 3),
+                target: SIMD3<Float>(0, 0, 0),
+                projection: .orthographic(verticalScale: 2.4)
+            )
+        )
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.75, 0.75, 0.75)))
+        let materialProgram = DistanceFieldMaterialProgram(instructions: [
+            .setVector(.init(0), SIMD3<Float>(0.37, 0.59, 0.23)),
+            .setFloat(.init(0), 3),
+            .setFloat(.init(1), 7),
+            .setFloat(.init(2), 4),
+            .setFloat(.init(3), 2),
+            .setFloat(.init(4), 0.5),
+            .valueNoise3D(.init(5), position: .init(0), scale: .init(0), seed: .init(1)),
+            .fbm3D(.init(6), position: .init(0), scale: .init(0), octaves: .init(2), lacunarity: .init(3), gain: .init(4), seed: .init(1)),
+            .cellular3D(distance: .init(7), secondDistance: .init(8), cellID: .init(9), position: .init(0), scale: .init(0), seed: .init(1)),
+            .saturate(.init(10), .init(5)),
+            .saturate(.init(11), .init(6)),
+            .saturate(.init(12), .init(9)),
+            .composeVector(.init(1), x: .init(10), y: .init(11), z: .init(12)),
+            .writeMaterialFieldVector(.baseColor, vector: .init(1))
+        ])
+        scene.add(fieldBundle: RenderFieldBundle(
+            dense: DistanceVolume.sphere(resolution: 16, radius: 0.55),
+            fallbackMaterial: material,
+            materialProgram: materialProgram
+        ))
+
+        let renderer = try DenrimRenderer(device: device)
+        let session = try renderer.makeSession(
+            scene: scene,
+            settings: RenderSettings(width: 20, height: 20, maxBounces: 1, quality: .preview),
+            accelerationMode: .automatic
+        )
+
+        try session.renderNextSample()
+        let albedo = try session.pixels(for: RenderOutput.albedo)
+
+        let foundProceduralColor = albedo.contains { pixel in
+            let insideUnitRange = pixel.r > 0.02 && pixel.r < 0.98
+                && pixel.g > 0.02 && pixel.g < 0.98
+                && pixel.b > 0.02 && pixel.b < 0.98
+            let differsFromFallback = abs(pixel.r - 0.75) > 0.05
+                || abs(pixel.g - 0.75) > 0.05
+                || abs(pixel.b - 0.75) > 0.05
+            return insideUnitRange && differsFromFallback && pixel.a > 0.9
+        }
+        XCTAssertTrue(foundProceduralColor)
     }
 
     func testSparseVolumeOnlySceneRendersThroughBrickPathOnFlatPath() throws {
@@ -1318,10 +1540,10 @@ final class RenderSessionTests: XCTestCase {
                 projection: .orthographic(verticalScale: 2.4)
             )
         )
-        let material = scene.addMaterial(SemanticMaterial.moss())
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.12, 0.38, 0.12), roughness: 0.86, specular: 0.2))
         let layout = DistanceVolumeAttributeLayout(channels: [
-            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
-            DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness)
+            DistanceVolumeAttributeChannel(name: "growthAge"),
+            DistanceVolumeAttributeChannel(name: "wetness")
         ])
         func program(growthAge: Float, wetness: Float) -> DistanceFieldProgram {
             DistanceFieldProgram(
@@ -1424,10 +1646,10 @@ final class RenderSessionTests: XCTestCase {
                 projection: .orthographic(verticalScale: 2.4)
             )
         )
-        let material = scene.addMaterial(SemanticMaterial.moss())
+        let material = scene.addMaterial(Material(baseColor: SIMD3<Float>(0.12, 0.38, 0.12), roughness: 0.86, specular: 0.2))
         let layout = DistanceVolumeAttributeLayout(channels: [
-            DistanceVolumeAttributeChannel(name: "growthAge", semantic: .growthAge),
-            DistanceVolumeAttributeChannel(name: "wetness", semantic: .wetness)
+            DistanceVolumeAttributeChannel(name: "growthAge"),
+            DistanceVolumeAttributeChannel(name: "wetness")
         ])
         func program(growthAge: Float, wetness: Float) -> DistanceFieldProgram {
             DistanceFieldProgram(
